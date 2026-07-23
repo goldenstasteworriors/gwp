@@ -9,6 +9,7 @@ from types import MethodType
 from typing import Any
 
 import accelerate
+import numpy as np
 import torch
 from accelerate import Accelerator, DistributedType, skip_first_batches
 from accelerate.utils import (
@@ -953,7 +954,9 @@ class Trainer:
                 self._outputs[key] = {'sum': 0.0, 'num': 0}
             # Some accelerator backends return a one-element ndarray from
             # Tensor.item(), which TensorBoard cannot serialize as a scalar.
-            scalar = val.detach().float().cpu().reshape(()).tolist()
+            scalar = float(
+                np.asarray(val.detach().float().cpu().numpy()).reshape(-1)[0]
+            )
             self._outputs[key]['sum'] += scalar
             self._outputs[key]['num'] += 1
         return loss
