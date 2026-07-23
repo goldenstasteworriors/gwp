@@ -57,7 +57,7 @@ config = dict(
             os.path.join(sys.prefix, "bin", "accelerate"),
         ),
         deepspeed_config=dict(deepspeed_config_file="accelerate_configs/zero2.json"),
-        until_completion=True,
+        until_completion=False,
     ),
     dataloaders=dict(
         train=dict(

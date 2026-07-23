@@ -177,25 +177,83 @@ def main() -> None:
         raise ValueError(f"Expected 41-D Inspire action, found {len(source_names)}")
 
     robot_model = load_robot_model(sonic_root)
-    shutil.copytree(source_root / "meta", output_root / "meta")
-    shutil.copytree(source_root / "videos", output_root / "videos")
+    (output_root / "meta").mkdir(parents=True)
+    (output_root / "data" / "chunk-000").mkdir(parents=True)
+    video_key = "observation.images.ego_view"
+    (output_root / "videos" / video_key / "chunk-000").mkdir(parents=True)
+
+    tasks = [
+        json.loads(line)
+        for line in (source_root / "meta" / "tasks.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    task_frame = pd.DataFrame(
+        {"task_index": [item["task_index"] for item in tasks]},
+        index=pd.Index([item["task"] for item in tasks]),
+    )
+    task_frame.to_parquet(output_root / "meta" / "tasks.parquet")
+    source_episodes = {
+        item["episode_index"]: item
+        for item in (
+            json.loads(line)
+            for line in (source_root / "meta" / "episodes.jsonl").read_text().splitlines()
+            if line.strip()
+        )
+    }
 
     total_frames = 0
+    episode_rows = []
     parquet_paths = sorted((source_root / "data").glob("*/*.parquet"))
     if not parquet_paths:
         raise FileNotFoundError(f"No episode parquet files under {source_root / 'data'}")
     for episode_idx, source in enumerate(parquet_paths):
-        relative = source.relative_to(source_root)
-        total_frames += convert_episode(
+        frame_count = convert_episode(
             source,
-            output_root / relative,
+            output_root / "data" / "chunk-000" / f"file-{episode_idx:03d}.parquet",
             robot_model,
             source_names,
         )
+        source_video = next(
+            (source_root / "videos").glob(
+                f"*/{video_key}/episode_{episode_idx:06d}.mp4"
+            )
+        )
+        shutil.copy2(
+            source_video,
+            output_root
+            / "videos"
+            / video_key
+            / "chunk-000"
+            / f"file-{episode_idx:03d}.mp4",
+        )
+        episode_info = source_episodes[episode_idx]
+        episode_rows.append(
+            {
+                "episode_index": episode_idx,
+                "tasks": np.asarray(episode_info["tasks"], dtype=object),
+                "length": frame_count,
+                "data/chunk_index": 0,
+                "data/file_index": episode_idx,
+                "dataset_from_index": total_frames,
+                "dataset_to_index": total_frames + frame_count,
+                f"videos/{video_key}/chunk_index": 0,
+                f"videos/{video_key}/file_index": episode_idx,
+                f"videos/{video_key}/from_timestamp": 0.0,
+                f"videos/{video_key}/to_timestamp": frame_count / info["fps"],
+                "meta/episodes/chunk_index": 0,
+                "meta/episodes/file_index": 0,
+            }
+        )
+        total_frames += frame_count
         if (episode_idx + 1) % 10 == 0 or episode_idx + 1 == len(parquet_paths):
             print(f"Converted {episode_idx + 1}/{len(parquet_paths)} episodes")
 
     info["robot_type"] = "sonic_g1"
+    info["codebase_version"] = "v3.0"
+    info["data_path"] = "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
+    info["video_path"] = (
+        "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+    )
     info["features"] = {
         "observation.images.ego_view": info["features"]["observation.images.ego_view"],
         "observation.state": {
@@ -215,6 +273,10 @@ def main() -> None:
         "task_index": {"dtype": "int64", "shape": [1], "names": None},
     }
     info["total_frames"] = total_frames
+    info["total_episodes"] = len(parquet_paths)
+    info["total_chunks"] = 1
+    info["total_videos"] = len(parquet_paths)
+    info["chunks_size"] = max(len(parquet_paths), 1)
     (output_root / "meta" / "info.json").write_text(
         json.dumps(info, indent=4) + "\n",
         encoding="utf-8",
@@ -228,6 +290,12 @@ def main() -> None:
     (output_root / "meta" / "modality.json").write_text(
         json.dumps(modality, indent=4) + "\n",
         encoding="utf-8",
+    )
+    episodes_dir = output_root / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pd.DataFrame(episode_rows).to_parquet(
+        episodes_dir / "file-000.parquet",
+        index=False,
     )
     print(f"Wrote {output_root}: episodes={len(parquet_paths)} frames={total_frames}")
 
