@@ -91,7 +91,10 @@ config = dict(
     models=dict(
         pretrained=wan_pretrained,
         transformer_pretrained=transformer_pretrained,
-        strict_load=True,
+        # The released checkpoint has 16-D action projectors. SONIC uses a
+        # 30-D action padded to 32-D, so load shared weights and slice-copy the
+        # pretrained projector weights into expanded 32-D projectors.
+        strict_load=False,
         transformer=dict(
             added_kv_proj_dim=None,
             attention_head_dim=128,
@@ -111,8 +114,8 @@ config = dict(
             text_dim=4096,
             action_expert_dim=1024,
             action_ffn_dim=4096,
-            in_action_channels=16,
-            out_action_channels=16,
+            in_action_channels=32,
+            out_action_channels=32,
             num_embodiments=2,
         ),
         visual_flow_shift=2.0,
