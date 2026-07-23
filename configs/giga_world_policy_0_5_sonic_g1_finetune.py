@@ -136,7 +136,9 @@ config = dict(
         checkpoint_total_limit=-1,
         checkpoint_safe_serialization=False,
         checkpoint_strict=False,
-        log_with="tensorboard",
+        # tensorboardX on the PPU image wraps scalar metrics as ndarrays and
+        # raises during add_scalar; console logging remains enabled.
+        log_with=None,
         log_interval=int(_env("GWP_LOG_INTERVAL", "20")),
         with_ema=True,
         activation_checkpointing=False,
