@@ -951,7 +951,10 @@ class Trainer:
         for key, val in outputs.items():
             if key not in self._outputs:
                 self._outputs[key] = {'sum': 0.0, 'num': 0}
-            self._outputs[key]['sum'] += val.item()
+            # Some accelerator backends return a one-element ndarray from
+            # Tensor.item(), which TensorBoard cannot serialize as a scalar.
+            scalar = val.detach().float().cpu().reshape(()).tolist()
+            self._outputs[key]['sum'] += scalar
             self._outputs[key]['num'] += 1
         return loss
 
