@@ -1,4 +1,5 @@
 import os
+import sys
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -51,6 +52,10 @@ config = dict(
     launch=dict(
         gpu_ids=gpu_ids,
         distributed_type="DEEPSPEED",
+        executable=_env(
+            "GWP_ACCELERATE_EXECUTABLE",
+            os.path.join(sys.prefix, "bin", "accelerate"),
+        ),
         deepspeed_config=dict(deepspeed_config_file="accelerate_configs/zero2.json"),
         until_completion=True,
     ),
