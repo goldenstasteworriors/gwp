@@ -76,7 +76,10 @@ config = dict(
                 model_action_dim=32,
                 delta_mask_by_embodiment_id={"0": [False] * 30},
                 norm_use_quantiles=True,
-                norm_enable_clamp=False,
+                # This small dataset has near-constant 6D rotation components;
+                # clamp quantile normalization so rare floating-point tails do
+                # not amplify to 1e7 and dominate the action loss.
+                norm_enable_clamp=True,
                 num_views=1,
                 view_keys=view_keys,
                 image_cfg=dict(
