@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--strict-align", action="store_true",
                    help="Raise instead of warning when action/state are misaligned on delta-mask dims.")
     p.add_argument("--include-metadata", action="store_true")
+    p.add_argument(
+        "--delta-mask",
+        default=None,
+        help="Comma-separated booleans (true/false or 1/0). "
+             "Use 'none' when every action dimension is already relative.",
+    )
     return p.parse_args()
 
 
@@ -166,7 +172,20 @@ def load_episode_ranges(root: Path) -> list[tuple[int, int]]:
     paths = sorted((root / "meta" / "episodes").glob("*/*.parquet"))
     paths += sorted((root / "meta" / "episodes").glob("*.parquet"))
     if not paths:
-        raise FileNotFoundError(f"No episode meta under {root / 'meta' / 'episodes'}")
+        episodes_jsonl = root / "meta" / "episodes.jsonl"
+        if not episodes_jsonl.is_file():
+            raise FileNotFoundError(
+                f"No episode parquet or episodes.jsonl under {root / 'meta'}"
+            )
+        ranges = []
+        start = 0
+        for line in episodes_jsonl.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            length = int(json.loads(line)["length"])
+            ranges.append((start, start + length))
+            start += length
+        return ranges
     ranges: list[tuple[int, int]] = []
     for path in paths:
         df = pd.read_parquet(path, columns=["dataset_from_index", "dataset_to_index"])
@@ -355,7 +374,21 @@ def main() -> None:
     dim, horizon = args.model_dim, args.action_horizon
     dtype = np.float64 if args.float64 else np.float32
 
-    mask14 = np.asarray(DEFAULT_DELTA_MASK, dtype=bool)
+    if args.delta_mask is None:
+        mask_values = list(DEFAULT_DELTA_MASK)
+    elif args.delta_mask.strip().lower() in {"", "none"}:
+        mask_values = []
+    else:
+        lookup = {"true": True, "1": True, "false": False, "0": False}
+        try:
+            mask_values = [
+                lookup[item.strip().lower()]
+                for item in args.delta_mask.split(",")
+                if item.strip()
+            ]
+        except KeyError as exc:
+            raise ValueError(f"Invalid --delta-mask value: {exc.args[0]}") from exc
+    mask14 = np.asarray(mask_values, dtype=bool)
     mask = np.zeros(dim, dtype=bool)
     mask[:min(dim, len(mask14))] = mask14[:dim]
     offsets = np.arange(horizon, dtype=np.int64)
@@ -401,7 +434,7 @@ def main() -> None:
             "action_horizon": horizon,
             "action_representation": "delta_for_true_delta_mask_dims_else_absolute_action",
             "boundary": "clamp_within_episode_repeat_last_frame (matches FastLeRobotDataset)",
-            "delta_mask": list(DEFAULT_DELTA_MASK),
+            "delta_mask": mask.tolist(),
             "num_episodes": n_episodes,
             "num_state_samples": n_states,
             "num_action_samples": n_actions,
