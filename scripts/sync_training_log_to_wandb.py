@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log", required=True, type=Path)
     parser.add_argument("--state", required=True, type=Path)
     parser.add_argument("--entity", required=True)
-    parser.add_argument("--project", required=True)
+    parser.add_argument("--project", default="gigaworld_lab")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--poll-seconds", type=float, default=5.0)
