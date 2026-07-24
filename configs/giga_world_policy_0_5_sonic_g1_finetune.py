@@ -149,7 +149,7 @@ config = dict(
         # raises during add_scalar; console logging remains enabled.
         log_with=None,
         log_interval=int(_env("GWP_LOG_INTERVAL", "20")),
-        with_ema=True,
+        with_ema=_env("GWP_WITH_EMA", "1") == "1",
         activation_checkpointing=_env("GWP_ACTIVATION_CHECKPOINTING", "0") == "1",
         activation_class_names=["WanAttention"],
     ),
