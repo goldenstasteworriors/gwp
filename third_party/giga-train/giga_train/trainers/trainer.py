@@ -64,6 +64,7 @@ class Trainer:
         checkpoint_total_limit: int = -1,
         checkpoint_keeps: list[int] | None = None,
         checkpoint_save_optimizer: bool = True,
+        checkpoint_weights_only: bool = False,
         checkpoint_safe_serialization: bool = False,
         checkpoint_strict: bool = True,
         activation_checkpointing: bool = False,
@@ -92,6 +93,7 @@ class Trainer:
             checkpoint_total_limit: Max number of checkpoints to retain; older are pruned.
             checkpoint_keeps: Specific epoch/step identifiers to keep when pruning.
             checkpoint_save_optimizer: Save optimizer states only for the latest checkpoint when False.
+            checkpoint_weights_only: Save model and EMA weights without optimizer/scheduler state.
             checkpoint_safe_serialization: Use safetensors for model weights when True.
             checkpoint_strict: Strict key matching when loading model weights.
             activation_checkpointing: Enable activation checkpoint wrapping for selected classes.
@@ -163,6 +165,7 @@ class Trainer:
         self.checkpoint_total_limit = checkpoint_total_limit
         self.checkpoint_keeps = checkpoint_keeps
         self.checkpoint_save_optimizer = checkpoint_save_optimizer
+        self.checkpoint_weights_only = checkpoint_weights_only
         self.checkpoint_safe_serialization = checkpoint_safe_serialization
         self.checkpoint_strict = checkpoint_strict
         self.activation_checkpointing = activation_checkpointing
@@ -729,7 +732,11 @@ class Trainer:
             # Release cached GPU memory before heavy save operations to reduce OOM risk.
             release_memory()
             self.accelerator.wait_for_everyone()
-            if self.distributed_type == DistributedType.DEEPSPEED:
+            if self.checkpoint_weights_only:
+                state_dict = self.accelerator.get_state_dict(self.models[0])
+                self.save_model_hook(self.models, [state_dict], output_dir)
+                self.accelerator.wait_for_everyone()
+            elif self.distributed_type == DistributedType.DEEPSPEED:
                 self.accelerator.save_state(output_dir, exclude_frozen_parameters=True)
             else:
                 self.accelerator.save_state(output_dir)

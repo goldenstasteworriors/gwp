@@ -136,7 +136,8 @@ config = dict(
         gradient_accumulation_steps=int(_env("GWP_GRAD_ACCUM_STEPS", "1")),
         mixed_precision="bf16",
         checkpoint_interval=int(_env("GWP_CHECKPOINT_INTERVAL", "5000")),
-        checkpoint_total_limit=-1,
+        checkpoint_total_limit=int(_env("GWP_CHECKPOINT_TOTAL_LIMIT", "-1")),
+        checkpoint_weights_only=_env("GWP_CHECKPOINT_WEIGHTS_ONLY", "0") == "1",
         checkpoint_safe_serialization=False,
         checkpoint_strict=False,
         # tensorboardX on the PPU image wraps scalar metrics as ndarrays and
