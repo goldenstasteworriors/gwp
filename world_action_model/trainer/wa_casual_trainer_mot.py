@@ -7,6 +7,11 @@ from diffusers.video_processor import VideoProcessor
 from einops import rearrange
 from giga_models import utils as gm_utils
 from world_action_model.models import CasualWorldActionTransformer_MoT
+from world_action_model.trainer.wa_casual_trainer_pretrain import (
+    _as_dim_mask,
+    _as_time_mask,
+    masked_mse,
+)
 from giga_train import ModuleDict, Trainer
 
 class CasualWATrainerMoT(Trainer):
@@ -81,9 +86,24 @@ class CasualWATrainerMoT(Trainer):
         visual_target = visual_noise - visual_latents
         noisy_latents = visual_noise * visual_sigma + visual_latents * (1 - visual_sigma)
 
-        action_noise = torch.randn_like(action)
-        action_target = action_noise - action
-        noisy_action = action_noise * action_sigma + action * (1 - action_sigma)
+        dim_mask = None
+        if "action_dim_mask" in batch_dict:
+            dim_mask = _as_dim_mask(
+                batch_dict["action_dim_mask"],
+                batch_size=bs,
+                seq_len=action.shape[1],
+                dim=action.shape[2],
+                device=action.device,
+            )
+
+        # Missing embodiment dimensions must not inject random flow noise into
+        # the shared action stream.  Mask both endpoints before interpolation,
+        # then use the same mask for the objective below.
+        flow_mask = 1.0 if dim_mask is None else dim_mask.to(dtype=action.dtype, device=action.device)
+        action_for_flow = action * flow_mask
+        action_noise = torch.randn_like(action) * flow_mask
+        action_target = (action_noise - action_for_flow) * flow_mask
+        noisy_action = action_noise * action_sigma + action_for_flow * (1 - action_sigma)
 
         prompt_embeds = prompt_embeds.to(self.dtype)
         if "ref_images" not in batch_dict:
@@ -157,7 +177,20 @@ class CasualWATrainerMoT(Trainer):
 
         visual_loss = ((visual_pred.float() - visual_target.float()) * first_frame_mask).pow(2).mean()
 
-        action_loss = (action_pred.float() - action_target.float()).pow(2).mean()
+        time_mask = None
+        if "action_loss_mask" in batch_dict:
+            time_mask = _as_time_mask(
+                batch_dict["action_loss_mask"],
+                batch_size=bs,
+                seq_len=action.shape[1],
+                device=action_pred.device,
+            )
+        action_loss = masked_mse(
+            action_pred.float(),
+            action_target.float(),
+            dim_mask=dim_mask,
+            time_mask=time_mask,
+        )
         return {
             "visual_loss": visual_loss,
             "action_loss": action_loss,

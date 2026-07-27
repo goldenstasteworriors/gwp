@@ -9,8 +9,8 @@ _TRAINER_EXPORTS = {
     "CasualWATrainerMoT",
     "CasualWATrainerPretrain",
 }
-_TRANSFORM_EXPORTS = {"WALeRobotTransformsPretrain", "WATransforms"}
-_DATASET_EXPORTS = {"WAMLeRobotDataset"}
+_TRANSFORM_EXPORTS = {"WAHot3DTransforms", "WALeRobotTransformsPretrain", "WATransforms"}
+_DATASET_EXPORTS = {"HOT3DWAMDataset", "WAMLeRobotDataset"}
 
 __all__ = sorted(_MODEL_EXPORTS | _TRAINER_EXPORTS | _TRANSFORM_EXPORTS | _DATASET_EXPORTS)
 
