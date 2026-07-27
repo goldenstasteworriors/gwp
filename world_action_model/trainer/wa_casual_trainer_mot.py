@@ -239,6 +239,19 @@ def load_pretrained_weights(model, pretrained_path, skip_action_expert=False, st
             checkpoint = checkpoint["state_dict"]
         state_dicts.update(checkpoint)
 
+    is_native_mot = any(".visual_expert." in key or ".action_expert." in key for key in state_dicts)
+    if not strict_load and is_native_mot and hasattr(model, "load_from_mot_pretrained_state_dict"):
+        loaded, skipped, unexpected = model.load_from_mot_pretrained_state_dict(
+            state_dicts,
+            skip_action_expert=skip_action_expert,
+        )
+        if unexpected:
+            print(f"[WARNING] Unexpected keys in MoT checkpoint: {unexpected[:20]}{'...' if len(unexpected) > 20 else ''}")
+        if skipped:
+            print(f"[WARNING] Skipped keys during MoT load: {skipped[:20]}{'...' if len(skipped) > 20 else ''}")
+        print(f"Loaded {len(loaded)} tensors from native MoT checkpoint.")
+        return model
+
     if not strict_load and hasattr(model, "load_from_wan_pretrained_state_dict"):
         loaded, skipped, unexpected, missing = model.load_from_wan_pretrained_state_dict(
             state_dicts,

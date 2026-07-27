@@ -36,14 +36,14 @@ from .action_projectors import EmbodimentSpecificActionDecoder, EmbodimentSpecif
 logger = logging.get_logger(__name__)
 
 def _copy_param_sliced(dst: torch.Tensor, src: torch.Tensor) -> None:
-    """Copy ``src`` into ``dst``, taking leading slices when ``src`` is larger."""
+    """Copy the overlapping leading slice while preserving newly added dims."""
     if dst.shape == src.shape:
         dst.copy_(src)
         return
-    if any(s < d for s, d in zip(src.shape, dst.shape)):
+    if dst.ndim != src.ndim:
         raise ValueError(f"Cannot slice-load: src shape {tuple(src.shape)} -> dst shape {tuple(dst.shape)}")
-    slc = tuple(slice(0, d) for d in dst.shape)
-    dst.copy_(src[slc])
+    overlap = tuple(slice(0, min(d, s)) for d, s in zip(dst.shape, src.shape))
+    dst[overlap].copy_(src[overlap])
 
 def _load_module_state_dict_sliced(module: nn.Module, state_dict: Dict[str, torch.Tensor], prefix: str = "", skip=False) -> Tuple[list, list]:
     """Load *state_dict* into *module*, slicing tensors when shapes differ."""
@@ -786,6 +786,41 @@ class CasualWorldActionTransformer_MoT(
         return loaded_keys, skipped_keys, unexpected_keys, [
             k for k in own_state if k not in loaded_keys and not k.startswith("blocks.")
         ]
+
+    def load_from_mot_pretrained_state_dict(
+        self,
+        state_dict: Dict[str, torch.Tensor],
+        *,
+        skip_action_expert: bool = False,
+    ) -> Tuple[list, list, list]:
+        """Load a native MoT checkpoint and retain initialization in expanded dimensions."""
+        own_state = self.state_dict()
+        loaded, skipped, unexpected = [], [], []
+        action_prefixes = (
+            "state_encoder.",
+            "action_encoder.",
+            "action_decoder.",
+            "action_condition_embedder.",
+            "action_norm_out.",
+            "action_scale_shift_table",
+        )
+        for key, src in state_dict.items():
+            if key not in own_state:
+                unexpected.append(key)
+                continue
+            if skip_action_expert and (
+                key.startswith(action_prefixes) or ".action_expert." in key
+            ):
+                skipped.append(key)
+                continue
+            try:
+                _copy_param_sliced(own_state[key], src)
+                loaded.append(key)
+            except ValueError as exc:
+                logger.warning("Skip native MoT weight %s: %s", key, exc)
+                skipped.append(key)
+        self.load_state_dict(own_state, strict=True)
+        return loaded, skipped, unexpected
 
     def encode_action_tokens(
         self,
