@@ -124,6 +124,22 @@ def _as_dim_mask(mask: torch.Tensor, batch_size: int, seq_len: int, dim: int, de
         raise ValueError(f"action_dim_mask has incompatible seq_len {mask.shape[1]}, expected 1 or {seq_len}")
     return mask.to(device=device)
 
+
+def _as_time_mask(mask: torch.Tensor, batch_size: int, seq_len: int, device: torch.device) -> torch.Tensor:
+    if mask.dim() == 1:
+        mask = mask[None, :]
+    elif mask.dim() == 3 and mask.shape[-1] == 1:
+        mask = mask.squeeze(-1)
+    elif mask.dim() != 2:
+        raise ValueError(f"action_loss_mask must have 1/2 dims (or trailing singleton), got {mask.shape=}")
+    if mask.shape[0] != batch_size or mask.shape[1] != seq_len:
+        raise ValueError(
+            f"action_loss_mask has incompatible shape {mask.shape}, "
+            f"expected ({batch_size},{seq_len})"
+        )
+    return mask.to(device=device)
+
+
 def masked_mse(pred: torch.Tensor, target: torch.Tensor, dim_mask: torch.Tensor | None, time_mask: torch.Tensor | None) -> torch.Tensor:
     sq = (pred - target).pow(2)
 
