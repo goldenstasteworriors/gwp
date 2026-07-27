@@ -19,7 +19,7 @@ norm_stats_path = _required("GWP_NORM_STATS_PATH")
 transformer_pretrained = _required("GWP05_TRANSFORMER_PRETRAINED")
 wan_pretrained = _env("GWP_WAN_PRETRAINED", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 project_dir = _env("GWP05_PROJECT_DIR", "outputs/gwp0_5_hot3d_pretrain")
-gpu_ids = [int(x) for x in _env("GWP_GPU_IDS", "4,5,6,7").split(",")]
+gpu_ids = [int(x) for x in _env("GWP_GPU_IDS", "2,3").split(",")]
 
 config = dict(
     runners=["world_action_model.CasualWATrainerMoT"],
