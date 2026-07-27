@@ -6,10 +6,15 @@ import io
 import json
 import os
 import sqlite3
+import sys
 import tarfile
 from pathlib import Path
 
 import numpy as np
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from world_action_model.datasets.hot3d_wam_dataset import ACTION_DIM, hot3d_action, hot3d_state
 
