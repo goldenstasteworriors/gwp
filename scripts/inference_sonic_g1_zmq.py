@@ -113,6 +113,7 @@ def _load_pipeline(
         vae=vae,
         scheduler=scheduler,
         transformer=transformer,
+        expand_timesteps=True,
     )
     pipeline.to(device=device, dtype=dtype)
     return pipeline
