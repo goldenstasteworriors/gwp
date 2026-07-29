@@ -21,9 +21,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import zmq
+from diffusers import AutoencoderKLWan, FlowMatchEulerDiscreteScheduler
 from PIL import Image, ImageOps
 
-from inference_openloop import get_policy, load_fixed_prompt_embedding
+from inference_openloop import WAPipeline, load_fixed_prompt_embedding
+from world_action_model.models import CasualWorldActionTransformer_MoT
 
 
 SONIC_ACTION_DIM = 30
@@ -69,6 +71,51 @@ def _load_stats(path: Path, device: torch.device) -> tuple[torch.Tensor, ...]:
     action_low = torch.tensor(stats["action"]["q01"][:SONIC_ACTION_DIM], device=device)
     action_high = torch.tensor(stats["action"]["q99"][:SONIC_ACTION_DIM], device=device)
     return state_low, state_high, action_low, action_high
+
+
+def _load_pipeline(
+    checkpoint: Path,
+    base_model: Path,
+    device: str,
+) -> WAPipeline:
+    dtype = torch.bfloat16
+    transformer = CasualWorldActionTransformer_MoT.from_config(
+        checkpoint / "config.json"
+    )
+    weight_path = checkpoint / "diffusion_pytorch_model.bin"
+    state_dict = torch.load(weight_path, map_location="cpu", weights_only=True)
+    if "model" in state_dict:
+        state_dict = state_dict["model"]
+    if "state_dict" in state_dict:
+        state_dict = state_dict["state_dict"]
+    state_dict = {
+        key.replace("._checkpoint_wrapped_module", ""): value
+        for key, value in state_dict.items()
+    }
+    incompatible = transformer.load_state_dict(state_dict, strict=False)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "checkpoint does not strictly match the SONIC transformer: "
+            f"missing={incompatible.missing_keys[:20]}, "
+            f"unexpected={incompatible.unexpected_keys[:20]}"
+        )
+    transformer.to(dtype=dtype).eval()
+
+    vae = AutoencoderKLWan.from_pretrained(
+        base_model,
+        subfolder="vae",
+        torch_dtype=dtype,
+    ).eval()
+    scheduler = FlowMatchEulerDiscreteScheduler(shift=5.0)
+    pipeline = WAPipeline(
+        tokenizer=None,
+        text_encoder=None,
+        vae=vae,
+        scheduler=scheduler,
+        transformer=transformer,
+    )
+    pipeline.to(device=device, dtype=dtype)
+    return pipeline
 
 
 def _as_pil(image: Any) -> Image.Image:
@@ -122,8 +169,8 @@ class SonicG1Policy:
             raise ValueError("example.image must contain exactly the ego-view image")
         prompt = example.get("lang")
         prompt_embedding = self.prompt_embedding
-        if prompt_embedding is None and not prompt:
-            raise ValueError("request has no language instruction and no fixed T5 embedding was configured")
+        if prompt_embedding is None:
+            raise ValueError("server requires --fixed-t5-path for this component-only Wan base model")
 
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
@@ -139,7 +186,7 @@ class SonicG1Policy:
             image=_as_pil(images[0]),
             return_dict=False,
             prompt_embeds=prompt_embedding,
-            prompt=None if prompt_embedding is not None else prompt,
+            prompt=None,
             action_dim=MODEL_ACTION_DIM,
             generator=None,
         )
@@ -206,7 +253,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--base-model", required=True, type=Path)
     parser.add_argument("--norm-stats", required=True, type=Path)
-    parser.add_argument("--fixed-t5-path", type=Path)
+    parser.add_argument("--fixed-t5-path", required=True, type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5556)
     parser.add_argument("--device", default="cuda:0")
@@ -217,21 +264,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    pipeline = get_policy(
-        checkpoint=str(args.checkpoint),
-        base_model=str(args.base_model),
-        norm_stats=str(args.norm_stats),
-        data_paths=[str(args.norm_stats.parent)],
-        device=args.device,
-        fixed_t5_path=None,
-        model_dtype="bf16",
-        compile_transformer=not args.no_compile_transformer,
-    )
-    fixed_t5 = (
-        None
-        if args.fixed_t5_path is None
-        else load_fixed_prompt_embedding(str(args.fixed_t5_path), args.device)
-    )
+    pipeline = _load_pipeline(args.checkpoint, args.base_model, args.device)
+    if not args.no_compile_transformer:
+        from inference_openloop import compile_policy_action_blocks
+
+        compiled = compile_policy_action_blocks(pipeline)
+        logging.info("Compiled modules: %s", compiled)
+    fixed_t5 = load_fixed_prompt_embedding(str(args.fixed_t5_path), args.device)
     policy = SonicG1Policy(
         pipeline,
         args.norm_stats,
