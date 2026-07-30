@@ -50,6 +50,15 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--episode", type=int, required=True)
     parser.add_argument("--source", choices=("pred", "gt"), default="pred")
+    parser.add_argument(
+        "--execute-steps",
+        type=int,
+        default=None,
+        help=(
+            "actions executed from each predicted chunk; default infers the value "
+            "from adjacent rollout starts (48 for old rollouts, 1 for per-frame replanning)"
+        ),
+    )
     parser.add_argument("--dit4dit-root", type=Path, default=DEFAULT_DIT4DIT_ROOT)
     parser.add_argument("--model-xml", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--output", type=Path, default=None)
@@ -159,9 +168,16 @@ def integrate_rollout(
     left_ik = LeftArmIK(model_path, args)
     right_ik = helpers.RightArmIK(model_path, args)
 
+    execution_steps = (
+        args.execute_steps
+        if args.execute_steps is not None
+        else int(np.min(np.diff(starts))) if len(starts) > 1
+        else chunks.shape[1]
+    )
+    execution_steps = min(execution_steps, chunks.shape[1])
     last_frame = min(
         len(source_actions) - 1,
-        max(int(start) + chunks.shape[1] for start in starts),
+        max(int(start) + execution_steps for start in starts),
     )
     trajectory = source_actions[: last_frame + 1].copy()
     position_residuals: list[float] = []
@@ -173,7 +189,6 @@ def integrate_rollout(
         start = int(start_value)
         if start >= len(source_actions) - 1:
             continue
-        trajectory[start] = source_actions[start]
         left_ik.set_source_state(source_actions[start])
         right_ik.set_source_state(source_actions[start])
         left_position, left_rotation = left_ik.wrist_pose_in_pelvis()
@@ -182,7 +197,7 @@ def integrate_rollout(
         right_pelvis_position, right_pelvis_rotation = right_ik.pelvis_pose()
         left_hand = source_actions[start, 29:35].copy()
         right_hand = source_actions[start, 35:41].copy()
-        horizon = min(len(chunks[chunk_index]), len(trajectory) - start - 1)
+        horizon = min(execution_steps, len(chunks[chunk_index]), len(trajectory) - start - 1)
 
         for offset, action in enumerate(chunks[chunk_index, :horizon], start=1):
             left_position = left_position + left_rotation @ action[0:3]
@@ -219,10 +234,11 @@ def integrate_rollout(
             orientation_residuals.extend((left_rot_error, right_rot_error))
             iteration_counts.extend((left_iterations, right_iterations))
 
-        print(
-            f"[IK] chunk {chunk_index + 1}/{len(starts)} start={start} horizon={horizon}",
-            flush=True,
-        )
+        if chunk_index == 0 or (chunk_index + 1) % 25 == 0 or chunk_index + 1 == len(starts):
+            print(
+                f"[IK] chunk {chunk_index + 1}/{len(starts)} start={start} horizon={horizon}",
+                flush=True,
+            )
 
     position_array = np.asarray(position_residuals, dtype=np.float64)
     orientation_array = np.asarray(orientation_residuals, dtype=np.float64)
@@ -230,6 +246,7 @@ def integrate_rollout(
     metrics = {
         "frames": len(trajectory),
         "chunks": len(starts),
+        "execution_steps_per_chunk": execution_steps,
         "ik_position_residual_m": {
             "mean": float(position_array.mean()),
             "p99": float(np.quantile(position_array, 0.99)),
@@ -328,7 +345,7 @@ def render(
                 renderer.render(),
                 [
                     f"GWP {args.source.upper()} | episode {args.episode:06d} | chunk {chunk_index + 1}/{len(starts)}",
-                    f"t={recorded_time:5.2f}/{relative_timestamps[-1]:5.2f}s  frame={frame_index + 1}/{len(trajectory)}",
+                    f"t={recorded_time:5.2f}/{relative_timestamps[-1]:5.2f}s  frame={frame_index + 1}/{len(trajectory)}  execute={metrics['execution_steps_per_chunk']}",
                     f"IK max residual: {metrics['ik_position_residual_m']['max']:.4f} m / "
                     f"{metrics['ik_orientation_residual_rad']['max']:.4f} rad",
                 ],
@@ -345,6 +362,8 @@ def main() -> None:
     args = build_argparser().parse_args()
     if args.episode < 0 or args.max_iterations <= 0:
         raise SystemExit("episode must be non-negative and max-iterations must be positive")
+    if args.execute_steps is not None and args.execute_steps <= 0:
+        raise SystemExit("execute-steps must be positive")
     if min(
         args.speed,
         args.fps,
