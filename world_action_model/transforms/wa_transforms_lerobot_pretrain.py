@@ -28,6 +28,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         norm_use_quantiles=False,
         norm_enable_clamp=False,
         image_cfg=None,
+        image_augmentation=None,
         num_views=1,
         view_keys=None,
         view_concat_mode="t",
@@ -110,6 +111,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         self.emit_action_denorm_scale = bool(emit_action_denorm_scale)
         self.max_prompt_len = int(max_prompt_len)
         self.subtask_prob = float(subtask_prob)
+        self.image_augmentation = dict(image_augmentation or {})
         self._warned_unknown_robotype = False
     
     def _parse_robotype(self, robotype):
@@ -186,6 +188,8 @@ class WALeRobotTransformsPretrain(WATransforms):
 
     def _process_images(self, input_images: torch.Tensor, dst_width: int, dst_height: int) -> torch.Tensor:
         input_images = input_images.to(dtype=torch.float32) / 255.0
+        if self.is_train and self.image_augmentation.get("enabled", False):
+            input_images = self._augment_images(input_images)
         height = int(input_images.shape[2])
         width = int(input_images.shape[3])
         if float(dst_height) / height < float(dst_width) / width:
@@ -200,6 +204,57 @@ class WALeRobotTransformsPretrain(WATransforms):
         input_images = F.crop(input_images, y1, x1, dst_height, dst_width)
         input_images = self.normalize(input_images)
         return input_images
+
+    def _augment_images(self, input_images: torch.Tensor) -> torch.Tensor:
+        """Apply one shared augmentation sample to every temporal frame."""
+        cfg = self.image_augmentation
+        height, width = input_images.shape[-2:]
+
+        crop_scale = float(cfg.get("crop_scale", 1.0))
+        if not 0.0 < crop_scale <= 1.0:
+            raise ValueError(f"image_augmentation.crop_scale must be in (0, 1], got {crop_scale}")
+        if crop_scale < 1.0:
+            crop_height = max(1, int(round(height * crop_scale)))
+            crop_width = max(1, int(round(width * crop_scale)))
+            top = random.randint(0, height - crop_height)
+            left = random.randint(0, width - crop_width)
+            input_images = F.resized_crop(
+                input_images,
+                top,
+                left,
+                crop_height,
+                crop_width,
+                (height, width),
+                InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+
+        rotation_degrees = float(cfg.get("rotation_degrees", 0.0))
+        if rotation_degrees > 0.0:
+            angle = random.uniform(-rotation_degrees, rotation_degrees)
+            input_images = F.rotate(
+                input_images,
+                angle,
+                interpolation=InterpolationMode.BILINEAR,
+                fill=0.0,
+            )
+
+        jitter = []
+        for name, fn in (
+            ("brightness", F.adjust_brightness),
+            ("contrast", F.adjust_contrast),
+            ("saturation", F.adjust_saturation),
+        ):
+            strength = float(cfg.get(name, 0.0))
+            if strength < 0.0:
+                raise ValueError(f"image_augmentation.{name} must be non-negative, got {strength}")
+            if strength > 0.0:
+                factor = random.uniform(max(0.0, 1.0 - strength), 1.0 + strength)
+                jitter.append((fn, factor))
+        random.shuffle(jitter)
+        for fn, factor in jitter:
+            input_images = fn(input_images, factor)
+        return input_images.clamp_(0.0, 1.0)
 
     def _to_prompt_tensor(self, prompt_embed) -> torch.Tensor:
         if isinstance(prompt_embed, np.ndarray):

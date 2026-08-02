@@ -90,6 +90,18 @@ config = dict(
                 image_cfg=dict(
                     mask_generator=dict(max_ref_frames=1, start=1, factor=4)
                 ),
+                # pi0.5-style augmentation. A single sampled transform is
+                # shared by all temporal frames to avoid artificial flicker.
+                # Hue and horizontal flips are intentionally disabled because
+                # bottle color and left/right arm identity are task semantics.
+                image_augmentation=dict(
+                    enabled=True,
+                    crop_scale=0.95,
+                    rotation_degrees=5.0,
+                    brightness=0.3,
+                    contrast=0.4,
+                    saturation=0.5,
+                ),
                 max_prompt_len=64,
                 subtask_prob=0,
             ),
