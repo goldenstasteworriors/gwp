@@ -68,6 +68,26 @@ through `WAMLeRobotDataset`.
 `contact_target` only for the oracle upper-bound experiment.  The oracle model
 must not be reported as a deployable policy.
 
+## EgoHumanoid action adapter
+
+The processed EgoHumanoid LeRobot export has no `observation.state`.  It stores
+an absolute dual-wrist pose as `[xyz, qx, qy, qz, qw] x 2`, local wrist motion
+as `[xyz, roll, pitch, yaw] x 2`, and a two-value hand-closure proxy.  The ego
+adapter converts both wrists to `position(3) + rotation-6D(6)` and appends the
+left/right closure proxy, yielding 20 valid dimensions before padding to 32.
+
+The closure proxy was produced by fitting a square wave to tracked hand motion;
+it is not a per-finger contact label and must not be presented as dexterity
+ground truth.  Dexterity supervision remains in the contact-transition sidecar
+and, in the next data version, palm-local functional-site trajectories.
+
+The source defines `action_delta_eef[i]` as the motion from pose `i-1` to `i`.
+`giga_world_policy_0_5_ego_contact_pretrain.py` therefore loads offsets `0..48`,
+uses offset zero only for the current grip state, and predicts offsets `1..48`.
+`compute_ego_wam_norm.py` uses the identical clamped future-window semantics.
+Padded action dimensions are emitted through `action_dim_mask` and contribute
+neither flow noise nor action loss.
+
 ## Stage gate
 
 Continue to mesh-free weak labelling only if:

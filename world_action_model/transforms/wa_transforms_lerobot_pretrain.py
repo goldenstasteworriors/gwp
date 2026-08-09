@@ -10,6 +10,10 @@ from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as F
 
 from world_action_model.transforms.wa_transforms import WATransforms
+from world_action_model.ego_action_schema import (
+    dual_eef_delta_to_action,
+    dual_eef_pose_to_state,
+)
 
 
 @TRANSFORMS.register
@@ -34,6 +38,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         view_concat_mode="t",
         state_key="observation.state",
         action_key="action",
+        ego_dual_eef_cfg=None,
         task_key="task",
         emit_action_denorm_scale=False,
         max_prompt_len=64,
@@ -107,6 +112,9 @@ class WALeRobotTransformsPretrain(WATransforms):
         self.view_concat_mode = str(view_concat_mode)
         self.state_key = state_key
         self.action_key = action_key
+        self.ego_dual_eef_cfg = (
+            None if ego_dual_eef_cfg is None else dict(ego_dual_eef_cfg)
+        )
         self.task_key = task_key
         self.emit_action_denorm_scale = bool(emit_action_denorm_scale)
         self.max_prompt_len = int(max_prompt_len)
@@ -343,12 +351,36 @@ class WALeRobotTransformsPretrain(WATransforms):
             data_dict["input_ref_images"] = ref_images
             data_dict["input_ref_masks"] = ref_latent_masks
 
-        action = data_dict[self.action_key]
-        if isinstance(action, np.ndarray):
-            action = torch.from_numpy(action)
-        state = data_dict[self.state_key]
-        if isinstance(state, np.ndarray):
-            state = torch.from_numpy(state)
+        action_is_precomputed_delta = False
+        if self.ego_dual_eef_cfg is not None:
+            cfg = self.ego_dual_eef_cfg
+            pose_key = str(cfg.get("pose_key", "action_eef"))
+            delta_key = str(cfg.get("delta_key", "action_delta_eef"))
+            hand_status_key = str(cfg.get("hand_status_key", "hand_status"))
+            pose = np.asarray(data_dict[pose_key], dtype=np.float32)
+            delta = np.asarray(data_dict[delta_key], dtype=np.float32)
+            hand_status = np.asarray(data_dict[hand_status_key], dtype=np.float32)
+            chunk_start_offset = int(cfg.get("chunk_start_offset", 0))
+            if chunk_start_offset < 0:
+                raise ValueError("ego_dual_eef_cfg.chunk_start_offset must be non-negative")
+            state_hand_status = hand_status[0] if hand_status.ndim == 2 else hand_status
+            if chunk_start_offset:
+                if delta.ndim != 2 or hand_status.ndim != 2:
+                    raise ValueError(
+                        "non-zero ego chunk_start_offset requires chunked delta and hand status"
+                    )
+                delta = delta[chunk_start_offset:]
+                hand_status = hand_status[chunk_start_offset:]
+            state = torch.from_numpy(dual_eef_pose_to_state(pose, state_hand_status))
+            action = torch.from_numpy(dual_eef_delta_to_action(delta, hand_status))
+            action_is_precomputed_delta = True
+        else:
+            action = data_dict[self.action_key]
+            if isinstance(action, np.ndarray):
+                action = torch.from_numpy(action)
+            state = data_dict[self.state_key]
+            if isinstance(state, np.ndarray):
+                state = torch.from_numpy(state)
 
         action = action.to(dtype=torch.float32)
         state = state.to(dtype=torch.float32)
@@ -394,7 +426,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         mask_t = torch.as_tensor(base, dtype=torch.bool, device=action.device)
         idx = torch.nonzero(mask_t, as_tuple=False).flatten()
         delta = action.clone()
-        if idx.numel() > 0:
+        if idx.numel() > 0 and not action_is_precomputed_delta:
             delta[:, idx] = action[:, idx] - state[:, idx]
 
         def _to_1d(x, device):
@@ -443,6 +475,9 @@ class WALeRobotTransformsPretrain(WATransforms):
         out["action"] = norm_delta
         out["state"] = norm_state
         out["embodiment_id"] = torch.tensor(int(embodiment_id), dtype=torch.long)
+        valid_dim_mask = torch.zeros(d, dtype=torch.bool, device=action.device)
+        valid_dim_mask[:effective_dim] = True
+        out["action_dim_mask"] = valid_dim_mask
         dim = out["action"].shape[-1]
         if self.emit_action_denorm_scale:
             scale = torch.ones(dim, dtype=torch.float32, device=action.device)
