@@ -221,4 +221,3 @@ def encode_ordered_events(
         "contact_confidence": confidence,
         "contact_condition_mask": condition_mask,
     }
-
