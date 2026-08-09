@@ -1,0 +1,16 @@
+{
+  "annotation_fps": 30,
+  "target_fps": 20,
+  "horizon_frames": 48,
+  "num_queries": 12,
+  "defaults": {
+    "confidence": 0.6,
+    "negative_confidence": 0.1
+  },
+  "episodes": {
+    "0": {
+      "side": "right",
+      "contact_mode": "stick"
+    }
+  }
+}

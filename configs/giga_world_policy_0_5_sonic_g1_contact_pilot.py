@@ -23,7 +23,17 @@ config["project_dir"] = _env(
 )
 
 num_contact_tokens = int(_env("GWP_CONTACT_TOKENS", "12"))
-contact_target_dim = int(_env("GWP_CONTACT_TARGET_DIM", "50"))
+contact_target_dim = int(_env("GWP_CONTACT_TARGET_DIM", "54"))
+
+contact_sidecar_dir = _env("GWP_CONTACT_SIDECAR_DIR", "")
+if contact_sidecar_dir:
+    for dataset_config in config["dataloaders"]["train"]["data_or_config"]:
+        dataset_config.update(
+            contact_sidecar_dir=contact_sidecar_dir,
+            contact_sidecar_pattern="episode_{episode_index:06d}.npz",
+            contact_sidecar_cache_size=int(_env("GWP_CONTACT_SIDECAR_CACHE_SIZE", "8")),
+            contact_sidecar_strict=_env("GWP_CONTACT_SIDECAR_STRICT", "1") == "1",
+        )
 
 config["models"]["transformer"].update(
     num_contact_tokens=num_contact_tokens,

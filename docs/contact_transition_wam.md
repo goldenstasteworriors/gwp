@@ -20,10 +20,10 @@ future          <- all
 matched-capacity auxiliary-head baseline.  With zero contact queries the model
 is backward compatible with the original GWP-0.5 topology.
 
-## Ordered event target v0
+## Ordered event target v1
 
 Events are sorted by `(onset time, side, canonical site)` and padded to `Q`.
-The initial 50-D dense target is a concatenation of:
+The 54-D dense target is a concatenation of:
 
 | Field | Width | Values |
 |---|---:|---|
@@ -35,6 +35,7 @@ The initial 50-D dense target is a concatenation of:
 | contact mode | 6 | free, stick, slide, roll, impact, unknown |
 | transition | 5 | none, onset, hold, switch-to-slide, release |
 | object effect | 7 | none, translate, rotate, articulate, flow, deform, transfer |
+| event time bin | 4 | event offset within the 48-frame action horizon |
 | duration bin | 4 | short to long |
 | part-local 2D region | 2 | normalized coordinates |
 | visible normal proxy | 3 | camera-frame unit vector |
@@ -47,12 +48,21 @@ deliberately deferred until the ordered-label oracle gate is passed.
 Batch keys:
 
 ```text
-contact_target          [B, Q, 50]
-contact_loss_mask       [B, Q, 50] or broadcastable
-contact_confidence      [B, Q, 50] or broadcastable
-contact_condition       [B, Q, 50] optional
+contact_target          [B, Q, 54]
+contact_loss_mask       [B, Q, 54] or broadcastable
+contact_confidence      [B, Q, 54] or broadcastable
+contact_condition       [B, Q, 54] optional
 contact_condition_mask  [B, Q, 1] optional
 ```
+
+`scripts/build_contact_transition_sidecar.py` converts interval annotations
+from their source video FPS to the processed LeRobot FPS and emits one NPZ per
+episode.  Annotated episodes supervise padded-query absence plus known event
+fields.  Unannotated episodes have an all-zero loss mask, so missing annotation
+is never treated as negative contact.  A manifest can leave uncertain groups
+(finger site, object part, effect, local region, or normal) unspecified; their
+field-level masks stay zero.  Set `GWP_CONTACT_SIDECAR_DIR` to load these files
+through `WAMLeRobotDataset`.
 
 `contact_condition_mode=predicted` never injects future labels.  `oracle` uses
 `contact_target` only for the oracle upper-bound experiment.  The oracle model

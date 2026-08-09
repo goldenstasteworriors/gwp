@@ -1,6 +1,8 @@
 import os
 import pickle
 import re
+
+import numpy as np
 import torch
 from giga_datasets import utils
 from giga_datasets.datasets.base_dataset import BaseDataset
@@ -25,6 +27,10 @@ class WAMLeRobotDataset(BaseDataset):
         t5_load_from: str | None = None,
         t5_cfg: dict | None = None,
         t5_cache_size: int = 256,
+        contact_sidecar_dir: str | None = None,
+        contact_sidecar_pattern: str = "episode_{episode_index:06d}.npz",
+        contact_sidecar_cache_size: int = 8,
+        contact_sidecar_strict: bool = False,
         meta_name: str | None = None,
         robotype: str | None = None,
         **kwargs,
@@ -50,6 +56,14 @@ class WAMLeRobotDataset(BaseDataset):
         self.t5_cache_size = int(t5_cache_size) if t5_cache_size is not None else 0
         self._t5_cache = {}
         self._t5_cache_order = []
+        self.contact_sidecar_dir = (
+            None if contact_sidecar_dir is None else str(contact_sidecar_dir)
+        )
+        self.contact_sidecar_pattern = str(contact_sidecar_pattern)
+        self.contact_sidecar_cache_size = max(0, int(contact_sidecar_cache_size))
+        self.contact_sidecar_strict = bool(contact_sidecar_strict)
+        self._contact_sidecar_cache = {}
+        self._contact_sidecar_cache_order = []
         self.meta_name = meta_name
         self.kwargs = kwargs
         self.dataset = None
@@ -218,6 +232,8 @@ class WAMLeRobotDataset(BaseDataset):
         self._fixed_t5_embedding = None
         self._t5_cache.clear()
         self._t5_cache_order.clear()
+        self._contact_sidecar_cache.clear()
+        self._contact_sidecar_cache_order.clear()
         super().close()
 
     def __len__(self) -> int:
@@ -235,7 +251,68 @@ class WAMLeRobotDataset(BaseDataset):
             assert self.meta_name not in data_dict
             data_dict[self.meta_name] = self.dataset.meta
         self._load_t5_embedding(data_dict)
+        self._load_contact_sidecar(data_dict)
         return data_dict
+
+    @staticmethod
+    def _scalar_int(value, name: str) -> int:
+        if hasattr(value, "item"):
+            value = value.item()
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid {name}={value!r} for contact sidecar lookup") from exc
+
+    def _read_contact_sidecar(self, episode_index: int):
+        if episode_index in self._contact_sidecar_cache:
+            return self._contact_sidecar_cache[episode_index]
+        path = os.path.join(
+            self.contact_sidecar_dir,
+            self.contact_sidecar_pattern.format(episode_index=episode_index),
+        )
+        if not os.path.isfile(path):
+            if self.contact_sidecar_strict:
+                raise FileNotFoundError(f"missing contact sidecar: {path}")
+            return None
+        with np.load(path, allow_pickle=False) as archive:
+            sidecar = {key: archive[key] for key in archive.files}
+        required = {
+            "contact_target",
+            "contact_loss_mask",
+            "contact_confidence",
+            "contact_condition_mask",
+        }
+        missing = sorted(required - set(sidecar))
+        if missing:
+            raise KeyError(f"contact sidecar {path} is missing arrays: {missing}")
+        lengths = {int(sidecar[key].shape[0]) for key in required}
+        if len(lengths) != 1:
+            raise ValueError(f"inconsistent frame counts in contact sidecar {path}: {lengths}")
+        if self.contact_sidecar_cache_size > 0:
+            self._contact_sidecar_cache[episode_index] = sidecar
+            self._contact_sidecar_cache_order.append(episode_index)
+            if len(self._contact_sidecar_cache_order) > self.contact_sidecar_cache_size:
+                old = self._contact_sidecar_cache_order.pop(0)
+                self._contact_sidecar_cache.pop(old, None)
+        return sidecar
+
+    def _load_contact_sidecar(self, data_dict: dict) -> None:
+        if self.contact_sidecar_dir is None:
+            return
+        episode_index = self._scalar_int(data_dict.get("episode_index"), "episode_index")
+        frame_index = self._scalar_int(data_dict.get("frame_index"), "frame_index")
+        sidecar = self._read_contact_sidecar(episode_index)
+        if sidecar is None:
+            return
+        frame_count = int(sidecar["contact_target"].shape[0])
+        if not 0 <= frame_index < frame_count:
+            raise IndexError(
+                f"frame_index={frame_index} outside contact sidecar episode "
+                f"{episode_index} length={frame_count}"
+            )
+        for key, array in sidecar.items():
+            if key.startswith("contact_"):
+                data_dict[key] = array[frame_index]
 
     def _load_t5_embedding(self, data_dict: dict) -> None:
         if self.t5_load_from is None:
