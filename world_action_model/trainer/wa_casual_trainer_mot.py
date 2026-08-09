@@ -2,6 +2,7 @@ import functools
 import os
 
 import torch
+import torch.nn.functional as F
 from diffusers.models import AutoencoderKLWan
 from diffusers.video_processor import VideoProcessor
 from einops import rearrange
@@ -13,6 +14,53 @@ from world_action_model.trainer.wa_casual_trainer_pretrain import (
     masked_mse,
 )
 from giga_train import ModuleDict, Trainer
+
+
+def masked_contact_loss(
+    prediction,
+    target,
+    mask=None,
+    confidence=None,
+    loss_type="bce",
+):
+    """Confidence-weighted loss for ordered contact-event query targets."""
+    if prediction.shape != target.shape:
+        raise ValueError(
+            f"contact target shape mismatch: prediction={tuple(prediction.shape)}, "
+            f"target={tuple(target.shape)}"
+        )
+    target = target.to(device=prediction.device, dtype=prediction.dtype)
+    if loss_type == "bce":
+        element_loss = F.binary_cross_entropy_with_logits(
+            prediction.float(), target.float(), reduction="none"
+        )
+    elif loss_type == "smooth_l1":
+        element_loss = F.smooth_l1_loss(
+            prediction.float(), target.float(), reduction="none"
+        )
+    else:
+        raise ValueError(
+            f"unsupported contact_loss_type={loss_type!r}; expected 'bce' or 'smooth_l1'"
+        )
+
+    weight = torch.ones_like(element_loss)
+    for name, value in (("contact_loss_mask", mask), ("contact_confidence", confidence)):
+        if value is None:
+            continue
+        value = value.to(device=prediction.device, dtype=element_loss.dtype)
+        while value.ndim < element_loss.ndim:
+            value = value.unsqueeze(-1)
+        try:
+            value = torch.broadcast_to(value, element_loss.shape)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"{name} shape {tuple(value.shape)} cannot broadcast to "
+                f"contact prediction {tuple(element_loss.shape)}"
+            ) from exc
+        weight = weight * value
+
+    denominator = weight.sum().clamp_min(1.0)
+    return (element_loss * weight).sum() / denominator
 
 class CasualWATrainerMoT(Trainer):
     """WAM pretraining trainer for the Mixture-of-Transformers policy."""
@@ -26,6 +74,19 @@ class CasualWATrainerMoT(Trainer):
         self.state_repeats = model_config.get("state_repeats", 1)
         self.action_dim = int(model_config.get("action_dim", 14))
         self.num_embodiments = int(model_config.get("num_embodiments", 1))
+        self.contact_loss_weight = float(model_config.get("contact_loss_weight", 0.0))
+        self.contact_loss_type = str(model_config.get("contact_loss_type", "bce"))
+        self.contact_condition_mode = str(
+            model_config.get("contact_condition_mode", "predicted")
+        )
+        self.require_contact_targets = bool(
+            model_config.get("require_contact_targets", False)
+        )
+        if self.contact_condition_mode not in {"predicted", "oracle"}:
+            raise ValueError(
+                "contact_condition_mode must be 'predicted' or 'oracle', got "
+                f"{self.contact_condition_mode!r}"
+            )
 
         vae_pretrained = model_config.get("vae_pretrained", os.path.join(pretrained, "vae"))
         vae_dtype = model_config.get("vae_dtype", torch.float32)
@@ -164,7 +225,21 @@ class CasualWATrainerMoT(Trainer):
         )
         timestep[:, num_state_tokens + num_action_tokens + num_clean_latent_tokens :] = visual_timestep[:, None]
 
-        visual_pred, action_pred = transformer(
+        contact_target = batch_dict.get("contact_target")
+        contact_condition = batch_dict.get("contact_condition")
+        contact_condition_mask = batch_dict.get("contact_condition_mask")
+        if self.contact_condition_mode == "oracle":
+            if contact_target is None:
+                raise ValueError(
+                    "oracle contact conditioning requires contact_target in the batch"
+                )
+            contact_condition = contact_target
+            if contact_condition_mask is None:
+                contact_condition_mask = batch_dict.get("contact_loss_mask")
+                if contact_condition_mask is not None and contact_condition_mask.ndim == 3:
+                    contact_condition_mask = contact_condition_mask.amax(dim=-1)
+
+        model_output = transformer(
             ref_latents=ref_latents,
             noisy_latents=noisy_latents,
             timestep=timestep,
@@ -173,7 +248,14 @@ class CasualWATrainerMoT(Trainer):
             action=noisy_action,
             state=state,
             embodiment_id=embodiment_id,
+            contact_condition=contact_condition,
+            contact_condition_mask=contact_condition_mask,
         )
+        if len(model_output) == 3:
+            visual_pred, action_pred, contact_pred = model_output
+        else:
+            visual_pred, action_pred = model_output
+            contact_pred = None
 
         visual_loss = ((visual_pred.float() - visual_target.float()) * first_frame_mask).pow(2).mean()
 
@@ -191,10 +273,22 @@ class CasualWATrainerMoT(Trainer):
             dim_mask=dim_mask,
             time_mask=time_mask,
         )
-        return {
+        losses = {
             "visual_loss": visual_loss,
             "action_loss": action_loss,
         }
+        if contact_pred is not None and contact_target is not None:
+            losses["contact_loss"] = self.contact_loss_weight * masked_contact_loss(
+                contact_pred,
+                contact_target,
+                mask=batch_dict.get("contact_loss_mask"),
+                confidence=batch_dict.get("contact_confidence"),
+                loss_type=self.contact_loss_type,
+            )
+        elif self.require_contact_targets:
+            missing = "contact_target" if contact_target is None else "contact prediction head"
+            raise ValueError(f"required {missing} is missing")
+        return losses
 
     def forward_vae(self, images):
         images = images.to(self.vae.dtype)

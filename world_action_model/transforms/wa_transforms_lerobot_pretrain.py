@@ -458,6 +458,20 @@ class WALeRobotTransformsPretrain(WATransforms):
                 scale[:effective_dim] = std[:effective_dim].clamp_min(eps)
             out["action_denorm_scale"] = scale
 
+        # Optional contact-transition sidecars are already aligned to the
+        # action chunk by the dataset.  Keep them geometry-free and pass them
+        # through without action normalization; confidence/masks are consumed
+        # directly by CasualWATrainerMoT.
+        for key in (
+            "contact_target",
+            "contact_loss_mask",
+            "contact_confidence",
+            "contact_condition",
+            "contact_condition_mask",
+        ):
+            if key in data_dict and data_dict[key] is not None:
+                out[key] = torch.as_tensor(data_dict[key], dtype=torch.float32)
+
         keys = list(out.keys())
         for k in keys:
             if out[k] is None:

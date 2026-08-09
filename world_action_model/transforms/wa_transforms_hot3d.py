@@ -68,7 +68,7 @@ class WAHot3DTransforms(WATransforms):
         action_dim_mask = torch.as_tensor(data_dict["action_dim_mask"], dtype=torch.bool)
         prompt = torch.as_tensor(data_dict["t5_embedding"], dtype=torch.float32)[: self.max_prompt_len]
         prompt = torch_F.pad(prompt, (0, 0, 0, self.max_prompt_len - prompt.shape[0]))
-        return {
+        out = {
             "fps": torch.tensor(self.fps, dtype=torch.float32),
             "images": images,
             "ref_images": images.clone() * ref_masks[:, None, None, None],
@@ -81,3 +81,13 @@ class WAHot3DTransforms(WATransforms):
             "action_loss_mask": torch.as_tensor(data_dict["action_loss_mask"], dtype=torch.bool),
             "embodiment_id": torch.tensor(self.embodiment_id, dtype=torch.long),
         }
+        for key in (
+            "contact_target",
+            "contact_loss_mask",
+            "contact_confidence",
+            "contact_condition",
+            "contact_condition_mask",
+        ):
+            if key in data_dict and data_dict[key] is not None:
+                out[key] = torch.as_tensor(data_dict[key], dtype=torch.float32)
+        return out

@@ -105,16 +105,24 @@ def build_mot_attention_mask(
     num_heads: int,
     device: torch.device,
     dtype: torch.dtype,
+    num_contact_tokens: int = 0,
+    action_attends_ref: bool = True,
 ) -> torch.Tensor:
     """
     Causal mask for concatenated sequence [action_stream | visual_stream].
 
-    action_stream layout: [state, action]
+    action_stream layout: [state, contact, action]
     visual_stream layout: [ref, future]
 
-    Matches the interleaved [state, ref, action, future] mask semantics.
+    Contact queries are a current-observation latent: they may read state,
+    reference-image and other contact tokens, but never noisy target actions or
+    future-video tokens.  ``action_attends_ref=False`` forces the action stream
+    through the contact bottleneck instead of retaining a direct visual path.
+
+    With ``num_contact_tokens=0`` this is identical to the original
+    [state, ref, action, future] mask.
     """
-    la = num_state_tokens + num_action_tokens
+    la = num_state_tokens + num_contact_tokens + num_action_tokens
     lv = num_ref_tokens + num_future_tokens
     l_total = la + lv
 
@@ -122,7 +130,12 @@ def build_mot_attention_mask(
     ref_idx = torch.arange(la, la + num_ref_tokens, device=device)
     future_idx = torch.arange(la + num_ref_tokens, l_total, device=device)
     state_idx = torch.arange(0, num_state_tokens, device=device)
-    action_only_idx = torch.arange(num_state_tokens, la, device=device)
+    contact_idx = torch.arange(
+        num_state_tokens,
+        num_state_tokens + num_contact_tokens,
+        device=device,
+    )
+    action_only_idx = torch.arange(num_state_tokens + num_contact_tokens, la, device=device)
 
     def allow_rows(cols: torch.Tensor, rows: torch.Tensor) -> None:
         row_grid, col_grid = torch.meshgrid(rows, cols, indexing="ij")
@@ -132,8 +145,14 @@ def build_mot_attention_mask(
     allow_rows(state_ref_cols, state_idx)
     allow_rows(state_ref_cols, ref_idx)
 
-    state_ref_action_cols = torch.cat([state_idx, ref_idx, action_only_idx])
-    allow_rows(state_ref_action_cols, action_only_idx)
+    if num_contact_tokens:
+        contact_cols = torch.cat([state_idx, ref_idx, contact_idx])
+        allow_rows(contact_cols, contact_idx)
+
+    action_cols = [state_idx, contact_idx, action_only_idx]
+    if action_attends_ref:
+        action_cols.insert(1, ref_idx)
+    allow_rows(torch.cat(action_cols), action_only_idx)
 
     allow_rows(torch.arange(0, l_total, device=device), future_idx)
 
@@ -388,6 +407,7 @@ class WanMoTTransformerBlock(nn.Module):
         visual_temb: torch.Tensor,
         action_prefix_rotary_emb: Tuple[torch.Tensor, torch.Tensor],
         visual_rotary_emb: Tuple[torch.Tensor, torch.Tensor],
+        self_attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         a_shift, a_scale, a_gate, a_c_shift, a_c_scale, a_c_gate = _chunk_temb(
             action_prefix_temb, self.action_expert.scale_shift_table
@@ -411,7 +431,7 @@ class WanMoTTransformerBlock(nn.Module):
             query,
             key,
             value,
-            attn_mask=None,
+            attn_mask=self_attention_mask,
             dropout_p=0.0,
             is_causal=False,
         )
@@ -564,6 +584,10 @@ class CasualWorldActionTransformer_MoT(
         in_action_channels: int = 32,
         out_action_channels: int = 32,
         num_embodiments: int = 4,
+        num_contact_tokens: int = 0,
+        contact_target_dim: int = 0,
+        contact_condition_dim: Optional[int] = None,
+        contact_bottleneck: bool = False,
     ) -> None:
         super().__init__()
 
@@ -631,6 +655,41 @@ class CasualWorldActionTransformer_MoT(
             action_dim=out_action_channels,
             num_embodiments=num_embodiments,
         )
+
+        self.num_contact_tokens = int(num_contact_tokens)
+        self.contact_target_dim = int(contact_target_dim)
+        self.contact_condition_dim = int(
+            contact_condition_dim
+            if contact_condition_dim is not None
+            else contact_target_dim
+        )
+        self.contact_bottleneck = bool(contact_bottleneck)
+        if self.num_contact_tokens < 0:
+            raise ValueError("num_contact_tokens must be non-negative")
+        if self.contact_target_dim < 0 or self.contact_condition_dim < 0:
+            raise ValueError("contact target/condition dimensions must be non-negative")
+        if self.contact_bottleneck and not self.num_contact_tokens:
+            raise ValueError("contact_bottleneck=True requires num_contact_tokens > 0")
+
+        if self.num_contact_tokens:
+            self.contact_query_tokens = nn.Parameter(
+                torch.randn(1, self.num_contact_tokens, action_expert_dim)
+                / action_expert_dim**0.5
+            )
+            self.contact_condition_encoder = (
+                nn.Linear(self.contact_condition_dim, action_expert_dim)
+                if self.contact_condition_dim
+                else None
+            )
+            self.contact_decoder = (
+                nn.Linear(action_expert_dim, self.contact_target_dim)
+                if self.contact_target_dim
+                else None
+            )
+        else:
+            self.register_parameter("contact_query_tokens", None)
+            self.contact_condition_encoder = None
+            self.contact_decoder = None
 
     def _encode_state_tokens(self, state: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         if getattr(self.state_encoder, "uses_embodiment_id", False):
@@ -827,13 +886,69 @@ class CasualWorldActionTransformer_MoT(
         state: torch.Tensor,
         action: torch.Tensor,
         embodiment_id: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], int, int]:
-        """Encode state+action into action stream tokens and RoPE."""
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], int, int, int]:
+        """Encode [state, contact queries, action] and build action RoPE.
+
+        ``contact_condition`` is optional privileged/oracle conditioning for
+        stage-gate experiments.  The default predicted-contact path supplies no
+        condition, so queries must infer the interaction plan from current
+        state, reference image and language through the causal mask.
+        """
         state_states = self._encode_state_tokens(state, embodiment_id=embodiment_id)
         action_states = self._encode_action_tokens_only(action, embodiment_id=embodiment_id)
-        action_hidden_states = torch.cat([state_states, action_states], dim=1)
+        contact_states = state_states.new_zeros(state_states.shape[0], 0, state_states.shape[-1])
+        if self.num_contact_tokens:
+            contact_states = self.contact_query_tokens.to(
+                device=state_states.device,
+                dtype=state_states.dtype,
+            ).expand(state_states.shape[0], -1, -1)
+            if contact_condition is not None:
+                if self.contact_condition_encoder is None:
+                    raise ValueError(
+                        "contact_condition was provided but contact_condition_dim is zero"
+                    )
+                expected = (
+                    state_states.shape[0],
+                    self.num_contact_tokens,
+                    self.contact_condition_dim,
+                )
+                if tuple(contact_condition.shape) != expected:
+                    raise ValueError(
+                        f"contact_condition shape mismatch: got {tuple(contact_condition.shape)}, "
+                        f"expected {expected}"
+                    )
+                encoded_condition = self.contact_condition_encoder(
+                    contact_condition.to(device=state_states.device, dtype=state_states.dtype)
+                )
+                if contact_condition_mask is not None:
+                    condition_mask = contact_condition_mask.to(
+                        device=state_states.device,
+                        dtype=state_states.dtype,
+                    )
+                    if condition_mask.ndim == 2:
+                        condition_mask = condition_mask.unsqueeze(-1)
+                    if condition_mask.shape not in {
+                        encoded_condition.shape,
+                        encoded_condition.shape[:2] + (1,),
+                    }:
+                        raise ValueError(
+                            "contact_condition_mask must have shape [B,Q], [B,Q,1], "
+                            "or match the encoded contact condition"
+                        )
+                    encoded_condition = encoded_condition * condition_mask
+                contact_states = contact_states + encoded_condition
+
+        action_hidden_states = torch.cat([state_states, contact_states, action_states], dim=1)
         action_rotary_emb = self.action_rope(action_hidden_states)
-        return action_hidden_states, action_rotary_emb, state_states.shape[1], action_states.shape[1]
+        return (
+            action_hidden_states,
+            action_rotary_emb,
+            state_states.shape[1],
+            contact_states.shape[1],
+            action_states.shape[1],
+        )
 
     def encode_visual_tokens(
         self,
@@ -873,29 +988,57 @@ class CasualWorldActionTransformer_MoT(
         self,
         timestep: torch.Tensor,
         num_state_tokens: int,
+        num_contact_tokens: int,
         num_action_only_tokens: int,
         num_ref_tokens: int,
         num_future_tokens: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Split per-token timestep from interleaved [state, ref, action, future] order."""
-        # if timestep.ndim != 4:
-        #     return timestep, timestep
-        # TODO compitability with the original trainer code
-        s_r_end = num_state_tokens + num_ref_tokens
-        action_end = s_r_end + num_action_only_tokens
-        action_idx = torch.cat(
-            [
-                torch.arange(0, num_state_tokens, device=timestep.device),
-                torch.arange(s_r_end, action_end, device=timestep.device),
-            ]
+        """Split timesteps and insert clean contact-query timesteps if needed.
+
+        Existing callers provide [state, ref, action, future].  For debugging,
+        [state, ref, contact, action, future] is also accepted.  Contact queries
+        always use timestep zero because they represent a clean current-plan
+        prefix rather than a flow-matched target.
+        """
+        if timestep.ndim != 2:
+            raise ValueError(
+                f"per-token timestep must be rank 2, got shape {tuple(timestep.shape)}"
+            )
+
+        base_len = (
+            num_state_tokens
+            + num_ref_tokens
+            + num_action_only_tokens
+            + num_future_tokens
         )
-        visual_idx = torch.cat(
-            [
-                torch.arange(num_state_tokens, s_r_end, device=timestep.device),
-                torch.arange(action_end, action_end + num_future_tokens, device=timestep.device),
-            ]
+        extended_len = base_len + num_contact_tokens
+        if timestep.shape[1] not in {base_len, extended_len}:
+            raise ValueError(
+                f"timestep token count mismatch: got {timestep.shape[1]}, "
+                f"expected {base_len} (without contact) or {extended_len} (with contact)"
+            )
+
+        state_end = num_state_tokens
+        ref_end = state_end + num_ref_tokens
+        if timestep.shape[1] == extended_len and num_contact_tokens:
+            contact_end = ref_end + num_contact_tokens
+            contact_timestep = timestep[:, ref_end:contact_end] * 0
+            action_end = contact_end + num_action_only_tokens
+            action_timestep = timestep[:, contact_end:action_end]
+        else:
+            contact_timestep = timestep.new_zeros(
+                timestep.shape[0], num_contact_tokens
+            )
+            action_end = ref_end + num_action_only_tokens
+            action_timestep = timestep[:, ref_end:action_end]
+
+        state_timestep = timestep[:, :state_end]
+        ref_timestep = timestep[:, state_end:ref_end]
+        future_timestep = timestep[:, action_end:action_end + num_future_tokens]
+        return (
+            torch.cat([state_timestep, contact_timestep, action_timestep], dim=1),
+            torch.cat([ref_timestep, future_timestep], dim=1),
         )
-        return timestep[:, action_idx], timestep[:, visual_idx]
 
     def _process_blocks(
         self,
@@ -974,6 +1117,7 @@ class CasualWorldActionTransformer_MoT(
         timestep: torch.LongTensor,
         encoder_hidden_states: torch.Tensor,
         num_state_tokens: int,
+        num_contact_tokens: int,
         num_ref_tokens: int,
         encoder_hidden_states_image: Optional[torch.Tensor] = None,
         return_dict: bool = True,
@@ -1007,11 +1151,17 @@ class CasualWorldActionTransformer_MoT(
                 action_hidden_states.dtype,
             )
         lv = visual_hidden_states.shape[1]
-        num_action_only_tokens = la - num_state_tokens
+        num_action_only_tokens = la - num_state_tokens - num_contact_tokens
+        if num_action_only_tokens < 0:
+            raise ValueError(
+                "action stream is shorter than its state/contact prefix: "
+                f"la={la}, state={num_state_tokens}, contact={num_contact_tokens}"
+            )
         num_future_tokens = lv - num_ref_tokens
         action_timestep, visual_timestep = self._split_timestep(
             timestep,
             num_state_tokens,
+            num_contact_tokens,
             num_action_only_tokens,
             num_ref_tokens,
             num_future_tokens,
@@ -1055,6 +1205,8 @@ class CasualWorldActionTransformer_MoT(
             self.config.num_attention_heads,
             action_hidden_states.device,
             action_hidden_states.dtype,
+            num_contact_tokens=num_contact_tokens,
+            action_attends_ref=not self.contact_bottleneck,
         )
 
         action_hidden_states, visual_hidden_states = self._process_blocks(
@@ -1070,6 +1222,7 @@ class CasualWorldActionTransformer_MoT(
         )
 
         action_pred = None
+        contact_pred = None
         video_output = None
 
         if output_action:
@@ -1087,7 +1240,11 @@ class CasualWorldActionTransformer_MoT(
             action_scale = action_scale.to(action_hidden_states.device)
             # action_hidden_states = (action_hidden_states.float() + action_scale * action_shift).type_as(action_hidden_states)
             action_hidden_states = (self.action_norm_out(action_hidden_states.float()) * (1 + action_scale) + action_shift).type_as(action_hidden_states)
-            action_slice = action_hidden_states[:, num_state_tokens:]
+            contact_end = num_state_tokens + num_contact_tokens
+            if num_contact_tokens and self.contact_decoder is not None:
+                contact_slice = action_hidden_states[:, num_state_tokens:contact_end]
+                contact_pred = self.contact_decoder(contact_slice)
+            action_slice = action_hidden_states[:, contact_end:]
             action_pred = self._decode_action_tokens(action_slice, embodiment_id=embodiment_id)
 
         if output_visual:
@@ -1124,13 +1281,21 @@ class CasualWorldActionTransformer_MoT(
             unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
+            if contact_pred is not None:
+                return video_output, action_pred, contact_pred
             return video_output, action_pred
 
         if output_action and output_visual:
-            return {"sample": video_output, "action_pred": action_pred}
+            output = {"sample": video_output, "action_pred": action_pred}
+            if contact_pred is not None:
+                output["contact_pred"] = contact_pred
+            return output
         if output_visual:
             return Transformer2DModelOutput(sample=video_output)
-        return {"action_pred": action_pred}
+        output = {"action_pred": action_pred}
+        if contact_pred is not None:
+            output["contact_pred"] = contact_pred
+        return output
     
     def _forward_train(
         self,
@@ -1144,8 +1309,16 @@ class CasualWorldActionTransformer_MoT(
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
-        action_hidden_states, action_rotary_emb, num_state_tokens, _ = self.encode_action_tokens(state, action, embodiment_id=embodiment_id)
+        action_hidden_states, action_rotary_emb, num_state_tokens, num_contact_tokens, _ = self.encode_action_tokens(
+            state,
+            action,
+            embodiment_id=embodiment_id,
+            contact_condition=contact_condition,
+            contact_condition_mask=contact_condition_mask,
+        )
         visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, grid_info = self.encode_visual_tokens(
             ref_latents, noisy_latents
         )
@@ -1157,6 +1330,7 @@ class CasualWorldActionTransformer_MoT(
             timestep=timestep,
             encoder_hidden_states=encoder_hidden_states,
             num_state_tokens=num_state_tokens,
+            num_contact_tokens=num_contact_tokens,
             num_ref_tokens=num_ref_tokens,
             encoder_hidden_states_image=encoder_hidden_states_image,
             return_dict=return_dict,
@@ -1179,8 +1353,16 @@ class CasualWorldActionTransformer_MoT(
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
-        action_hidden_states, action_rotary_emb, num_state_tokens, _ = self.encode_action_tokens(state, action, embodiment_id=embodiment_id)
+        action_hidden_states, action_rotary_emb, num_state_tokens, num_contact_tokens, _ = self.encode_action_tokens(
+            state,
+            action,
+            embodiment_id=embodiment_id,
+            contact_condition=contact_condition,
+            contact_condition_mask=contact_condition_mask,
+        )
         visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, _ = self.encode_visual_tokens(
             ref_latents, noisy_latents
         )
@@ -1192,6 +1374,7 @@ class CasualWorldActionTransformer_MoT(
             timestep=timestep,
             encoder_hidden_states=encoder_hidden_states,
             num_state_tokens=num_state_tokens,
+            num_contact_tokens=num_contact_tokens,
             num_ref_tokens=num_ref_tokens,
             encoder_hidden_states_image=encoder_hidden_states_image,
             return_dict=return_dict,
@@ -1213,8 +1396,16 @@ class CasualWorldActionTransformer_MoT(
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
-        action_hidden_states, action_rotary_emb, num_state_tokens, _ = self.encode_action_tokens(state, action, embodiment_id=embodiment_id)
+        action_hidden_states, action_rotary_emb, num_state_tokens, num_contact_tokens, _ = self.encode_action_tokens(
+            state,
+            action,
+            embodiment_id=embodiment_id,
+            contact_condition=contact_condition,
+            contact_condition_mask=contact_condition_mask,
+        )
         if ref_latents is not None:
             visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, _ = self.encode_visual_tokens(ref_latents)
         else:
@@ -1233,6 +1424,7 @@ class CasualWorldActionTransformer_MoT(
             timestep=timestep,
             encoder_hidden_states=encoder_hidden_states,
             num_state_tokens=num_state_tokens,
+            num_contact_tokens=num_contact_tokens,
             num_ref_tokens=num_ref_tokens,
             encoder_hidden_states_image=encoder_hidden_states_image,
             return_dict=return_dict,
@@ -1254,8 +1446,16 @@ class CasualWorldActionTransformer_MoT(
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
-        action_hidden_states, action_rotary_emb, num_state_tokens, _ = self.encode_action_tokens(state, action, embodiment_id=embodiment_id)
+        action_hidden_states, action_rotary_emb, num_state_tokens, num_contact_tokens, _ = self.encode_action_tokens(
+            state,
+            action,
+            embodiment_id=embodiment_id,
+            contact_condition=contact_condition,
+            contact_condition_mask=contact_condition_mask,
+        )
         visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, grid_info = self.encode_visual_tokens(
             ref_latents, noisy_latents
         )
@@ -1267,6 +1467,7 @@ class CasualWorldActionTransformer_MoT(
             timestep=timestep,
             encoder_hidden_states=encoder_hidden_states,
             num_state_tokens=num_state_tokens,
+            num_contact_tokens=num_contact_tokens,
             num_ref_tokens=num_ref_tokens,
             encoder_hidden_states_image=encoder_hidden_states_image,
             return_dict=return_dict,
@@ -1312,6 +1513,8 @@ class CasualWorldActionTransformer_MoT(
         visual_timestep: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         encoder_hidden_states_image: Optional[torch.Tensor],
+        num_state_tokens: int,
+        num_contact_tokens: int,
     ) -> Dict[str, Any]:
         cache = getattr(self, "_action_only_prefix_cache", None)
         if cache is not None:
@@ -1351,6 +1554,19 @@ class CasualWorldActionTransformer_MoT(
         else:
             visual_timestep_proj = visual_timestep_proj.unflatten(1, (6, -1))
 
+        prefix_attention_mask = build_mot_attention_mask(
+            num_state_tokens=num_state_tokens,
+            num_action_tokens=0,
+            num_ref_tokens=visual_hidden_states.shape[1],
+            num_future_tokens=0,
+            batch_size=action_prefix_hidden_states.shape[0],
+            num_heads=self.config.num_attention_heads,
+            device=action_prefix_hidden_states.device,
+            dtype=action_prefix_hidden_states.dtype,
+            num_contact_tokens=num_contact_tokens,
+            action_attends_ref=not self.contact_bottleneck,
+        )
+
         block_caches = []
         for block in self.blocks:
             action_prefix_hidden_states, visual_hidden_states, block_cache = block.forward_prefix_cache(
@@ -1362,8 +1578,18 @@ class CasualWorldActionTransformer_MoT(
                 visual_timestep_proj,
                 action_prefix_rotary_emb,
                 visual_rotary_emb,
+                prefix_attention_mask,
             )
-            cached_block = {"key": block_cache["key"].detach(), "value": block_cache["value"].detach()}
+            cached_key = block_cache["key"]
+            cached_value = block_cache["value"]
+            if self.contact_bottleneck:
+                # Cached action queries must not regain a direct reference-token
+                # path. Contact keys already absorb the reference observation
+                # through the preceding prefix layers.
+                prefix_len = action_prefix_hidden_states.shape[1]
+                cached_key = cached_key[:, :prefix_len]
+                cached_value = cached_value[:, :prefix_len]
+            cached_block = {"key": cached_key.detach(), "value": cached_value.detach()}
             if "action_encoder_key" in block_cache and "action_encoder_value" in block_cache:
                 cached_block["action_encoder_key"] = block_cache["action_encoder_key"].detach()
                 cached_block["action_encoder_value"] = block_cache["action_encoder_value"].detach()
@@ -1407,6 +1633,8 @@ class CasualWorldActionTransformer_MoT(
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
@@ -1423,8 +1651,18 @@ class CasualWorldActionTransformer_MoT(
                 )
 
         try:
-            action_hidden_states, action_rotary_emb, num_state_tokens, num_action_tokens = self.encode_action_tokens(
-                state, action, embodiment_id=embodiment_id
+            (
+                action_hidden_states,
+                action_rotary_emb,
+                num_state_tokens,
+                num_contact_tokens,
+                num_action_tokens,
+            ) = self.encode_action_tokens(
+                state,
+                action,
+                embodiment_id=embodiment_id,
+                contact_condition=contact_condition,
+                contact_condition_mask=contact_condition_mask,
             )
             cache = getattr(self, "_action_only_prefix_cache", None)
             if cache is None:
@@ -1440,22 +1678,24 @@ class CasualWorldActionTransformer_MoT(
             action_timestep, visual_timestep = self._split_timestep(
                 timestep,
                 num_state_tokens,
+                num_contact_tokens,
                 num_action_tokens,
                 num_ref_tokens,
                 0,
             )
-            action_prefix_hidden_states = action_hidden_states[:, :num_state_tokens]
-            action_hidden_states = action_hidden_states[:, num_state_tokens:]
+            num_prefix_tokens = num_state_tokens + num_contact_tokens
+            action_prefix_hidden_states = action_hidden_states[:, :num_prefix_tokens]
+            action_hidden_states = action_hidden_states[:, num_prefix_tokens:]
             action_prefix_rotary_emb = (
-                action_rotary_emb[0][:, :num_state_tokens],
-                action_rotary_emb[1][:, :num_state_tokens],
+                action_rotary_emb[0][:, :num_prefix_tokens],
+                action_rotary_emb[1][:, :num_prefix_tokens],
             )
             action_rotary_emb = (
-                action_rotary_emb[0][:, num_state_tokens:],
-                action_rotary_emb[1][:, num_state_tokens:],
+                action_rotary_emb[0][:, num_prefix_tokens:],
+                action_rotary_emb[1][:, num_prefix_tokens:],
             )
-            action_prefix_timestep = action_timestep[:, :num_state_tokens]
-            action_timestep = action_timestep[:, num_state_tokens:]
+            action_prefix_timestep = action_timestep[:, :num_prefix_tokens]
+            action_timestep = action_timestep[:, num_prefix_tokens:]
 
             if cache is None:
                 cache = self._get_or_build_action_only_prefix_cache(
@@ -1467,6 +1707,8 @@ class CasualWorldActionTransformer_MoT(
                     visual_timestep,
                     encoder_hidden_states,
                     encoder_hidden_states_image,
+                    num_state_tokens,
+                    num_contact_tokens,
                 )
 
             if action_timestep.ndim == 2:
@@ -1532,6 +1774,8 @@ class CasualWorldActionTransformer_MoT(
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
         if torch.is_grad_enabled():
             raise RuntimeError(
@@ -1554,4 +1798,6 @@ class CasualWorldActionTransformer_MoT(
             state=state,
             action=action,
             embodiment_id=embodiment_id,
+            contact_condition=contact_condition,
+            contact_condition_mask=contact_condition_mask,
         )
