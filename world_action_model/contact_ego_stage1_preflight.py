@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
 import hashlib
 import io
 import json
@@ -42,6 +41,13 @@ from world_action_model.ego_dataset_fingerprint import (
     derive_ego_dataset_identity,
     derive_ego_t5_source_receipt,
 )
+from world_action_model.ego_stage1_gate_bootstrap import (
+    EGO_STAGE1_GATE_VERSION,
+    EGO_STAGE1_REQUIRED_ENV_PATHS,
+    EGO_STAGE1_REQUIRED_GATE_FLAGS,
+    EgoStage1BootstrapError,
+    validate_ego_stage1_gate_freshness_and_training_nonce,
+)
 import world_action_model.matched_control_hashes as matched_control_hashes
 from world_action_model.matched_control_hashes import (
     COLLECTOR_VERSION,
@@ -56,36 +62,10 @@ from world_action_model.verified_io import (
 )
 
 
-EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v3"
-REQUIRED_GATE_FLAGS = (
-    "human_adjudicated_sidecar_passed",
-    "dual_annotation_agreement_passed",
-    "group_metadata_complete",
-    "strategy_claim_allowed",
-    "ego_action_grip_evidence_passed",
-    "matched_control_hash_collector_passed",
-    "allow_server_training",
-    "allow_5b_training",
-)
-REQUIRED_ENV_PATHS = (
-    "GWP_EGO_DATA_PATH",
-    "GWP_EGO_NORM_STATS_PATH",
-    "GWP_EGO_FINAL_HDF5_DIR",
-    "GWP_CONTACT_SIDECAR_DIR",
-    "GWP_CONTACT_COVERAGE_CSV",
-    "GWP_CONTACT_SEGMENTS_CSV",
-    "GWP_CONTACT_INVENTORY_CSV",
-    "GWP_CONTACT_BUILD_CONFIG",
-    "GWP_CONTACT_SPLIT_MANIFEST",
-    "GWP_EGO_STAGE1_TRAINING_GATE",
-    "GWP_EGO_TRAINING_RUN_NONCE",
-)
+REQUIRED_GATE_FLAGS = EGO_STAGE1_REQUIRED_GATE_FLAGS
+REQUIRED_ENV_PATHS = EGO_STAGE1_REQUIRED_ENV_PATHS
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
-_NONCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}$")
-_UTC_DEADLINE_RE = re.compile(
-    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
-)
 REVIEWED_BUILDER_ID = "scripts/contact_labels/build_contact_segment_sidecars_v1_1.py"
 REQUIRED_SIDECAR_KEYS = (
     "contact_target", "contact_loss_mask", "contact_confidence", "contact_condition_mask"
@@ -635,37 +615,15 @@ def _head_blob_sha256(source_path: Path) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _validate_gate_freshness_and_training_nonce(
     gate: Mapping, *, training_run_nonce: str
 ) -> None:
-    gate_nonce = gate.get("training_run_nonce")
-    if not isinstance(training_run_nonce, str) or not _NONCE_RE.fullmatch(
-        training_run_nonce
-    ):
-        raise ContactEgoStage1PreflightError(
-            "GWP_EGO_TRAINING_RUN_NONCE must be an explicit audit nonce"
-        )
-    if gate_nonce != training_run_nonce or not isinstance(gate_nonce, str) or not _NONCE_RE.fullmatch(
-        gate_nonce
-    ):
-        raise ContactEgoStage1PreflightError(
-            "runtime training nonce differs from the reviewer-authored gate"
-        )
-    valid_until = gate.get("evidence_valid_until_utc")
-    if not isinstance(valid_until, str) or not _UTC_DEADLINE_RE.fullmatch(valid_until):
-        raise ContactEgoStage1PreflightError("gate evidence expiry must be UTC with Z suffix")
     try:
-        expiry = datetime.fromisoformat(valid_until[:-1] + "+00:00")
-    except ValueError as exc:
-        raise ContactEgoStage1PreflightError("invalid gate evidence expiry") from exc
-    if expiry.tzinfo is None or expiry.utcoffset() != timezone.utc.utcoffset(None):
-        raise ContactEgoStage1PreflightError("gate evidence expiry is not UTC")
-    if expiry <= _utc_now():
-        raise ContactEgoStage1PreflightError("training gate evidence has expired")
+        validate_ego_stage1_gate_freshness_and_training_nonce(
+            dict(gate), training_run_nonce=training_run_nonce
+        )
+    except EgoStage1BootstrapError as exc:
+        raise ContactEgoStage1PreflightError(str(exc)) from exc
 
 
 def _validate_agreement_metrics(metrics: object) -> bool:
@@ -1303,9 +1261,9 @@ def preflight_from_environment() -> dict:
         data_root=os.environ["GWP_EGO_DATA_PATH"], norm_stats_path=os.environ["GWP_EGO_NORM_STATS_PATH"],
         hdf5_dir=os.environ["GWP_EGO_FINAL_HDF5_DIR"],
         training_run_nonce=os.environ.get("GWP_EGO_TRAINING_RUN_NONCE", ""),
-        t5_embedding_dir=os.environ.get(
-            "GWP_T5_EMBEDDING_DIR",
-            str(Path(os.environ["GWP_EGO_DATA_PATH"]) / "t5_embedding"),
+        t5_embedding_dir=(
+            os.environ.get("GWP_T5_EMBEDDING_DIR", "").strip()
+            or str(Path(os.environ["GWP_EGO_DATA_PATH"]) / "t5_embedding")
         ),
         sidecar_dir=os.environ["GWP_CONTACT_SIDECAR_DIR"], coverage_csv=os.environ["GWP_CONTACT_COVERAGE_CSV"],
         segments_csv=os.environ["GWP_CONTACT_SEGMENTS_CSV"], inventory_csv=os.environ["GWP_CONTACT_INVENTORY_CSV"],

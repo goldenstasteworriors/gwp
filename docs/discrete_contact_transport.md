@@ -30,6 +30,12 @@ low-dimensional routing pilot, not yet a finite-capacity bottleneck.
   becoming a side channel.
 - The action expert receives only the transported 22-D tensor through the
   existing 22-to-action-width encoder. It never receives planner hidden state.
+- All modes reject NaN and positive/negative infinity before transport.
+  `hard_st` uses `hard.detach() + (semantic - semantic.detach())`: the
+  parenthesized term is exactly zero in the forward pass, so its bytes equal
+  `hard_detached` instead of retaining float-cancellation residues from the
+  continuous semantic value. The derivative with respect to `semantic`
+  remains the identity straight-through surrogate.
 
 Masked oracle values are merged at field level before hard transport. Known
 fields are therefore validated by the same finite grammar as predictions;
@@ -151,9 +157,11 @@ direct means planner computation is retained only as a parameter/FLOP control
 and every planner output is discarded before the direct action stream; the
 current config cannot express that route.
 
-The required hash collector is also `spec_only_no_hash_collector`. Fixed seeds
-alone do not establish a matched comparison, so no result may be called paired
-until per-step artifacts demonstrate equality of all required hashes.
+The rank-local hash collector and offline comparator are implemented for the
+exact runner set `soft_semantic`, `hard_st`, and `hard_detached`. Fixed seeds
+alone still do not establish a matched comparison, so no result may be called
+paired until the external gate binds non-empty per-step artifacts and all six
+required hashes are equal.
 
 The required variants separate token-count capacity, auxiliary supervision,
 raw hidden routing, soft semantics, finite semantics, gradient route, oracle

@@ -1016,6 +1016,8 @@ class CasualWorldActionTransformer_MoT(
         Every non-presence field is canonicalized to zero for absent queries.
         """
 
+        if not torch.isfinite(semantic).all():
+            raise ValueError("contact semantic transport requires finite values")
         if self.contact_semantic_transport_mode == "soft":
             return semantic
         if semantic.shape[-1] != SEGMENT_TARGET_DIM:
@@ -1074,7 +1076,12 @@ class CasualWorldActionTransformer_MoT(
             hard[..., field_slice] = hard[..., field_slice] * presence
 
         if self.contact_semantic_transport_mode == "hard_st":
-            return semantic + (hard - semantic).detach()
+            # Subtract the identical semantic tensor before adding the hard
+            # value.  This keeps the forward pass bit-exactly on the finite
+            # grammar alphabet while retaining an identity surrogate gradient.
+            # ``semantic + (hard - semantic).detach()`` can leave float32
+            # cancellation residues that depend on the pre-quantized value.
+            return hard.detach() + (semantic - semantic.detach())
         return hard.detach()
 
     def plan_contact_semantic(

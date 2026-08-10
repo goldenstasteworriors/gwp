@@ -7,13 +7,42 @@ training-gate JSON and launcher rank environment.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
+from pathlib import Path
 import re
 
 from world_action_model.verified_io import read_verified_bytes, strict_json_loads
 
 
 EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v3"
+EGO_STAGE1_REQUIRED_ENV_PATHS = (
+    "GWP_EGO_DATA_PATH",
+    "GWP_EGO_NORM_STATS_PATH",
+    "GWP_EGO_FINAL_HDF5_DIR",
+    "GWP_CONTACT_SIDECAR_DIR",
+    "GWP_CONTACT_COVERAGE_CSV",
+    "GWP_CONTACT_SEGMENTS_CSV",
+    "GWP_CONTACT_INVENTORY_CSV",
+    "GWP_CONTACT_BUILD_CONFIG",
+    "GWP_CONTACT_SPLIT_MANIFEST",
+    "GWP_EGO_STAGE1_TRAINING_GATE",
+    "GWP_EGO_TRAINING_RUN_NONCE",
+)
+EGO_STAGE1_REQUIRED_GATE_FLAGS = (
+    "human_adjudicated_sidecar_passed",
+    "dual_annotation_agreement_passed",
+    "group_metadata_complete",
+    "strategy_claim_allowed",
+    "ego_action_grip_evidence_passed",
+    "matched_control_hash_collector_passed",
+    "allow_server_training",
+    "allow_5b_training",
+)
+_NONCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}$")
+_UTC_DEADLINE_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
+)
 
 
 class EgoStage1BootstrapError(ValueError):
@@ -29,6 +58,84 @@ def _load_gate(path: str) -> dict:
     if not isinstance(payload, dict):
         raise EgoStage1BootstrapError("Ego Stage1 training gate must be a JSON object")
     return payload
+
+
+def validate_ego_stage1_gate_freshness_and_training_nonce(
+    gate: dict, *, training_run_nonce: str
+) -> None:
+    """Apply the shared nonce/deadline contract without heavy imports."""
+
+    gate_nonce = gate.get("training_run_nonce")
+    if not isinstance(training_run_nonce, str) or not _NONCE_RE.fullmatch(
+        training_run_nonce
+    ):
+        raise EgoStage1BootstrapError(
+            "GWP_EGO_TRAINING_RUN_NONCE must be an explicit audit nonce"
+        )
+    if (
+        gate_nonce != training_run_nonce
+        or not isinstance(gate_nonce, str)
+        or not _NONCE_RE.fullmatch(gate_nonce)
+    ):
+        raise EgoStage1BootstrapError(
+            "runtime training nonce differs from the reviewer-authored gate"
+        )
+    deadline = gate.get("evidence_valid_until_utc")
+    if not isinstance(deadline, str) or not _UTC_DEADLINE_RE.fullmatch(deadline):
+        raise EgoStage1BootstrapError("gate evidence expiry must be UTC with Z suffix")
+    try:
+        parsed_deadline = datetime.fromisoformat(deadline[:-1] + "+00:00")
+    except ValueError as exc:
+        raise EgoStage1BootstrapError("invalid gate evidence expiry") from exc
+    if (
+        parsed_deadline.tzinfo is None
+        or parsed_deadline.utcoffset() != timezone.utc.utcoffset(None)
+    ):
+        raise EgoStage1BootstrapError("gate evidence expiry is not UTC")
+    if parsed_deadline <= datetime.now(timezone.utc):
+        raise EgoStage1BootstrapError("training gate evidence has expired")
+
+
+def minimal_ego_stage1_admission_precheck_from_environment() -> bool:
+    """Reject an inadmissible launch before importing NumPy/Torch/model code.
+
+    This lightweight check can only reject.  The full production preflight
+    must still re-open and validate every artifact before a config is built.
+    """
+
+    missing = [
+        name
+        for name in EGO_STAGE1_REQUIRED_ENV_PATHS
+        if not os.environ.get(name, "").strip()
+    ]
+    if missing:
+        raise EgoStage1BootstrapError(
+            f"missing Ego Stage1 preflight paths: {missing}"
+        )
+    gate_path = os.environ["GWP_EGO_STAGE1_TRAINING_GATE"].strip()
+    gate = _load_gate(gate_path)
+    if gate.get("gate_version") != EGO_STAGE1_GATE_VERSION:
+        raise EgoStage1BootstrapError("training gate version differs during admission precheck")
+    failed = [
+        name for name in EGO_STAGE1_REQUIRED_GATE_FLAGS if gate.get(name) is not True
+    ]
+    if failed:
+        raise EgoStage1BootstrapError(
+            f"training gates not explicitly true during admission precheck: {failed}"
+        )
+    validate_ego_stage1_gate_freshness_and_training_nonce(
+        gate,
+        training_run_nonce=os.environ["GWP_EGO_TRAINING_RUN_NONCE"].strip(),
+    )
+    t5_text = os.environ.get("GWP_T5_EMBEDDING_DIR", "").strip()
+    if not t5_text:
+        t5_text = str(Path(os.environ["GWP_EGO_DATA_PATH"]) / "t5_embedding")
+    t5_root = Path(t5_text).expanduser().absolute()
+    if t5_root.is_symlink() or not t5_root.is_dir():
+        raise EgoStage1BootstrapError(
+            f"Stage1 T5 source must be a real directory: {t5_root}"
+        )
+    return True
 
 
 def minimal_matched_control_topology_precheck_from_environment() -> bool:

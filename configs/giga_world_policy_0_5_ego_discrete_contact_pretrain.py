@@ -7,15 +7,25 @@ semantic and transport choices below are not environment-tunable.
 import os
 
 
+# Reject missing paths, false/stale gates, nonce mismatch, and an absent T5
+# directory before importing NumPy, Torch, dataset, or model modules.  This
+# lightweight pass never authorizes a launch; the full preflight below repeats
+# these checks and verifies all artifact bytes.
+from world_action_model.ego_stage1_gate_bootstrap import (  # noqa: E402
+    minimal_ego_stage1_admission_precheck_from_environment,
+)
+
 # When the collector is enabled, reject launcher topology before importing the
-# full preflight stack or any permissive/base configuration.  Keep this import
-# inside the opt-in branch so the disabled collector adds no module/artifact IO.
+# full preflight stack or inspecting T5. Keep this import inside the opt-in
+# branch so the disabled collector does not read rank/world environment state.
 if os.environ.get("GWP_MATCHED_CONTROL_OUTPUT_DIR", "").strip():
     from world_action_model.ego_stage1_gate_bootstrap import (
         minimal_matched_control_topology_precheck_from_environment,
     )
 
     minimal_matched_control_topology_precheck_from_environment()
+
+minimal_ego_stage1_admission_precheck_from_environment()
 
 import copy  # noqa: E402
 

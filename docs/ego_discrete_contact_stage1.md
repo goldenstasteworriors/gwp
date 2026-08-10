@@ -5,7 +5,11 @@
 The production-gated entry is
 `configs/giga_world_policy_0_5_ego_discrete_contact_pretrain.py`. Importing it
 runs a fail-closed preflight before the permissive base configuration is
-loaded. It fixes 20 Hz, `processed_action_20hz`, H=48, Q=12/D=22,
+loaded. A stdlib-only admission pass rejects missing required paths, false or
+stale reviewer gates, nonce mismatch, and a missing/symlinked T5 directory
+before NumPy, Torch, dataset, or model imports. This pass can only reject; the
+full preflight reopens and verifies every artifact before config construction.
+It fixes 20 Hz, `processed_action_20hz`, H=48, Q=12/D=22,
 `contact_segment_v1_1`, `hard_st`, B=16, strict semantic bottleneck, and
 predicted contact conditioning. Label sidecars are training-only; action-only
 inference predicts and caches the transported hard semantic prefix.
