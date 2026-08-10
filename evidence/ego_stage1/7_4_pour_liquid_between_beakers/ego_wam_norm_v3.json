@@ -1032,13 +1032,20 @@
     "target_hand_status_semantics": "open_fraction_0_closed_1_open",
     "hand_status_conversion": "target=1-source",
     "hand_active_semantics": "binary_tracker_validity_0_inactive_1_active",
-    "hand_active_meta_sha256": "c9f45a015df657d4cdf0ddca1d4a572b68660aeeeee4ac8b5a014919cd558d7b",
+    "hand_active_meta_sha256": "8409af4fe4a39780702790be301adddc9113a97b8d718e96cdb4e0fe5c521675",
     "hand_active_sidecar_bundle_sha256": "72fff6f1a17916cc76cb0057eb77350e56cd1b883bd69759fe93131efc023fe9",
     "hand_active_raw_hdf5_bundle_sha256": "f074948ce59928b90f3122b205693590e74a114c1f54172ff41e938fe84db6cb",
     "hand_active_statistics": {
       "episode_count": 66,
       "raw_100hz_frames": 99953,
       "processed_frames": 20013,
+      "timestamp_alignment": {
+        "source_index_rule": "raw_100hz_indices_[::5]",
+        "stored_dtype_cast_exact": true,
+        "processed_storage_dtype": "float64",
+        "max_integer_rounding_residual_ns": 128,
+        "max_allowed_half_ulp_rounding_residual_ns": 128
+      },
       "supervision_domain_definitions": {
         "raw_100hz_active": "source left/right_hand_active before temporal downsampling",
         "current_20hz_active": "raw tracker validity at the exact processed indices [::5]",
@@ -1293,7 +1300,7 @@
         }
       }
     },
-    "hand_active_statistics_sha256": "d5a7be523a33229d84fdbfc512028accf6d8130fdcfc4ebc72e5f8866fbe0ce6",
+    "hand_active_statistics_sha256": "ceacea024494dc561eeb1cf2dab719a1f87b1ab1cb76a078b56248f8fe0c2199",
     "normalization_valid_sample_count": {
       "observation.state": [
         20013,

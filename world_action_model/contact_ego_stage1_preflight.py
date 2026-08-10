@@ -1269,8 +1269,25 @@ def _validate_gate(
         == "delta[t]=pose[t-1]^-1_times_pose[t];delta[0]=identity"
         and clock_audit.get("wrist_field_order")
         == "left_xyz_rpy_then_right_xyz_rpy"
-        and clock_audit.get("max_raw_100hz_to_processed_20hz_timestamp_residual_ns")
-        == 0.0
+        and clock_audit.get("raw_stride5_matches_after_stored_dtype_cast") is True
+        and isinstance(
+            clock_audit.get(
+                "max_raw_100hz_to_processed_20hz_timestamp_residual_ns"
+            ),
+            (int, float),
+        )
+        and isinstance(
+            clock_audit.get(
+                "max_allowed_half_ulp_timestamp_rounding_residual_ns"
+            ),
+            (int, float),
+        )
+        and clock_audit[
+            "max_raw_100hz_to_processed_20hz_timestamp_residual_ns"
+        ]
+        <= clock_audit[
+            "max_allowed_half_ulp_timestamp_rounding_residual_ns"
+        ]
     )
     if (
         grip.get("report_version") != "ego-action-grip-evidence/v2"
