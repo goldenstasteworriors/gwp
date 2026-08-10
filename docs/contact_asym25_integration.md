@@ -61,3 +61,8 @@ group metadata, so Stage 1 is also No-Go for scientific training.
 A future reviewed Ego pretraining stage and robot-native finetuning stage have
 different physical durations for a 48-step horizon. Although start/end tau are
 normalized, rate-dependent transfer remains an explicit ablation risk.
+
+The fail-closed Ego entry and its separate 20 Hz fingerprint/norm contract are
+documented in `docs/ego_discrete_contact_stage1.md`. It deliberately requires
+no robot hardware manifest; attaching an Ego sidecar to the robot-native stage
+or a robot sidecar to this Ego stage fails clock/dataset identity checks.

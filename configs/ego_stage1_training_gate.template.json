@@ -1,0 +1,34 @@
+{
+  "gate_version": "ego-discrete-contact-stage1-training-gate/v1",
+  "human_adjudicated_sidecar_passed": false,
+  "independent_segment_count": 0,
+  "dual_annotation_agreement_passed": false,
+  "group_metadata_complete": false,
+  "strategy_claim_allowed": false,
+  "ego_action_grip_evidence_passed": false,
+  "matched_control_hash_collector_passed": false,
+  "allow_server_training": false,
+  "allow_5b_training": false,
+  "artifact_fingerprints": {
+    "dataset_fingerprint_sha256": null,
+    "info_identity_sha256": null,
+    "episode_metadata_sha256": null,
+    "norm_stats_sha256": null,
+    "hdf5_bundle_sha256": null,
+    "sidecar_meta_sha256": null,
+    "sidecar_bundle_sha256": null,
+    "split_manifest_sha256": null,
+    "coverage_csv_sha256": null,
+    "segments_csv_sha256": null,
+    "inventory_csv_sha256": null,
+    "build_config_sha256": null
+  },
+  "evidence_reports": {
+    "annotation_agreement": {"path": null, "sha256": null},
+    "ego_action_grip": {"path": null, "sha256": null},
+    "matched_control_hash_collector": {"path": null, "sha256": null}
+  },
+  "reviewed_by": null,
+  "reviewed_at_utc": null,
+  "note": "Fail-closed template only. It is not a true example and cannot authorize training."
+}
