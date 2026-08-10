@@ -20,6 +20,9 @@ from world_action_model.ego_action_schema import (
     EGO_CANONICAL_ACTION_SCHEMA_ID,
     EGO_HAND_STATUS_SEMANTICS,
 )
+from world_action_model.matched_control_config import (
+    configure_matched_control_from_environment,
+)
 
 
 _FIXED_ENV = {
@@ -103,6 +106,14 @@ config["models"].update(
     contact_schema_version=SEGMENT_SCHEMA_VERSION,
     contact_condition_mode="predicted",
     require_contact_targets=True,
+)
+
+# The single output-directory opt-in controls the collector. If enabled, its
+# identity is locked to the exact portable identity produced by the preflight.
+configure_matched_control_from_environment(
+    config,
+    variant_id="hard_st",
+    expected_dataset_id=preflight_receipt["dataset_id"],
 )
 
 config["ego_discrete_contact_stage1"] = {

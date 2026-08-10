@@ -560,6 +560,8 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
         or set(collector.get("captured_hashes", [])) != required_hashes
         or collector.get("dry_run_passed") is not True
         or collector.get("all_hashes_equal_across_variants") is not True
+        or collector.get("dataset_id") != dataset_id
+        or collector.get("dataset_ids") != [dataset_id]
         or not isinstance(collector.get("matched_batch_count"), int)
         or isinstance(collector.get("matched_batch_count"), bool)
         or collector.get("matched_batch_count", 0) <= 0 or not valid_code
