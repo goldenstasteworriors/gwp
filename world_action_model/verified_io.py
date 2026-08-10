@@ -56,6 +56,7 @@ def _open_regular_fd(
     path: str | os.PathLike[str],
     *,
     expected_stat: Mapping[str, int] | None = None,
+    fd_owner: Any | None = None,
 ) -> tuple[int, Path, dict[str, int]]:
 
     absolute = _absolute_no_resolve(path)
@@ -78,13 +79,20 @@ def _open_regular_fd(
             raise VerifiedIOError(f"verified source changed during open: {absolute}")
         if expected_stat is not None and stat_identity(before) != dict(expected_stat):
             raise VerifiedIOError(f"verified source stat receipt differs: {absolute}")
-        return fd, absolute, stat_identity(before)
+        result_fd = fd
+        if fd_owner is not None:
+            fd_owner.adopt_fd(fd)
+            fd = None
+        return result_fd, absolute, stat_identity(before)
     except BaseException:
-        old_fd, fd = fd, None
-        try:
-            os.close(old_fd)
-        except OSError:
-            pass
+        if fd is not None and (
+            fd_owner is None or not fd_owner.owns_fd(fd)
+        ):
+            old_fd, fd = fd, None
+            try:
+                os.close(old_fd)
+            except OSError:
+                pass
         raise
 
 
@@ -118,10 +126,15 @@ def open_verified_regular_fd(
     *,
     expected_sha256: str | None = None,
     expected_stat: Mapping[str, int] | None = None,
+    fd_owner: Any | None = None,
 ) -> tuple[int, str, dict[str, int]]:
     """Open once with no-follow, hash that fd, and return it pinned at offset 0."""
 
-    fd, absolute, identity = _open_regular_fd(path, expected_stat=expected_stat)
+    fd, absolute, identity = _open_regular_fd(
+        path,
+        expected_stat=expected_stat,
+        fd_owner=fd_owner,
+    )
     try:
         _, actual_sha256 = _read_and_hash_fd(
             fd,
@@ -133,11 +146,12 @@ def open_verified_regular_fd(
             raise VerifiedIOError(f"verified source content SHA differs: {absolute}")
         return fd, actual_sha256, identity
     except BaseException:
-        old_fd, fd = fd, None
-        try:
-            os.close(old_fd)
-        except OSError:
-            pass
+        if fd_owner is None or not fd_owner.owns_fd(fd):
+            old_fd, fd = fd, None
+            try:
+                os.close(old_fd)
+            except OSError:
+                pass
         raise
 
 

@@ -7,10 +7,13 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import stat
+import threading
 import time
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -106,18 +109,427 @@ def _close_fd_once(fd: int) -> bool:
     return True
 
 
-def _close_fd_sequence_once(fds: Iterable[int]) -> None:
-    """Close every captured FD once, then re-raise the first cancellation/error."""
+def _close_fd_sequence_once(fds: list[int]) -> None:
+    """Consume and close every owned FD, then re-raise the first cancellation.
+
+    ``pop`` and the C-level close call share one traced source line. A line-trace
+    interruption therefore happens before ownership is consumed; a close that
+    raises after releasing the integer is never retried.
+    """
 
     first_error = None
-    for fd in fds:
+    while fds:
         try:
-            _close_fd_once(fd)
+            os.close(fds.pop())
+        except OSError:
+            # close(2) failure has ambiguous ownership; never retry the number.
+            pass
         except BaseException as exc:
             if first_error is None:
                 first_error = exc
     if first_error is not None:
         raise first_error
+
+
+@contextmanager
+def _defer_sigint():
+    """Delay normal SIGINT delivery across a short ownership-transfer region."""
+
+    is_main_thread = threading.current_thread() is threading.main_thread()
+    pending: list[tuple[int, object]] = []
+    previous_handler = None
+    if is_main_thread:
+        previous_handler = signal.getsignal(signal.SIGINT)
+
+        def defer_handler(signum, frame):
+            pending.append((signum, frame))
+
+        signal.signal(signal.SIGINT, defer_handler)
+    previous_mask = None
+    if hasattr(signal, "pthread_sigmask"):
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    try:
+        yield
+    finally:
+        if is_main_thread:
+            signal.signal(signal.SIGINT, previous_handler)
+        if previous_mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        if pending:
+            signum, frame = pending[0]
+            if previous_handler in {signal.SIG_DFL, signal.default_int_handler}:
+                raise KeyboardInterrupt
+            if callable(previous_handler):
+                previous_handler(signum, frame)
+
+
+def _directory_binding(file_stat: os.stat_result) -> dict[str, int]:
+    return {
+        "device": int(file_stat.st_dev),
+        "inode": int(file_stat.st_ino),
+        "mode": int(file_stat.st_mode),
+        "uid": int(file_stat.st_uid),
+    }
+
+
+class _CacheOwnership:
+    """Single published owner for private-cache directories and Arrow FDs."""
+
+    def __init__(self, *, parent_path: Path) -> None:
+        self.parent_path = parent_path
+        self._directory: dict[str, object] | None = None
+        self.entries: dict[str, dict] = {}
+        self.phase: tuple[str, int | None, datasets.Dataset | None] = (
+            "building",
+            None,
+            None,
+        )
+        self.released = False
+        self._arrow_fd_owner = _FDLeaseGroup()
+        self._directory_fd_owner = _FDLeaseGroup()
+        self._directory_cleared = False
+        self._lock = threading.RLock()
+        self._lock_pid = os.getpid()
+
+    def _current_lock(self) -> threading.RLock:
+        if self._lock_pid != os.getpid():
+            # Never acquire a lock inherited from another PID: a vanished
+            # parent thread may have held it across fork().
+            self._lock = threading.RLock()
+            self._lock_pid = os.getpid()
+        return self._lock
+
+    def adopt_directories(self, state: Mapping[str, object]) -> None:
+        required = {
+            "parent_fd",
+            "parent_stat",
+            "cache_fd",
+            "cache_stat",
+            "leaf",
+            "owner_pid",
+        }
+        if set(state) != required:
+            raise ValueError("invalid private-cache directory ownership state")
+        with self._current_lock():
+            if self.released or self._directory is not None:
+                raise ValueError("private-cache directories are already adopted")
+            # Normal SIGINT is deferred and line tracing observes one source
+            # line: both leases and their binding state move together within
+            # the supported cancellation model.
+            with _defer_sigint():
+                self._directory_fd_owner.adopt_fd(state["parent_fd"]); self._directory_fd_owner.adopt_fd(state["cache_fd"]); self._directory = dict(state)
+
+    def owns_directory_fd(self, fd: int) -> bool:
+        with self._current_lock():
+            return self._directory_fd_owner.owns_fd(fd)
+
+    def _require_directory(self) -> dict[str, object]:
+        if self._directory is None:
+            raise ValueError("verified private HF cache directories are not adopted")
+        return self._directory
+
+    @property
+    def dataset_pid(self) -> int | None:
+        with self._current_lock():
+            if self.released or self.phase[0] != "ready":
+                return None
+            return self.phase[1]
+
+    @property
+    def dataset(self) -> datasets.Dataset | None:
+        with self._current_lock():
+            if self.released or self.phase[0] != "ready":
+                return None
+            return self.phase[2]
+
+    @property
+    def fds(self) -> tuple[int, ...]:
+        with self._current_lock():
+            return self._arrow_fd_owner.fds
+
+    @property
+    def proc_path(self) -> str:
+        return f"/proc/self/fd/{self.cache_fd}"
+
+    @property
+    def parent_fd(self) -> int:
+        value = self._require_directory().get("parent_fd")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("invalid verified private-cache parent FD")
+        return value
+
+    @property
+    def cache_fd(self) -> int:
+        value = self._require_directory().get("cache_fd")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("invalid verified private-cache FD")
+        return value
+
+    @property
+    def owner_pid(self) -> int | None:
+        if self._directory is None:
+            return None
+        value = self._directory.get("owner_pid")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    def directory_state(self) -> dict[str, object]:
+        with self._current_lock():
+            return dict(self._require_directory())
+
+    @contextmanager
+    def operation(self):
+        # The lock deliberately spans build/mmap or one complete sample read.
+        # A concurrent cleanup cannot close/reuse the actual FD mid-operation.
+        with self._current_lock():
+            if self.released:
+                raise ValueError("verified private HF cache ownership is released")
+            yield self
+
+    def assert_directory_bound(self) -> None:
+        with self._current_lock():
+            if self.released:
+                raise ValueError("verified private HF cache ownership is released")
+            directory = self._require_directory()
+            verified_parent_fd, _ = _open_secure_absolute_directory(
+                self.parent_path,
+                create=False,
+            )
+            try:
+                parent_path_binding = _directory_binding(
+                    os.fstat(verified_parent_fd)
+                )
+            finally:
+                old_fd, verified_parent_fd = verified_parent_fd, None
+                _close_fd_once(old_fd)
+            leaf_path_stat = os.stat(
+                directory["leaf"],
+                dir_fd=self.parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                _directory_binding(os.fstat(self.parent_fd))
+                != directory["parent_stat"]
+                or parent_path_binding != directory["parent_stat"]
+                or _directory_binding(os.fstat(self.cache_fd))
+                != directory["cache_stat"]
+                or _directory_binding(leaf_path_stat) != directory["cache_stat"]
+                or not stat.S_ISDIR(leaf_path_stat.st_mode)
+            ):
+                raise ValueError("verified private HF cache directory binding changed")
+
+    def adopt_arrow_entry(self, entry: Mapping[str, object]) -> None:
+        logical_path = entry.get("logical_path")
+        fd = entry.get("fd")
+        if (
+            not isinstance(logical_path, str)
+            or not logical_path
+            or isinstance(fd, bool)
+            or not isinstance(fd, int)
+        ):
+            raise ValueError("invalid pinned Arrow ownership entry")
+        with self._current_lock():
+            if self.released or self.phase[0] != "building":
+                raise ValueError("cannot adopt Arrow FD into inactive cache ownership")
+            if logical_path in self.entries:
+                raise ValueError("duplicate pinned Arrow ownership entry")
+            updated = dict(self.entries)
+            updated[logical_path] = dict(entry)
+            self._arrow_fd_owner.adopt_fd(fd)
+            # One pointer store publishes the entry and its FD together.
+            self.entries = updated
+
+    def owns_arrow_fd(self, fd: int) -> bool:
+        with self._current_lock():
+            return self._arrow_fd_owner.owns_fd(fd)
+
+    def mark_ready(self, dataset: datasets.Dataset, dataset_pid: int) -> None:
+        with self._current_lock():
+            if self.released or self.phase[0] != "building" or not self.entries:
+                raise ValueError("cannot ready incomplete private Arrow ownership")
+            self.phase = ("ready", dataset_pid, dataset)
+
+    def entries_snapshot(self, *, allow_building: bool = False) -> dict[str, dict]:
+        with self._current_lock():
+            if self.released or (
+                self.phase[0] != "ready"
+                and not (allow_building and self.phase[0] == "building")
+            ):
+                raise ValueError("private Arrow ownership is not ready")
+            return dict(self.entries)
+
+    def release(self, *, delete_owned: bool) -> None:
+        with self._current_lock():
+            if self.released:
+                return
+            self._finish_release(delete_owned=delete_owned)
+
+    def _finish_release(self, *, delete_owned: bool) -> None:
+        first_error = None
+        try:
+            self._arrow_fd_owner.release()
+        except BaseException as exc:
+            if not self._arrow_fd_owner.released:
+                raise
+            first_error = exc
+        # Once Arrow ownership has been consumed, normal SIGINT is deferred
+        # across directory cleanup and the final state transition. Directory
+        # FDs themselves remain in a resumable lease for helper-level tracing.
+        with _defer_sigint():
+            self._release_directories(delete_owned=delete_owned); self.phase = ("released", None, None); self.released = True
+        if first_error is not None:
+            raise first_error
+
+    def _release_directories(self, *, delete_owned: bool) -> None:
+        if self._directory is None:
+            self._directory_fd_owner.release()
+            return
+        directory = self._directory
+        cache_fd = self.cache_fd
+        parent_fd = self.parent_fd
+        should_delete = delete_owned and directory["owner_pid"] == os.getpid()
+        if should_delete and not self._directory_cleared:
+            verified_parent_fd = None
+            transient_owner = _FDLeaseGroup()
+            try:
+                verified_parent_fd, _ = _open_secure_absolute_directory(self.parent_path, create=False); transient_owner.adopt_fd(verified_parent_fd)
+                parent_path_binding = _directory_binding(
+                    os.fstat(verified_parent_fd)
+                )
+                leaf_stat = os.stat(
+                    directory["leaf"],
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    _directory_binding(os.fstat(parent_fd))
+                    != directory["parent_stat"]
+                    or parent_path_binding != directory["parent_stat"]
+                    or _directory_binding(os.fstat(cache_fd))
+                    != directory["cache_stat"]
+                    or _directory_binding(leaf_stat) != directory["cache_stat"]
+                    or not stat.S_ISDIR(leaf_stat.st_mode)
+                ):
+                    raise ValueError(
+                        "verified private HF cache directory binding changed"
+                    )
+                _secure_clear_directory_fd(cache_fd); self._directory_cleared = True
+            except Exception as exc:
+                should_delete = False
+                logging.error("cannot safely remove owned private HF cache: %s", exc)
+            finally:
+                transient_owner.release()
+
+        first_error = None
+        if should_delete and self._directory_fd_owner.owns_fd(cache_fd):
+            try:
+                cache_closed = self._directory_fd_owner.release_fd(cache_fd)
+            except BaseException as exc:
+                if self._directory_fd_owner.owns_fd(cache_fd):
+                    raise
+                first_error = exc
+                cache_closed = True
+            if not cache_closed:
+                should_delete = False
+                logging.error("cannot safely remove owned private HF cache: close failed")
+        if should_delete:
+            try:
+                os.rmdir(directory["leaf"], dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logging.error("cannot safely remove owned private HF cache: %s", exc)
+        try:
+            self._directory_fd_owner.release()
+        except BaseException as exc:
+            if not self._directory_fd_owner.released:
+                raise
+            if first_error is None:
+                first_error = exc
+        self._directory = None; self._directory_cleared = False
+        if first_error is not None:
+            raise first_error
+
+    def __del__(self):
+        try:
+            self.release(delete_owned=True)
+        except BaseException:
+            pass
+
+
+class _FDLeaseGroup:
+    """Idempotent single owner for source FDs returned across Python calls."""
+
+    def __init__(self) -> None:
+        self._fds: list[int] = []
+        self.released = False
+        self._lock = threading.RLock()
+        self._lock_pid = os.getpid()
+
+    def _current_lock(self) -> threading.RLock:
+        if self._lock_pid != os.getpid():
+            self._lock = threading.RLock()
+            self._lock_pid = os.getpid()
+        return self._lock
+
+    def adopt_fd(self, fd: int) -> None:
+        if isinstance(fd, bool) or not isinstance(fd, int):
+            raise ValueError("invalid verified source FD")
+        with self._current_lock():
+            if self.released or fd in self._fds:
+                raise ValueError("cannot adopt source FD")
+            self._fds.append(fd)
+
+    @property
+    def fds(self) -> tuple[int, ...]:
+        with self._current_lock():
+            return tuple(self._fds)
+
+    def owns_fd(self, fd: int) -> bool:
+        with self._current_lock():
+            return fd in self._fds
+
+    def release_fd(self, fd: int) -> bool:
+        """Consume one matching FD before its single close attempt."""
+
+        with self._current_lock():
+            if fd not in self._fds:
+                return True
+            try:
+                os.close(self._fds.pop(self._fds.index(fd)))
+            except OSError:
+                return False
+            return True
+
+    @contextmanager
+    def operation(self):
+        # Source descriptors remain live through one complete sample read.
+        # Cleanup takes this same lock only after the Arrow/cache read guard,
+        # so video/parquet FD reuse cannot race a verified read.
+        with self._current_lock():
+            if self.released:
+                raise ValueError("verified source FD ownership is released")
+            yield self
+
+    def release(self) -> None:
+        with self._current_lock():
+            if self.released:
+                return
+            first_error = None
+            try:
+                with _defer_sigint():
+                    _close_fd_sequence_once(self._fds)
+            except BaseException as exc:
+                first_error = exc
+            finally:
+                self.released = not self._fds
+            if first_error is not None:
+                raise first_error
+
+    def __del__(self):
+        try:
+            self.release()
+        except BaseException:
+            pass
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -453,8 +865,12 @@ def _secure_clear_directory_fd(directory_fd: int) -> None:
 
 
 def _open_verified_regular_fd_at(
-    root_fd: int, relative_path: str
-) -> tuple[int, str, dict]:
+    root_fd: int,
+    relative_path: str,
+    *,
+    cache_ownership: _CacheOwnership | None = None,
+    arrow_entry_fields: Mapping[str, object] | None = None,
+) -> tuple[int, str, dict] | dict:
     """Open/hash a regular descendant without following any path component."""
 
     relative = Path(relative_path)
@@ -505,13 +921,27 @@ def _open_verified_regular_fd_at(
         if stat_identity(before) != stat_identity(after):
             raise ValueError("private Arrow cache changed while hashing")
         os.lseek(fd, 0, os.SEEK_SET)
+        if cache_ownership is not None:
+            if not isinstance(arrow_entry_fields, Mapping):
+                raise ValueError("pinned Arrow ownership entry fields are missing")
+            entry = {
+                **arrow_entry_fields,
+                "sha256": digest.hexdigest(),
+                "stat": stat_identity(after),
+                "fd": fd,
+                "pinned_path": f"/proc/self/fd/{fd}",
+            }
+            cache_ownership.adopt_arrow_entry(entry)
+            fd = None
+            return entry
         result = fd, digest.hexdigest(), stat_identity(after)
         fd = None
         return result
     except BaseException:
         if fd is not None:
-            old_fd, fd = fd, None
-            _close_fd_once(old_fd)
+            if cache_ownership is None or not cache_ownership.owns_arrow_fd(fd):
+                old_fd, fd = fd, None
+                _close_fd_once(old_fd)
         raise
 
 
@@ -1004,21 +1434,19 @@ class FastLeRobotDataset(_LeRobotDataset):
         verified_training_run_nonce: str | None = None,
     ):
         self._verified_source_entries: dict[str, dict] = {}
-        self._verified_source_fds: list[int] = []
+        self._verified_source_fd_owner = _FDLeaseGroup()
         self._verified_parquet_paths: list[Path] | None = None
         self._verified_video_entries: dict[tuple[int, str], dict] = {}
         self._verified_cache_tag: str | None = None
         self._verified_pid = os.getpid()
-        self._verified_cache_entries: dict[str, dict] = {}
-        self._verified_cache_fds: list[int] = []
-        self._verified_dataset_pid: int | None = None
+        self._verified_cache_ownership: _CacheOwnership | None = None
+        self._verified_cache_coordinator = (os.getpid(), threading.RLock())
         self._verified_private_cache_parent = (
             None
             if verified_private_cache_parent is None
             else Path(verified_private_cache_parent).expanduser().absolute()
         )
         self._verified_training_run_nonce = verified_training_run_nonce
-        self._verified_private_cache_state: dict[str, object] | None = None
         token = None
         try:
             if verified_source_receipt is not None:
@@ -1131,6 +1559,7 @@ class FastLeRobotDataset(_LeRobotDataset):
                 actual_path,
                 expected_sha256=entry["sha256"],
                 expected_stat=entry["stat"],
+                fd_owner=self._verified_source_fd_owner,
             )
             entry.update(
                 fd=fd,
@@ -1138,7 +1567,6 @@ class FastLeRobotDataset(_LeRobotDataset):
                 stat=runtime_stat,
                 pinned_path=Path(f"/proc/self/fd/{fd}"),
             )
-            self._verified_source_fds.append(fd)
             self._verified_source_entries[logical] = entry
         required_metadata = {
             "meta/info.json", "meta/tasks.jsonl", "meta/episodes.jsonl"
@@ -1213,33 +1641,47 @@ class FastLeRobotDataset(_LeRobotDataset):
                 # A spawn/pickle worker has no inherited descriptors. Never
                 # close the serialized integer values: the child may have
                 # independently reused those numbers for unrelated resources.
-                reopened_fds = []
+                old_owner = getattr(self, "_verified_source_fd_owner", None)
+                if isinstance(old_owner, _FDLeaseGroup):
+                    old_owner.release()
+                reopened_owner = _FDLeaseGroup()
                 try:
-                    for entry in self._verified_source_entries.values():
+                    reopened_entries = {}
+                    for logical, old_entry in self._verified_source_entries.items():
+                        entry = dict(old_entry)
                         new_fd, _, _ = open_verified_regular_fd(
                             entry["path_record_only"],
                             expected_sha256=entry["sha256"],
                             expected_stat=entry["stat"],
+                            fd_owner=reopened_owner,
                         )
-                        reopened_fds.append(new_fd)
                         entry["fd"] = new_fd
                         entry["pinned_path"] = Path(f"/proc/self/fd/{new_fd}")
+                        reopened_entries[logical] = entry
                 except BaseException:
-                    _close_fd_sequence_once(reopened_fds)
+                    reopened_owner.release()
                     raise
-                self._verified_source_fds = reopened_fds
-                self._verified_parquet_paths = [
+                reopened_parquet_paths = [
                     entry["pinned_path"]
                     for entry in sorted(
                         (
                             value
-                            for value in self._verified_source_entries.values()
+                            for value in reopened_entries.values()
                             if value["logical_role"] == "parquet"
                         ),
                         key=lambda value: value["logical_path"],
                     )
                 ]
-                self._verified_pid = os.getpid()
+                reopened_video_entries = {
+                    key: reopened_entries[entry["logical_path"]]
+                    for key, entry in self._verified_video_entries.items()
+                }
+                # This is the only source-state replacement. Normal SIGINT is
+                # deferred and line tracing observes one source line, so the
+                # descriptor owner cannot be separated from the mappings that
+                # reference it within the supported cancellation model.
+                with _defer_sigint():
+                    self._verified_source_entries = reopened_entries; self._verified_parquet_paths = reopened_parquet_paths; self._verified_video_entries = reopened_video_entries; self._verified_source_fd_owner = reopened_owner; self._verified_pid = os.getpid()
         for entry in self._verified_source_entries.values():
             if stat_identity(os.fstat(entry["fd"])) != entry["stat"]:
                 raise ValueError(
@@ -1247,19 +1689,36 @@ class FastLeRobotDataset(_LeRobotDataset):
                 )
 
     def _ensure_verified_process(self) -> None:
-        if self._verified_source_entries and self._verified_pid != os.getpid():
-            self._assert_verified_sources_unchanged()
+        with self._cache_coordinator_lock():
+            if self._verified_source_entries and self._verified_pid != os.getpid():
+                self._assert_verified_sources_unchanged()
+            cache_ownership = getattr(self, "_verified_cache_ownership", None)
+            dataset_pid = (
+                cache_ownership.dataset_pid
+                if isinstance(cache_ownership, _CacheOwnership)
+                else None
+            )
+            if self._verified_source_entries and dataset_pid != os.getpid():
+                # A fork/spawn worker must never consume the creating process's
+                # private cache or inherited Arrow mmap.  It retains/reopens only
+                # the verified source FDs, then force-builds its own unpredictable
+                # cache and maps the newly pinned Arrow descriptors.
+                self._release_private_cache(delete_owned=False)
+                self.hf_dataset = None
+                self.hf_dataset = self.load_hf_dataset()
+
+    def _cache_coordinator_lock(self) -> threading.RLock:
+        coordinator = getattr(self, "_verified_cache_coordinator", None)
         if (
-            self._verified_source_entries
-            and self._verified_dataset_pid != os.getpid()
+            not isinstance(coordinator, tuple)
+            or len(coordinator) != 2
+            or coordinator[0] != os.getpid()
         ):
-            # A fork/spawn worker must never consume the creating process's
-            # private cache or inherited Arrow mmap.  It retains/reopens only
-            # the verified source FDs, then force-builds its own unpredictable
-            # cache and maps the newly pinned Arrow descriptors.
-            self._release_private_cache(delete_owned=False)
-            self.hf_dataset = None
-            self.hf_dataset = self.load_hf_dataset()
+            # Check PID before touching an inherited lock: another parent
+            # thread may have held it across fork().
+            coordinator = (os.getpid(), threading.RLock())
+            self._verified_cache_coordinator = coordinator
+        return coordinator[1]
 
     @staticmethod
     def _assert_verified_entry_unchanged(entry: Mapping[str, object]) -> None:
@@ -1291,23 +1750,16 @@ class FastLeRobotDataset(_LeRobotDataset):
                         f"verified image column contains path-only/empty images: {key}"
                     )
 
-    @staticmethod
-    def _directory_binding(file_stat: os.stat_result) -> dict[str, int]:
-        return {
-            "device": int(file_stat.st_dev),
-            "inode": int(file_stat.st_ino),
-            "mode": int(file_stat.st_mode),
-            "uid": int(file_stat.st_uid),
-        }
-
-    def _create_private_cache(self) -> str:
+    def _create_private_cache(self) -> _CacheOwnership:
         if self._verified_private_cache_parent is None:
             raise ValueError("verified private-cache parent is missing")
-        if getattr(self, "_verified_private_cache_state", None) is not None:
+        existing = getattr(self, "_verified_cache_ownership", None)
+        if isinstance(existing, _CacheOwnership) and not existing.released:
             raise ValueError("verified private cache is already open")
         parent_fd = None
         cache_fd = None
         leaf = None
+        ownership = _CacheOwnership(parent_path=self._verified_private_cache_parent)
         try:
             parent_fd, _ = _open_secure_absolute_directory(
                 self._verified_private_cache_parent,
@@ -1336,11 +1788,12 @@ class FastLeRobotDataset(_LeRobotDataset):
                     f"run-{nonce_tag}-rank-{rank_text}-pid-{os.getpid()}-"
                     f"{secrets.token_hex(16)}"
                 )
-                try:
-                    os.mkdir(candidate, mode=0o700, dir_fd=parent_fd)
-                except FileExistsError:
-                    continue
                 leaf = candidate
+                try:
+                    os.mkdir(leaf, mode=0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    leaf = None
+                    continue
                 break
             if leaf is None:
                 raise ValueError("cannot allocate unpredictable private HF cache")
@@ -1359,295 +1812,291 @@ class FastLeRobotDataset(_LeRobotDataset):
                 or stat.S_IMODE(cache_stat.st_mode) != 0o700
             ):
                 raise ValueError("private HF cache is not owned mode 0700")
-            pending_state = {
-                "parent_fd": parent_fd,
-                "parent_stat": self._directory_binding(os.fstat(parent_fd)),
-                "cache_fd": cache_fd,
-                "cache_stat": self._directory_binding(cache_stat),
-                "leaf": leaf,
-                "owner_pid": os.getpid(),
-            }
-            self._assert_private_cache_state_bound(pending_state)
-            # The state dictionary is the single ownership publication point.
-            # Before this assignment cleanup cannot observe either local FD.
-            parent_fd = None
-            cache_fd = None
-            self._verified_private_cache_state = pending_state
-            return f"/proc/self/fd/{pending_state['cache_fd']}"
+            ownership.adopt_directories(
+                {
+                    "parent_fd": parent_fd,
+                    "parent_stat": _directory_binding(os.fstat(parent_fd)),
+                    "cache_fd": cache_fd,
+                    "cache_stat": _directory_binding(cache_stat),
+                    "leaf": leaf,
+                    "owner_pid": os.getpid(),
+                }
+            )
+            ownership.assert_directory_bound()
+            return ownership
         except BaseException:
-            try:
-                if cache_fd is not None:
-                    _secure_clear_directory_fd(cache_fd)
-                if leaf is not None and parent_fd is not None:
-                    os.rmdir(leaf, dir_fd=parent_fd)
-            except OSError:
-                pass
-            finally:
+            if (
+                (parent_fd is not None and ownership.owns_directory_fd(parent_fd))
+                or (cache_fd is not None and ownership.owns_directory_fd(cache_fd))
+            ):
+                ownership.release(delete_owned=True)
+            else:
                 try:
                     if cache_fd is not None:
-                        old_fd, cache_fd = cache_fd, None
-                        _close_fd_once(old_fd)
+                        _secure_clear_directory_fd(cache_fd)
+                    if leaf is not None and parent_fd is not None:
+                        os.rmdir(leaf, dir_fd=parent_fd)
+                except OSError:
+                    pass
                 finally:
-                    if parent_fd is not None:
-                        old_fd, parent_fd = parent_fd, None
-                        _close_fd_once(old_fd)
+                    try:
+                        if cache_fd is not None:
+                            old_fd, cache_fd = cache_fd, None
+                            _close_fd_once(old_fd)
+                    finally:
+                        if parent_fd is not None:
+                            old_fd, parent_fd = parent_fd, None
+                            _close_fd_once(old_fd)
             raise
-
-    def _assert_private_cache_state_bound(self, state: Mapping[str, object]) -> None:
-        parent_fd = state.get("parent_fd")
-        cache_fd = state.get("cache_fd")
-        leaf = state.get("leaf")
-        if (
-            isinstance(parent_fd, bool)
-            or not isinstance(parent_fd, int)
-            or isinstance(cache_fd, bool)
-            or not isinstance(cache_fd, int)
-            or not isinstance(leaf, str)
-            or not leaf
-        ):
-            raise ValueError("verified private HF cache is not pinned")
-        verified_parent_fd, _ = _open_secure_absolute_directory(
-            self._verified_private_cache_parent,
-            create=False,
-        )
-        try:
-            parent_path_binding = self._directory_binding(
-                os.fstat(verified_parent_fd)
-            )
-        finally:
-            old_fd, verified_parent_fd = verified_parent_fd, None
-            _close_fd_once(old_fd)
-        leaf_path_stat = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-        if (
-            self._directory_binding(os.fstat(parent_fd))
-            != state.get("parent_stat")
-            or parent_path_binding != state.get("parent_stat")
-            or self._directory_binding(os.fstat(cache_fd))
-            != state.get("cache_stat")
-            or self._directory_binding(leaf_path_stat)
-            != state.get("cache_stat")
-            or not stat.S_ISDIR(leaf_path_stat.st_mode)
-        ):
-            raise ValueError("verified private HF cache directory binding changed")
 
     def _assert_private_cache_directory_bound(self) -> None:
-        state = getattr(self, "_verified_private_cache_state", None)
-        if not isinstance(state, Mapping):
+        ownership = getattr(self, "_verified_cache_ownership", None)
+        if not isinstance(ownership, _CacheOwnership):
             raise ValueError("verified private HF cache is not pinned")
-        self._assert_private_cache_state_bound(state)
+        ownership.assert_directory_bound()
 
     def _open_pinned_arrow_dataset(
-        self, reader, builder_cache_dir: Path
+        self,
+        reader,
+        builder_cache_dir: Path,
+        ownership: _CacheOwnership,
     ) -> datasets.Dataset:
-        split_name = str(reader.split)
-        split_info = reader.builder.info.splits[split_name]
-        arrow_paths = [
-            Path(path)
-            for path in filenames_for_dataset_split(
-                str(builder_cache_dir),
-                dataset_name=reader.builder.dataset_name,
-                split=split_name,
-                filetype_suffix="arrow",
-                shard_lengths=split_info.shard_lengths,
-            )
-        ]
-        if not arrow_paths:
-            raise ValueError("private HF build produced no Arrow files")
-        entries = {}
-        fds = []
-        parts = []
-        private_state = getattr(self, "_verified_private_cache_state", None)
-        if not isinstance(private_state, Mapping):
-            raise ValueError("verified private HF cache is not pinned")
-        private_cache_fd = private_state.get("cache_fd")
-        if isinstance(private_cache_fd, bool) or not isinstance(private_cache_fd, int):
-            raise ValueError("verified private HF cache FD is invalid")
-        private_root = f"/proc/self/fd/{private_cache_fd}"
         try:
-            for index, arrow_path in enumerate(arrow_paths):
-                relative_path = os.path.relpath(str(arrow_path), private_root)
-                fd, digest, runtime_stat = _open_verified_regular_fd_at(
-                    private_cache_fd,
-                    Path(relative_path).as_posix(),
+            with ownership.operation():
+                split_name = str(reader.split)
+                split_info = reader.builder.info.splits[split_name]
+                arrow_paths = [
+                    Path(path)
+                    for path in filenames_for_dataset_split(
+                        str(builder_cache_dir),
+                        dataset_name=reader.builder.dataset_name,
+                        split=split_name,
+                        filetype_suffix="arrow",
+                        shard_lengths=split_info.shard_lengths,
+                    )
+                ]
+                if not arrow_paths:
+                    raise ValueError("private HF build produced no Arrow files")
+                parts = []
+                private_root = ownership.proc_path
+                for index, arrow_path in enumerate(arrow_paths):
+                    relative_path = Path(
+                        os.path.relpath(str(arrow_path), private_root)
+                    ).as_posix()
+                    entry = _open_verified_regular_fd_at(
+                        ownership.cache_fd,
+                        relative_path,
+                        cache_ownership=ownership,
+                        arrow_entry_fields={
+                            "logical_path": f"arrow/{index:06d}",
+                            "relative_path": relative_path,
+                            "build_path_record_only": str(arrow_path),
+                        },
+                    )
+                    if not isinstance(entry, dict):
+                        raise ValueError("pinned Arrow ownership adoption failed")
+                    fd = entry["fd"]
+                    before = stat_identity(os.fstat(fd))
+                    part = datasets.Dataset.from_file(
+                        entry["pinned_path"],
+                        info=reader.builder.info,
+                        split=reader.split,
+                        in_memory=False,
+                    )
+                    if stat_identity(os.fstat(fd)) != before:
+                        raise ValueError("private Arrow inode changed while mmap opened")
+                    parts.append(part)
+                result = (
+                    parts[0]
+                    if len(parts) == 1
+                    else datasets.concatenate_datasets(
+                        parts,
+                        info=reader.builder.info,
+                        split=reader.split,
+                    )
                 )
-                fds.append(fd)
-                pinned_path = f"/proc/self/fd/{fd}"
-                entry = {
-                    "logical_path": f"arrow/{index:06d}",
-                    "relative_path": Path(relative_path).as_posix(),
-                    "build_path_record_only": str(arrow_path),
-                    "pinned_path": pinned_path,
-                    "sha256": digest,
-                    "stat": runtime_stat,
-                    "fd": fd,
+                actual_mmap_paths = {
+                    item.get("filename") for item in result.cache_files
                 }
-                entries[entry["logical_path"]] = entry
-                before = stat_identity(os.fstat(fd))
-                part = datasets.Dataset.from_file(
-                    pinned_path,
-                    info=reader.builder.info,
-                    split=reader.split,
-                    in_memory=False,
-                )
-                if stat_identity(os.fstat(fd)) != before:
-                    raise ValueError("private Arrow inode changed while mmap opened")
-                parts.append(part)
-            result = (
-                parts[0]
-                if len(parts) == 1
-                else datasets.concatenate_datasets(
-                    parts,
-                    info=reader.builder.info,
-                    split=reader.split,
-                )
-            )
-            actual_mmap_paths = {
-                item.get("filename") for item in result.cache_files
-            }
-            expected_mmap_paths = {
-                entry["pinned_path"] for entry in entries.values()
-            }
-            if actual_mmap_paths != expected_mmap_paths:
-                raise ValueError(
-                    "HF Dataset is not mmap-backed by the pinned private Arrow FDs"
-                )
+                expected_mmap_paths = {
+                    entry["pinned_path"] for entry in ownership.entries.values()
+                }
+                if actual_mmap_paths != expected_mmap_paths:
+                    raise ValueError(
+                        "HF Dataset is not mmap-backed by the pinned private Arrow FDs"
+                    )
+                return result
         except BaseException:
-            _close_fd_sequence_once(fds)
+            ownership.release(delete_owned=True)
             raise
-        self._verified_cache_entries = entries
-        self._verified_cache_fds = fds
-        self._verified_dataset_pid = os.getpid()
-        return result
 
-    def _assert_verified_cache_unchanged(self) -> None:
+    def _assert_verified_cache_unchanged(
+        self, ownership: _CacheOwnership | None = None
+    ) -> None:
         if not self._verified_source_entries:
             return
-        self._assert_private_cache_directory_bound()
-        private_state = getattr(self, "_verified_private_cache_state", None)
-        private_cache_fd = (
-            private_state.get("cache_fd")
-            if isinstance(private_state, Mapping)
-            else None
-        )
-        if isinstance(private_cache_fd, bool) or not isinstance(private_cache_fd, int):
-            raise ValueError("verified private HF cache FD is invalid")
-        for entry in self._verified_cache_entries.values():
-            if (
-                stat_identity(os.fstat(entry["fd"])) != entry["stat"]
-                or _stat_regular_at(
-                    private_cache_fd,
-                    entry["relative_path"],
-                )
-                != entry["stat"]
-            ):
-                raise ValueError(
-                    "pinned private Arrow mmap source changed during training read"
-                )
+        if ownership is None:
+            ownership = getattr(self, "_verified_cache_ownership", None)
+        if not isinstance(ownership, _CacheOwnership):
+            raise ValueError("verified private HF cache is not pinned")
+        with ownership.operation():
+            ownership.assert_directory_bound()
+            for entry in ownership.entries_snapshot(allow_building=True).values():
+                if (
+                    stat_identity(os.fstat(entry["fd"])) != entry["stat"]
+                    or _stat_regular_at(
+                        ownership.cache_fd,
+                        entry["relative_path"],
+                    )
+                    != entry["stat"]
+                ):
+                    raise ValueError(
+                        "pinned private Arrow mmap source changed during training read"
+                    )
 
     def __getstate__(self):
-        state = dict(self.__dict__)
-        source_entries = {
-            logical: {**entry, "fd": None, "pinned_path": None}
-            for logical, entry in self._verified_source_entries.items()
-        }
-        state["_verified_source_entries"] = source_entries
-        state["_verified_source_fds"] = []
-        state["_verified_parquet_paths"] = None
-        state["_verified_video_entries"] = {
-            key: source_entries[entry["logical_path"]]
-            for key, entry in self._verified_video_entries.items()
-        }
-        state["_verified_pid"] = None
-        state["hf_dataset"] = None
-        state["_verified_cache_entries"] = {}
-        state["_verified_cache_fds"] = []
-        state["_verified_dataset_pid"] = None
-        state["_verified_private_cache_state"] = None
-        return state
+        with self._cache_coordinator_lock():
+            state = dict(self.__dict__)
+            source_entries = {
+                logical: {**entry, "fd": None, "pinned_path": None}
+                for logical, entry in self._verified_source_entries.items()
+            }
+            state["_verified_source_entries"] = source_entries
+            state["_verified_source_fd_owner"] = None
+            state["_verified_parquet_paths"] = None
+            state["_verified_video_entries"] = {
+                key: source_entries[entry["logical_path"]]
+                for key, entry in self._verified_video_entries.items()
+            }
+            state["_verified_pid"] = None
+            state["hf_dataset"] = None
+            state["_verified_cache_ownership"] = None
+            state["_verified_cache_coordinator"] = None
+            return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        self._verified_cache_coordinator = (os.getpid(), threading.RLock())
 
     def close_verified_sources(self) -> None:
-        source_fds = self.__dict__.pop("_verified_source_fds", [])
-        try:
-            _close_fd_sequence_once(source_fds)
-        finally:
-            self._release_private_cache(delete_owned=True)
+        # Serialize cleanup with private-cache construction/publication.  Cache
+        # release goes first: it waits for any complete sample read before the
+        # source descriptors used by that read can be closed and reused.
+        with self._cache_coordinator_lock():
+            source_owner = getattr(self, "_verified_source_fd_owner", None)
+            try:
+                self._release_private_cache(delete_owned=True)
+            finally:
+                if isinstance(source_owner, _FDLeaseGroup):
+                    source_owner.release()
 
     def _release_private_cache(self, *, delete_owned: bool) -> None:
-        # Atomically take all published ownership before any fstat/close.  A
-        # reentrant/repeated close therefore sees no stale integer FD that the
-        # OS may already have reassigned to an unrelated resource.
-        cache_fds = self.__dict__.pop("_verified_cache_fds", [])
-        self.__dict__.pop("_verified_cache_entries", None)
-        private_state = self.__dict__.pop("_verified_private_cache_state", None)
-        self.__dict__.pop("_verified_dataset_pid", None)
-        parent_fd = (
-            private_state.get("parent_fd")
-            if isinstance(private_state, Mapping)
-            else None
-        )
-        cache_fd = (
-            private_state.get("cache_fd")
-            if isinstance(private_state, Mapping)
-            else None
-        )
-        leaf = (
-            private_state.get("leaf")
-            if isinstance(private_state, Mapping)
-            else None
-        )
-        owner_pid = (
-            private_state.get("owner_pid")
-            if isinstance(private_state, Mapping)
-            else None
-        )
-        try:
-            _close_fd_sequence_once(cache_fds)
-            should_delete = (
-                delete_owned
-                and owner_pid == os.getpid()
-                and not isinstance(parent_fd, bool)
-                and isinstance(parent_fd, int)
-                and not isinstance(cache_fd, bool)
-                and isinstance(cache_fd, int)
-                and isinstance(leaf, str)
-                and bool(leaf)
-            )
-            if should_delete:
+        # RLock makes this safe when the caller already owns the coordinator
+        # (normal close and build replacement paths).
+        with self._cache_coordinator_lock():
+            ownership = getattr(self, "_verified_cache_ownership", None)
+            if isinstance(ownership, _CacheOwnership):
+                owned_dataset = ownership.dataset
                 try:
-                    self._assert_private_cache_state_bound(private_state)
-                    _secure_clear_directory_fd(cache_fd)
-                except Exception as exc:
-                    logging.error(
-                        "cannot safely remove owned private HF cache: %s", exc
-                    )
-                else:
-                    old_fd, cache_fd = cache_fd, None
-                    if _close_fd_once(old_fd):
-                        try:
-                            os.rmdir(leaf, dir_fd=parent_fd)
-                        except OSError as exc:
-                            logging.error(
-                                "cannot safely remove owned private HF cache: %s", exc
-                            )
-                    else:
-                        logging.error(
-                            "cannot safely remove owned private HF cache: close failed"
-                        )
-        finally:
-            try:
-                if not isinstance(cache_fd, bool) and isinstance(cache_fd, int):
-                    old_fd, cache_fd = cache_fd, None
-                    _close_fd_once(old_fd)
-            finally:
-                if not isinstance(parent_fd, bool) and isinstance(parent_fd, int):
-                    old_fd, parent_fd = parent_fd, None
-                    _close_fd_once(old_fd)
+                    ownership.release(delete_owned=delete_owned)
+                finally:
+                    if getattr(self, "hf_dataset", None) is owned_dataset:
+                        self.hf_dataset = None
+                    owned_dataset = None
 
     def __del__(self):
         self.close_verified_sources()
+
+    def _load_verified_hf_dataset(
+        self,
+        *,
+        features,
+        filters,
+        parquet_paths: list[str],
+        hf_transform,
+    ) -> datasets.Dataset:
+        from datasets.io.parquet import ParquetDatasetReader
+
+        with self._cache_coordinator_lock():
+            existing = getattr(self, "_verified_cache_ownership", None)
+            if isinstance(existing, _CacheOwnership):
+                existing_dataset = existing.dataset
+                if existing.dataset_pid == os.getpid() and existing_dataset is not None:
+                    return existing_dataset
+                existing.release(delete_owned=existing.owner_pid == os.getpid())
+
+            ownership = None
+            try:
+                ownership = self._create_private_cache()
+                builder_identity_payload = {
+                    "source_manifest_content_sha256": self._verified_cache_tag,
+                    "columns": list(features),
+                    "features": features.to_dict(),
+                    "episodes": None
+                    if self.episodes is None
+                    else list(self.episodes),
+                }
+                builder_identity = hashlib.sha256(
+                    json.dumps(
+                        builder_identity_payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+                ownership.assert_directory_bound()
+                self._assert_verified_sources_unchanged()
+                reader = ParquetDatasetReader(
+                    parquet_paths,
+                    filters=filters,
+                    features=features,
+                    columns=list(features),
+                    cache_dir=ownership.proc_path,
+                )
+                reader.builder = _VerifiedParquetBuilder(
+                    cache_dir=ownership.proc_path,
+                    dataset_name="parquet",
+                    data_files={str(reader.split): parquet_paths},
+                    features=features,
+                    hash=reader.builder.hash,
+                    filters=filters,
+                    columns=list(features),
+                    verified_identity=builder_identity,
+                )
+                builder_cache_dir = Path(reader.builder.cache_dir)
+                # Every verified load rebuilds inside this unpublished,
+                # unpredictable owner; no shared cache can authorize bytes.
+                reader.builder.download_and_prepare(
+                    download_mode=datasets.DownloadMode.FORCE_REDOWNLOAD,
+                )
+                ownership.assert_directory_bound()
+                self._assert_verified_sources_unchanged()
+                hf_dataset = self._open_pinned_arrow_dataset(
+                    reader,
+                    builder_cache_dir,
+                    ownership,
+                )
+                self._assert_verified_cache_unchanged(ownership)
+                self._validate_verified_embedded_images(hf_dataset)
+                self._assert_verified_cache_unchanged(ownership)
+                hf_dataset.set_transform(hf_transform)
+                ownership.mark_ready(hf_dataset, os.getpid())
+                # The only live-cache publication: directory bindings, Arrow
+                # entries/FDs, Dataset, PID and READY phase move together.
+                self._verified_cache_ownership = ownership
+                return hf_dataset
+            except BaseException as exc:
+                if isinstance(ownership, _CacheOwnership):
+                    ownership.release(delete_owned=True)
+                if isinstance(exc, Exception):
+                    if _is_file_descriptor_exhaustion(exc):
+                        raise ValueError(
+                            "insufficient file-descriptor capacity for pinned Arrow cache"
+                        ) from exc
+                    raise ValueError(
+                        "verified private HF build/mmap admission failed"
+                    ) from exc
+                raise
 
     @override
     def load_hf_dataset(self) -> datasets.Dataset:
@@ -1672,76 +2121,16 @@ class FastLeRobotDataset(_LeRobotDataset):
 
         filters = pa_ds.field('episode_index').isin(self.episodes) if self.episodes is not None else None
         parquet_paths = [str(path) for path in paths]
-        builder_cache_dir: str | None = None
-
         if self._verified_cache_tag is not None:
-            try:
-                cache_dir = self._create_private_cache()
-            except Exception as exc:
-                if _is_file_descriptor_exhaustion(exc):
-                    raise ValueError(
-                        "insufficient file-descriptor capacity for private HF cache"
-                    ) from exc
-                raise ValueError("cannot create verified private HF cache") from exc
-            try:
-                builder_identity_payload = {
-                    "source_manifest_content_sha256": self._verified_cache_tag,
-                    "columns": list(features),
-                    "features": features.to_dict(),
-                    "episodes": None if self.episodes is None else list(self.episodes),
-                }
-                builder_identity = hashlib.sha256(
-                    json.dumps(
-                        builder_identity_payload,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        allow_nan=False,
-                    ).encode("utf-8")
-                ).hexdigest()
-                self._assert_private_cache_directory_bound()
-                self._assert_verified_sources_unchanged()
-                reader = ParquetDatasetReader(
-                    parquet_paths,
-                    filters=filters,
-                    features=features,
-                    columns=list(features),
-                    cache_dir=cache_dir,
-                )
-                reader.builder = _VerifiedParquetBuilder(
-                    cache_dir=cache_dir,
-                    dataset_name="parquet",
-                    data_files={str(reader.split): parquet_paths},
-                    features=features,
-                    hash=reader.builder.hash,
-                    filters=filters,
-                    columns=list(features),
-                    verified_identity=builder_identity,
-                )
-                builder_cache_dir = reader.builder.cache_dir
-                # This directory was just unpredictably and exclusively made
-                # for this PID.  No shared cache or colocated attestation can
-                # authorize its contents; every verified load is rebuilt.
-                reader.builder.download_and_prepare(
-                    download_mode=datasets.DownloadMode.FORCE_REDOWNLOAD,
-                )
-                self._assert_private_cache_directory_bound()
-                self._assert_verified_sources_unchanged()
-                hf_dataset = self._open_pinned_arrow_dataset(
-                    reader,
-                    Path(builder_cache_dir),
-                )
-                self._assert_verified_cache_unchanged()
-            except Exception as exc:
-                self._release_private_cache(delete_owned=True)
-                if _is_file_descriptor_exhaustion(exc):
-                    raise ValueError(
-                        "insufficient file-descriptor capacity for pinned Arrow cache"
-                    ) from exc
-                raise ValueError(
-                    "verified private HF build/mmap admission failed"
-                ) from exc
-        else:
-            cache_dir = os.environ.get('HF_DATASETS_CACHE') or os.path.expanduser('~/.cache/huggingface/datasets')
+            return self._load_verified_hf_dataset(
+                features=features,
+                filters=filters,
+                parquet_paths=parquet_paths,
+                hf_transform=hf_transform_to_torch,
+            )
+
+        cache_dir = os.environ.get('HF_DATASETS_CACHE') or os.path.expanduser('~/.cache/huggingface/datasets')
+        builder_cache_dir: str | None = None
 
         def load_from_parquet() -> datasets.Dataset:
             nonlocal builder_cache_dir
@@ -1954,8 +2343,25 @@ class FastLeRobotDataset(_LeRobotDataset):
 
     @override
     def __getitem__(self, idx: int) -> dict:
-        self._ensure_verified_process()
-        self._ensure_hf_dataset_loaded()
+        guards = ExitStack()
+        try:
+            with self._cache_coordinator_lock():
+                self._ensure_verified_process()
+                self._ensure_hf_dataset_loaded()
+                source_owner = getattr(self, "_verified_source_fd_owner", None)
+                ownership = getattr(self, "_verified_cache_ownership", None)
+                # Enter both read guards before dropping the coordinator. Thus
+                # cleanup cannot observe a just-returned build and race either
+                # hf_dataset assignment or the first verified sample read.
+                if isinstance(source_owner, _FDLeaseGroup):
+                    guards.enter_context(source_owner.operation())
+                if isinstance(ownership, _CacheOwnership):
+                    guards.enter_context(ownership.operation())
+            return self._getitem_from_loaded_dataset(idx)
+        finally:
+            guards.close()
+
+    def _getitem_from_loaded_dataset(self, idx: int) -> dict:
         self._assert_verified_cache_unchanged()
         item = self.hf_dataset[idx]
         ep_idx = item['episode_index'].item()
