@@ -1,8 +1,33 @@
 {
   "packet_id": "contact-v1.1-a-20260810-min12",
-  "identity_sha256": "f1651bf61984d4c3ffe4bcaedcfa53f98f3deb0016b25353d4f49811bd62ee6f",
+  "identity_sha256": "2b5643f816327e110fd199f5c184925c94fe19113757f4fd11f33c79359ba558",
   "coverage_sha256": "da79d5297fe6976d432f79d84e4d48fe3c1ece8b82ae539c06c5172c9b546adf",
   "segments_sha256": "bb248268b0977575313f9373bca83af581e6325764583f3cd353fd645632663a",
   "tasks_sha256": "c3e23b5a01d2fd97ddb9cc20a08e275a2349e935d7db5549d753bc22db59434f",
-  "timeline_evidence_sha256": "0e407d8570eb5ea3fce8f8c49121ae41d1649f112ce8538abc027a0ec73750c4"
+  "timeline_evidence_sha256": "3e836ceceebe37b63961aa890c94368e6912aeb7bc33f37f16b7b0c5ae2b0759",
+  "coordinator_audit_sha256": "bce0374d6a7dcec4eb841d831e6e363383158ed3c401ef7904aa661712712844",
+  "annotation_guide_sha256": "34adaa1c199963cade0a61e08fa445c0d78f0a0e2f62acf40dcbfed7fec35fca",
+  "packet_file_allowlist": [
+    "ANNOTATION_GUIDE.md",
+    "assignment_receipt.json",
+    "coverage.csv",
+    "identity.json",
+    "segments.csv",
+    "tasks.csv",
+    "timeline_evidence_index.csv"
+  ],
+  "optional_media_relpaths": [
+    "media/contact-min12-00.mp4",
+    "media/contact-min12-01.mp4",
+    "media/contact-min12-02.mp4",
+    "media/contact-min12-03.mp4",
+    "media/contact-min12-04.mp4",
+    "media/contact-min12-05.mp4",
+    "media/contact-min12-06.mp4",
+    "media/contact-min12-07.mp4",
+    "media/contact-min12-08.mp4",
+    "media/contact-min12-09.mp4",
+    "media/contact-min12-10.mp4",
+    "media/contact-min12-11.mp4"
+  ]
 }

@@ -49,8 +49,8 @@ SEGMENT_FIELDS = (
 )
 PACKET_EVIDENCE_FIELDS = (
     "task_id", "episode_id", "processed_frame", "processed_time_s",
-    "camera_timestamp_ns", "video_frame", "video_time_s", "video_timestamp_us",
-    "sync_error_ms", "video_path", "video_sha256", "processed_hdf5_sha256",
+    "video_frame", "video_time_s", "sync_error_ms", "media_id",
+    "media_relpath", "video_sha256",
 )
 
 
@@ -59,11 +59,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-root", type=Path, default=DEFAULT_SOURCE_ROOT)
     parser.add_argument("--protocol-root", type=Path, default=DEFAULT_PROTOCOL_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument(
-        "--reuse-source-hashes",
-        action="store_true",
-        help="reuse an existing source_episode_manifest.csv after verifying paths/sizes",
-    )
     parser.add_argument(
         "--overwrite-empty-templates",
         action="store_true",
@@ -80,9 +75,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def write_csv(path: Path, fields: tuple[str, ...], rows: list[dict[str, object]], *, newline: str = "\n") -> None:
+def write_csv(
+    path: Path,
+    fields: tuple[str, ...],
+    rows: list[dict[str, object]],
+    *,
+    newline: str = "\n",
+    utf8_bom: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    with path.open("w", encoding="utf-8-sig" if utf8_bom else "utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, lineterminator=newline)
         writer.writeheader()
         writer.writerows(rows)
@@ -130,11 +132,7 @@ def inventory_sources(
     source_root: Path,
     inventory: dict[int, int],
     merge_report: dict,
-    existing_manifest: Path | None,
 ) -> list[dict[str, object]]:
-    cached: dict[int, dict[str, str]] = {}
-    if existing_manifest is not None and existing_manifest.exists():
-        cached = {int(row["episode_id"]): row for row in read_csv(existing_manifest)}
     report_by_episode = {int(row["episode"]): row for row in merge_report["episodes"]}
     rows: list[dict[str, object]] = []
     for episode in sorted(inventory):
@@ -153,17 +151,10 @@ def inventory_sources(
         report = report_by_episode[episode]
         if int(report["frames"]) != processed_frames or int(report["video_frames"]) != video_meta["video_frames"]:
             raise ValueError(f"episode {episode}: merge report disagrees with source files")
-        cache = cached.get(episode, {})
-        sizes_match = (
-            cache.get("processed_hdf5_bytes") == str(processed.stat().st_size)
-            and cache.get("video_bytes") == str(video.stat().st_size)
-        )
-        if sizes_match and cache.get("processed_hdf5_sha256") and cache.get("video_sha256"):
-            processed_hash = cache["processed_hdf5_sha256"]
-            video_hash = cache["video_sha256"]
-        else:
-            processed_hash = sha256_file(processed)
-            video_hash = sha256_file(video)
+        # Source receipts are content receipts. Same-size files are not
+        # interchangeable, so every preparation run recomputes their hashes.
+        processed_hash = sha256_file(processed)
+        video_hash = sha256_file(video)
         depth_hash = sha256_file(depth) if episode in MINIMUM_EPISODES else ""
         rows.append({
             "episode_id": episode,
@@ -202,6 +193,7 @@ def build_timeline(source_rows: list[dict[str, object]]) -> list[dict[str, objec
     evidence: list[dict[str, object]] = []
     for task_index, episode in enumerate(MINIMUM_EPISODES):
         source = rows_by_episode[episode]
+        task_id = f"contact-min12-{task_index:02d}"
         with h5py.File(str(source["processed_hdf5_path"]), "r") as handle:
             camera_ns = np.asarray(handle["camera_timestamp"], dtype=np.int64)
         with h5py.File(str(source["depth_timestamps_path"]), "r") as handle:
@@ -211,7 +203,7 @@ def build_timeline(source_rows: list[dict[str, object]]) -> list[dict[str, objec
             video_frame = int(video_frame)
             sync_error_ms = abs(int(camera_ns[processed_frame]) - int(color_us[video_frame]) * 1000) / 1e6
             evidence.append({
-                "task_id": f"contact-min12-{task_index:02d}",
+                "task_id": task_id,
                 "episode_id": episode,
                 "processed_frame": processed_frame,
                 "processed_time_s": f"{processed_frame / TARGET_FPS:.6f}",
@@ -220,6 +212,8 @@ def build_timeline(source_rows: list[dict[str, object]]) -> list[dict[str, objec
                 "video_time_s": f"{video_frame / float(source['video_fps']):.6f}",
                 "video_timestamp_us": int(color_us[video_frame]),
                 "sync_error_ms": f"{sync_error_ms:.6f}",
+                "media_id": f"contact-media-{task_index:02d}",
+                "media_relpath": f"media/{task_id}.mp4",
                 "video_path": source["video_path"],
                 "processed_hdf5_path": source["processed_hdf5_path"],
                 "video_sha256": source["video_sha256"],
@@ -250,6 +244,8 @@ def create_packet(
     tasks_path: Path,
     evidence_path: Path,
     inventory: dict[int, int],
+    coordinator_audit_path: Path,
+    annotation_guide_path: Path,
 ) -> None:
     role_lower = role_letter.lower()
     role = f"independent_{role_lower}"
@@ -258,6 +254,7 @@ def create_packet(
     session_id = f"UNASSIGNED_SESSION_{role_letter}"
     packet_root = root / f"annotator_{role_lower}"
     packet_root.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(annotation_guide_path, packet_root / "ANNOTATION_GUIDE.md")
     shutil.copyfile(tasks_path, packet_root / "tasks.csv")
     blind_evidence_rows = [
         {field: row[field] for field in PACKET_EVIDENCE_FIELDS}
@@ -277,6 +274,8 @@ def create_packet(
         "identity_status": "must_be_replaced_by_coordinator_before_distribution",
         "tasks_sha256": sha256_file(packet_root / "tasks.csv"),
         "timeline_evidence_sha256": sha256_file(packet_root / "timeline_evidence_index.csv"),
+        "coordinator_audit_sha256": sha256_file(coordinator_audit_path),
+        "annotation_guide_sha256": sha256_file(packet_root / "ANNOTATION_GUIDE.md"),
         "proposal_material_included": False,
         "other_annotator_material_included": False,
     }
@@ -304,9 +303,14 @@ def create_packet(
             "notes": f"task_id=contact-min12-{index:02d}; no label has been prefilled",
         })
     write_csv(packet_root / "coverage.csv", COVERAGE_FIELDS, coverage_rows)
-    # Different newline encodings make the physically independent empty files
-    # distinguishable before annotation; the checker canonicalizes their schema.
-    write_csv(packet_root / "segments.csv", SEGMENT_FIELDS, [], newline="\n" if role_letter == "A" else "\r\n")
+    # A UTF-8 BOM distinguishes the physically independent B empty file without
+    # trailing whitespace; read_csv_exact canonicalizes utf-8-sig input.
+    write_csv(
+        packet_root / "segments.csv",
+        SEGMENT_FIELDS,
+        [],
+        utf8_bom=role_letter == "B",
+    )
     receipt = {
         "packet_id": packet_id,
         "identity_sha256": sha256_file(packet_root / "identity.json"),
@@ -314,6 +318,21 @@ def create_packet(
         "segments_sha256": sha256_file(packet_root / "segments.csv"),
         "tasks_sha256": sha256_file(packet_root / "tasks.csv"),
         "timeline_evidence_sha256": sha256_file(packet_root / "timeline_evidence_index.csv"),
+        "coordinator_audit_sha256": sha256_file(coordinator_audit_path),
+        "annotation_guide_sha256": sha256_file(packet_root / "ANNOTATION_GUIDE.md"),
+        "packet_file_allowlist": [
+            "ANNOTATION_GUIDE.md",
+            "assignment_receipt.json",
+            "coverage.csv",
+            "identity.json",
+            "segments.csv",
+            "tasks.csv",
+            "timeline_evidence_index.csv",
+        ],
+        "optional_media_relpaths": [
+            f"media/contact-min12-{index:02d}.mp4"
+            for index in range(len(MINIMUM_EPISODES))
+        ],
     }
     (packet_root / "assignment_receipt.json").write_text(
         json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -370,6 +389,9 @@ def main() -> None:
         )
     inventory_path = args.protocol_root / "episode_inventory.csv"
     minimum_path = args.protocol_root / "minimum_annotation_set.csv"
+    annotation_guide_path = (
+        args.protocol_root / "formal_dual_annotation_v1_1" / "LABEL_DICTIONARY.md"
+    )
     merge_report_path = args.source_root / "vla_processed" / "final_hdf5" / "merge_report.json"
     inventory = read_inventory(inventory_path)
     verify_minimum_set(minimum_path, inventory)
@@ -382,7 +404,6 @@ def main() -> None:
         args.source_root,
         inventory,
         merge_report,
-        source_manifest if args.reuse_source_hashes else None,
     )
     source_fields = tuple(source_rows[0].keys())
     write_csv(source_manifest, source_fields, source_rows)
@@ -394,9 +415,6 @@ def main() -> None:
     task_fields = tuple(tasks[0].keys())
     tasks_path = args.output_root / "coordinator" / "tasks.csv"
     write_csv(tasks_path, task_fields, tasks)
-    create_packet(args.output_root, "A", tasks_path, coordinator_timeline, inventory)
-    create_packet(args.output_root, "B", tasks_path, coordinator_timeline, inventory)
-    create_adjudication_template(args.output_root, inventory)
     audit = {
         "packet_schema_version": PACKET_SCHEMA_VERSION,
         "canonical_commit": "913811dab0a7ee74a0493f19d7bab40225546d99",
@@ -410,12 +428,23 @@ def main() -> None:
         "inventory_sha256": sha256_file(inventory_path),
         "minimum_proposal_sha256_coordinator_only": sha256_file(minimum_path),
         "merge_report_sha256": sha256_file(merge_report_path),
+        "annotation_guide_sha256": sha256_file(annotation_guide_path),
         "proposal_material_copied_to_packets": False,
         "thumbnail_assets_generated": False,
     }
-    (args.output_root / "coordinator" / "audit.json").write_text(
+    coordinator_audit = args.output_root / "coordinator" / "audit.json"
+    coordinator_audit.write_text(
         json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    create_packet(
+        args.output_root, "A", tasks_path, coordinator_timeline, inventory,
+        coordinator_audit, annotation_guide_path,
+    )
+    create_packet(
+        args.output_root, "B", tasks_path, coordinator_timeline, inventory,
+        coordinator_audit, annotation_guide_path,
+    )
+    create_adjudication_template(args.output_root, inventory)
     print(json.dumps(audit, ensure_ascii=False, indent=2))
 
 

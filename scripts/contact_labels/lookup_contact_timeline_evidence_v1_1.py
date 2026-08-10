@@ -48,7 +48,8 @@ def main() -> None:
         "episode_id": args.episode,
         "processed_frame": args.processed_frame,
         "processed_time_s": float(focus["processed_time_s"]),
-        "video_path": focus["video_path"],
+        "media_id": focus["media_id"],
+        "media_relpath": focus["media_relpath"],
         "video_frame": int(focus["video_frame"]),
         "video_time_s": float(focus["video_time_s"]),
         "sync_error_ms": float(focus["sync_error_ms"]),
@@ -59,7 +60,6 @@ def main() -> None:
         },
         "source_hashes": {
             "video_sha256": focus["video_sha256"],
-            "processed_hdf5_sha256": focus["processed_hdf5_sha256"],
         },
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -1,8 +1,33 @@
 {
   "packet_id": "contact-v1.1-b-20260810-min12",
-  "identity_sha256": "62d2ff125742208f074af502988324a674d7ee1b4277de413810410f4e4518d3",
+  "identity_sha256": "fa6275b64dc6be6089bc6d9d05f42ef135fb0cde48632e33c3b9866c02b026ca",
   "coverage_sha256": "680414427a1106595a758f632c0e69aaf690ae4b7dd0761a7a6605a29249034e",
-  "segments_sha256": "d2d7c918e220280dd846dfe1b4bfd6b391e9f6ad90a2ece19da56bbdff65ba73",
+  "segments_sha256": "6ecbe60a52725dd0c9acd98ad89871ed480856fc14165d3078b8eb4acc1f7fb1",
   "tasks_sha256": "c3e23b5a01d2fd97ddb9cc20a08e275a2349e935d7db5549d753bc22db59434f",
-  "timeline_evidence_sha256": "0e407d8570eb5ea3fce8f8c49121ae41d1649f112ce8538abc027a0ec73750c4"
+  "timeline_evidence_sha256": "3e836ceceebe37b63961aa890c94368e6912aeb7bc33f37f16b7b0c5ae2b0759",
+  "coordinator_audit_sha256": "bce0374d6a7dcec4eb841d831e6e363383158ed3c401ef7904aa661712712844",
+  "annotation_guide_sha256": "34adaa1c199963cade0a61e08fa445c0d78f0a0e2f62acf40dcbfed7fec35fca",
+  "packet_file_allowlist": [
+    "ANNOTATION_GUIDE.md",
+    "assignment_receipt.json",
+    "coverage.csv",
+    "identity.json",
+    "segments.csv",
+    "tasks.csv",
+    "timeline_evidence_index.csv"
+  ],
+  "optional_media_relpaths": [
+    "media/contact-min12-00.mp4",
+    "media/contact-min12-01.mp4",
+    "media/contact-min12-02.mp4",
+    "media/contact-min12-03.mp4",
+    "media/contact-min12-04.mp4",
+    "media/contact-min12-05.mp4",
+    "media/contact-min12-06.mp4",
+    "media/contact-min12-07.mp4",
+    "media/contact-min12-08.mp4",
+    "media/contact-min12-09.mp4",
+    "media/contact-min12-10.mp4",
+    "media/contact-min12-11.mp4"
+  ]
 }
