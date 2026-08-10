@@ -160,7 +160,7 @@ config = dict(
         contact_loss_weight=float(_env("GWP_CONTACT_LOSS_WEIGHT", "0.25")),
         contact_loss_type=_env("GWP_CONTACT_LOSS_TYPE", "bce"),
         contact_condition_mode=_env("GWP_CONTACT_CONDITION_MODE", "predicted"),
-        require_contact_targets=True,
+        require_contact_targets=_env("GWP_REQUIRE_CONTACT_TARGETS", "1") == "1",
     ),
     optimizers=dict(type="CAME8Bit", lr=6e-5, weight_decay=1e-2),
     schedulers=dict(type="ConstantScheduler"),
