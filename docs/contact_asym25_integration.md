@@ -31,18 +31,26 @@ python -B scripts/discover_asymmetric25_hardware.py
 ```
 
 The helper only accepts repository-contained regular non-symlink JSON files and
-the allowlisted `/sys/class/net` and `/dev/serial/by-id` metadata roots. Within
-those validated inputs it does not open a serial, CAN, DDS, Modbus, or network
-endpoint and cannot send a control command. Arbitrary filesystem roots and
-special/FIFO/socket/symlink JSON inputs are rejected before opening.
+the allowlisted `/sys/class/net` and `/dev/serial/by-id` metadata roots. It pins
+each existing metadata root with a no-follow directory file descriptor and
+performs enumeration, attribute reads, and raw link reads relative to pinned
+directory descriptors. Serial link targets are never resolved or opened. Root
+replacement and symlink substitution are rejected. Within these validated
+inputs it does not open a serial, CAN, DDS, Modbus, or network endpoint and
+cannot send a control command. Arbitrary filesystem roots and special/FIFO/
+socket/symlink JSON inputs are rejected before content reads.
 
-Default JSON output hashes interface and stable serial identifiers, redacts the
-kernel, absolute paths and execution time, and reports both generic empty-value
-placeholders and bounded schema-structure issues. This audit is not a replacement
-for `validate_asymmetric_hardware_manifest.py`. Exact local identifiers may be
-shown only with `--include-sensitive-local-metadata`; that output is local-only,
-may contain device serials and host fingerprints, and must never be committed or
-attached to a public report.
+Default JSON output contains only interface/link counts and coarse categories;
+it emits neither raw local identifiers nor stable identifier digests that could
+be dictionary-recovered or linked across reports. It also redacts the kernel,
+absolute paths and execution time, and reports both generic empty-value
+placeholders and bounded schema-structure/finite-number/bounds issues. JSON
+templates reject `NaN`, positive/negative infinity, and overflow-to-infinity
+numbers. This audit is not a replacement for
+`validate_asymmetric_hardware_manifest.py`. Exact local identifiers and raw
+serial-link text may be shown only with `--include-sensitive-local-metadata`;
+that output is local-only, may contain device serials and host fingerprints, and
+must never be committed or attached to a public report.
 
 Empty candidate lists are only a statement about names visible to this host at
 that instant; they are not evidence that hardware is absent. The report is not a
