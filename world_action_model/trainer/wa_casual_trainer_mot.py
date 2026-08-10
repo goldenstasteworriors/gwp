@@ -15,6 +15,7 @@ from world_action_model.contact_transition_schema import (
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
 )
+from world_action_model.matched_control_hashes import MatchedControlCollector
 from world_action_model.models import CasualWorldActionTransformer_MoT
 from world_action_model.trainer.wa_casual_trainer_pretrain import (
     _as_dim_mask,
@@ -272,6 +273,18 @@ class CasualWATrainerMoT(Trainer):
         self.require_contact_targets = bool(
             model_config.get("require_contact_targets", False)
         )
+        self.matched_control_collector = None
+        matched_control_config = model_config.get("matched_control_collector")
+        if matched_control_config is not None and bool(
+            matched_control_config.get("enabled", False)
+        ):
+            self.matched_control_collector = MatchedControlCollector(
+                matched_control_config,
+                rank=self.process_index,
+                world_size=self.num_processes,
+                trainer_seed=self.seed,
+                project_dir=self.project_dir,
+            )
         if self.contact_condition_mode not in {"predicted", "oracle"}:
             raise ValueError(
                 "contact_condition_mode must be 'predicted' or 'oracle', got "
@@ -355,6 +368,15 @@ class CasualWATrainerMoT(Trainer):
         action_noise = torch.randn_like(action) * flow_mask
         action_target = (action_noise - action_for_flow) * flow_mask
         noisy_action = action_noise * action_sigma + action_for_flow * (1 - action_sigma)
+        if self.matched_control_collector is not None:
+            self.matched_control_collector.record(
+                global_step=self.cur_step,
+                batch_dict=batch_dict,
+                visual_timestep=visual_timestep,
+                action_timestep=action_timestep,
+                visual_noise=visual_noise,
+                action_noise=action_noise,
+            )
 
         prompt_embeds = prompt_embeds.to(self.dtype)
         if "ref_images" not in batch_dict:
