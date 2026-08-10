@@ -7,7 +7,6 @@ import os
 import re
 import secrets
 import shutil
-import signal
 import stat
 import threading
 import time
@@ -45,6 +44,7 @@ from PIL import Image
 from typing_extensions import override
 
 from world_action_model.verified_io import (
+    blocked_sigint,
     open_verified_regular_fd,
     read_verified_bytes,
     stat_identity,
@@ -112,9 +112,8 @@ def _close_fd_once(fd: int) -> bool:
 def _close_fd_sequence_once(fds: list[int]) -> None:
     """Consume and close every owned FD, then re-raise the first cancellation.
 
-    ``pop`` and the C-level close call share one traced source line. A line-trace
-    interruption therefore happens before ownership is consumed; a close that
-    raises after releasing the integer is never retried.
+    The caller blocks normal SIGINT across consumption. A close that raises
+    after releasing the integer is never retried.
     """
 
     first_error = None
@@ -129,38 +128,6 @@ def _close_fd_sequence_once(fds: list[int]) -> None:
                 first_error = exc
     if first_error is not None:
         raise first_error
-
-
-@contextmanager
-def _defer_sigint():
-    """Delay normal SIGINT delivery across a short ownership-transfer region."""
-
-    is_main_thread = threading.current_thread() is threading.main_thread()
-    pending: list[tuple[int, object]] = []
-    previous_handler = None
-    if is_main_thread:
-        previous_handler = signal.getsignal(signal.SIGINT)
-
-        def defer_handler(signum, frame):
-            pending.append((signum, frame))
-
-        signal.signal(signal.SIGINT, defer_handler)
-    previous_mask = None
-    if hasattr(signal, "pthread_sigmask"):
-        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
-    try:
-        yield
-    finally:
-        if is_main_thread:
-            signal.signal(signal.SIGINT, previous_handler)
-        if previous_mask is not None:
-            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        if pending:
-            signum, frame = pending[0]
-            if previous_handler in {signal.SIG_DFL, signal.default_int_handler}:
-                raise KeyboardInterrupt
-            if callable(previous_handler):
-                previous_handler(signum, frame)
 
 
 def _directory_binding(file_stat: os.stat_result) -> dict[str, int]:
@@ -210,14 +177,17 @@ class _CacheOwnership:
         }
         if set(state) != required:
             raise ValueError("invalid private-cache directory ownership state")
+        published_state = dict(state)
         with self._current_lock():
             if self.released or self._directory is not None:
                 raise ValueError("private-cache directories are already adopted")
-            # Normal SIGINT is deferred and line tracing observes one source
-            # line: both leases and their binding state move together within
-            # the supported cancellation model.
-            with _defer_sigint():
-                self._directory_fd_owner.adopt_fd(state["parent_fd"]); self._directory_fd_owner.adopt_fd(state["cache_fd"]); self._directory = dict(state)
+            # Normal SIGINT is blocked while both directory leases and their
+            # binding state move into this owner.
+            with blocked_sigint():
+                self._directory_fd_owner.adopt_fds(
+                    (state["parent_fd"], state["cache_fd"])
+                )
+                self._directory = published_state
 
     def owns_directory_fd(self, fd: int) -> bool:
         with self._current_lock():
@@ -290,17 +260,19 @@ class _CacheOwnership:
             if self.released:
                 raise ValueError("verified private HF cache ownership is released")
             directory = self._require_directory()
-            verified_parent_fd, _ = _open_secure_absolute_directory(
-                self.parent_path,
-                create=False,
-            )
+            transient_owner = _FDLeaseGroup()
             try:
+                with blocked_sigint():
+                    verified_parent_fd, _ = _open_secure_absolute_directory(
+                        self.parent_path,
+                        create=False,
+                    )
+                    transient_owner.adopt_fd(verified_parent_fd)
                 parent_path_binding = _directory_binding(
                     os.fstat(verified_parent_fd)
                 )
             finally:
-                old_fd, verified_parent_fd = verified_parent_fd, None
-                _close_fd_once(old_fd)
+                transient_owner.release()
             leaf_path_stat = os.stat(
                 directory["leaf"],
                 dir_fd=self.parent_fd,
@@ -334,9 +306,10 @@ class _CacheOwnership:
                 raise ValueError("duplicate pinned Arrow ownership entry")
             updated = dict(self.entries)
             updated[logical_path] = dict(entry)
-            self._arrow_fd_owner.adopt_fd(fd)
-            # One pointer store publishes the entry and its FD together.
-            self.entries = updated
+            with blocked_sigint():
+                self._arrow_fd_owner.adopt_fd(fd)
+                # One pointer store publishes the entry and its FD together.
+                self.entries = updated
 
     def owns_arrow_fd(self, fd: int) -> bool:
         with self._current_lock():
@@ -373,9 +346,11 @@ class _CacheOwnership:
             first_error = exc
         # Once Arrow ownership has been consumed, normal SIGINT is deferred
         # across directory cleanup and the final state transition. Directory
-        # FDs themselves remain in a resumable lease for helper-level tracing.
-        with _defer_sigint():
-            self._release_directories(delete_owned=delete_owned); self.phase = ("released", None, None); self.released = True
+        # FDs themselves remain in a resumable lease for ordinary exceptions.
+        with blocked_sigint():
+            self._release_directories(delete_owned=delete_owned)
+            self.phase = ("released", None, None)
+            self.released = True
         if first_error is not None:
             raise first_error
 
@@ -391,7 +366,11 @@ class _CacheOwnership:
             verified_parent_fd = None
             transient_owner = _FDLeaseGroup()
             try:
-                verified_parent_fd, _ = _open_secure_absolute_directory(self.parent_path, create=False); transient_owner.adopt_fd(verified_parent_fd)
+                with blocked_sigint():
+                    verified_parent_fd, _ = _open_secure_absolute_directory(
+                        self.parent_path, create=False
+                    )
+                    transient_owner.adopt_fd(verified_parent_fd)
                 parent_path_binding = _directory_binding(
                     os.fstat(verified_parent_fd)
                 )
@@ -412,7 +391,8 @@ class _CacheOwnership:
                     raise ValueError(
                         "verified private HF cache directory binding changed"
                     )
-                _secure_clear_directory_fd(cache_fd); self._directory_cleared = True
+                _secure_clear_directory_fd(cache_fd)
+                self._directory_cleared = True
             except Exception as exc:
                 should_delete = False
                 logging.error("cannot safely remove owned private HF cache: %s", exc)
@@ -445,7 +425,8 @@ class _CacheOwnership:
                 raise
             if first_error is None:
                 first_error = exc
-        self._directory = None; self._directory_cleared = False
+        self._directory = None
+        self._directory_cleared = False
         if first_error is not None:
             raise first_error
 
@@ -472,12 +453,21 @@ class _FDLeaseGroup:
         return self._lock
 
     def adopt_fd(self, fd: int) -> None:
-        if isinstance(fd, bool) or not isinstance(fd, int):
+        self.adopt_fds((fd,))
+
+    def adopt_fds(self, fds: Iterable[int]) -> None:
+        candidates = tuple(fds)
+        if not candidates or any(
+            isinstance(fd, bool) or not isinstance(fd, int) for fd in candidates
+        ):
             raise ValueError("invalid verified source FD")
+        if len(set(candidates)) != len(candidates):
+            raise ValueError("duplicate verified source FD")
         with self._current_lock():
-            if self.released or fd in self._fds:
+            if self.released or any(fd in self._fds for fd in candidates):
                 raise ValueError("cannot adopt source FD")
-            self._fds.append(fd)
+            with blocked_sigint():
+                self._fds.extend(candidates)
 
     @property
     def fds(self) -> tuple[int, ...]:
@@ -494,11 +484,22 @@ class _FDLeaseGroup:
         with self._current_lock():
             if fd not in self._fds:
                 return True
-            try:
-                os.close(self._fds.pop(self._fds.index(fd)))
-            except OSError:
-                return False
+            with blocked_sigint():
+                try:
+                    os.close(self._fds.pop(self._fds.index(fd)))
+                except OSError:
+                    return False
             return True
+
+    def relinquish_fd(self, fd: int) -> None:
+        """Transfer an FD to a caller without closing it."""
+
+        with self._current_lock():
+            if fd not in self._fds:
+                raise ValueError("cannot relinquish unowned verified FD")
+            with blocked_sigint():
+                self._fds.remove(fd)
+                self.released = not self._fds
 
     @contextmanager
     def operation(self):
@@ -516,7 +517,7 @@ class _FDLeaseGroup:
                 return
             first_error = None
             try:
-                with _defer_sigint():
+                with blocked_sigint():
                     _close_fd_sequence_once(self._fds)
             except BaseException as exc:
                 first_error = exc
@@ -815,11 +816,17 @@ def _open_secure_absolute_directory(path: Path, *, create: bool) -> tuple[int, d
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    current_fd = os.open(os.path.sep, flags)
+    fd_owner = _FDLeaseGroup()
+    current_fd = None
     try:
+        with blocked_sigint():
+            current_fd = os.open(os.path.sep, flags)
+            fd_owner.adopt_fd(current_fd)
         for part in absolute.parts[1:]:
             try:
-                next_fd = os.open(part, flags, dir_fd=current_fd)
+                with blocked_sigint():
+                    next_fd = os.open(part, flags, dir_fd=current_fd)
+                    fd_owner.adopt_fd(next_fd)
             except FileNotFoundError:
                 if not create:
                     raise
@@ -830,17 +837,20 @@ def _open_secure_absolute_directory(path: Path, *, create: bool) -> tuple[int, d
                     # parent component; the no-follow open below is still the
                     # authority and rejects non-directories/symlinks.
                     pass
-                next_fd = os.open(part, flags, dir_fd=current_fd)
-            old_fd, current_fd = current_fd, next_fd
-            os.close(old_fd)
+                with blocked_sigint():
+                    next_fd = os.open(part, flags, dir_fd=current_fd)
+                    fd_owner.adopt_fd(next_fd)
+            with blocked_sigint():
+                fd_owner.release_fd(current_fd)
+                current_fd = next_fd
         runtime_stat = stat_identity(os.fstat(current_fd))
         if not stat.S_ISDIR(runtime_stat["mode"]):
             raise ValueError("private HF cache parent is not a directory")
+        with blocked_sigint():
+            fd_owner.relinquish_fd(current_fd)
         return current_fd, runtime_stat
-    except BaseException:
-        old_fd, current_fd = current_fd, None
-        _close_fd_once(old_fd)
-        raise
+    finally:
+        fd_owner.release()
 
 
 def _secure_clear_directory_fd(directory_fd: int) -> None:
@@ -854,11 +864,14 @@ def _secure_clear_directory_fd(directory_fd: int) -> None:
     for name in os.listdir(directory_fd):
         entry_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         if stat.S_ISDIR(entry_stat.st_mode):
-            child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+            child_owner = _FDLeaseGroup()
             try:
+                with blocked_sigint():
+                    child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                    child_owner.adopt_fd(child_fd)
                 _secure_clear_directory_fd(child_fd)
             finally:
-                os.close(child_fd)
+                child_owner.release()
             os.rmdir(name, dir_fd=directory_fd)
         else:
             os.unlink(name, dir_fd=directory_fd)
@@ -888,20 +901,27 @@ def _open_verified_regular_fd_at(
     if hasattr(os, "O_NOFOLLOW"):
         directory_flags |= os.O_NOFOLLOW
         file_flags |= os.O_NOFOLLOW
+    file_owner = _FDLeaseGroup()
+    directory_owner = _FDLeaseGroup()
     fd = None
     try:
-        directory_fd = os.dup(root_fd)
+        with blocked_sigint():
+            directory_fd = os.dup(root_fd)
+            directory_owner.adopt_fd(directory_fd)
         try:
             for part in relative.parts[:-1]:
-                next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
-                old_fd, directory_fd = directory_fd, next_fd
-                os.close(old_fd)
+                with blocked_sigint():
+                    next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+                    directory_owner.adopt_fd(next_fd)
+                    directory_owner.release_fd(directory_fd)
+                    directory_fd = next_fd
             name = relative.parts[-1]
             path_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            fd = os.open(name, file_flags, dir_fd=directory_fd)
+            with blocked_sigint():
+                fd = os.open(name, file_flags, dir_fd=directory_fd)
+                file_owner.adopt_fd(fd)
         finally:
-            old_fd, directory_fd = directory_fd, None
-            _close_fd_once(old_fd)
+            directory_owner.release()
         before = os.fstat(fd)
         if (
             not stat.S_ISREG(path_stat.st_mode)
@@ -931,18 +951,17 @@ def _open_verified_regular_fd_at(
                 "fd": fd,
                 "pinned_path": f"/proc/self/fd/{fd}",
             }
-            cache_ownership.adopt_arrow_entry(entry)
-            fd = None
+            with blocked_sigint():
+                cache_ownership.adopt_arrow_entry(entry)
+                file_owner.relinquish_fd(fd)
             return entry
         result = fd, digest.hexdigest(), stat_identity(after)
-        fd = None
+        with blocked_sigint():
+            file_owner.relinquish_fd(fd)
         return result
-    except BaseException:
-        if fd is not None:
-            if cache_ownership is None or not cache_ownership.owns_arrow_fd(fd):
-                old_fd, fd = fd, None
-                _close_fd_once(old_fd)
-        raise
+    finally:
+        directory_owner.release()
+        file_owner.release()
 
 
 def _stat_regular_at(root_fd: int, relative_path: str) -> dict:
@@ -959,12 +978,17 @@ def _stat_regular_at(root_fd: int, relative_path: str) -> dict:
     )
     if hasattr(os, "O_NOFOLLOW"):
         directory_flags |= os.O_NOFOLLOW
-    directory_fd = os.dup(root_fd)
+    directory_owner = _FDLeaseGroup()
     try:
+        with blocked_sigint():
+            directory_fd = os.dup(root_fd)
+            directory_owner.adopt_fd(directory_fd)
         for part in relative.parts[:-1]:
-            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
-            old_fd, directory_fd = directory_fd, next_fd
-            os.close(old_fd)
+            with blocked_sigint():
+                next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+                directory_owner.adopt_fd(next_fd)
+                directory_owner.release_fd(directory_fd)
+                directory_fd = next_fd
         path_stat = os.stat(
             relative.parts[-1],
             dir_fd=directory_fd,
@@ -974,8 +998,7 @@ def _stat_regular_at(root_fd: int, relative_path: str) -> dict:
             raise ValueError("private Arrow pathname is not a regular file")
         return stat_identity(path_stat)
     finally:
-        old_fd, directory_fd = directory_fd, None
-        _close_fd_once(old_fd)
+        directory_owner.release()
 
 
 class _LeRobotDatasetMetadata(_OriginalLeRobotDatasetMetadata):
@@ -1677,11 +1700,14 @@ class FastLeRobotDataset(_LeRobotDataset):
                     for key, entry in self._verified_video_entries.items()
                 }
                 # This is the only source-state replacement. Normal SIGINT is
-                # deferred and line tracing observes one source line, so the
-                # descriptor owner cannot be separated from the mappings that
-                # reference it within the supported cancellation model.
-                with _defer_sigint():
-                    self._verified_source_entries = reopened_entries; self._verified_parquet_paths = reopened_parquet_paths; self._verified_video_entries = reopened_video_entries; self._verified_source_fd_owner = reopened_owner; self._verified_pid = os.getpid()
+                # blocked so the descriptor owner cannot be separated from the
+                # mappings that reference it within the supported model.
+                with blocked_sigint():
+                    self._verified_source_entries = reopened_entries
+                    self._verified_parquet_paths = reopened_parquet_paths
+                    self._verified_video_entries = reopened_video_entries
+                    self._verified_source_fd_owner = reopened_owner
+                    self._verified_pid = os.getpid()
         for entry in self._verified_source_entries.values():
             if stat_identity(os.fstat(entry["fd"])) != entry["stat"]:
                 raise ValueError(
@@ -1761,10 +1787,11 @@ class FastLeRobotDataset(_LeRobotDataset):
         leaf = None
         ownership = _CacheOwnership(parent_path=self._verified_private_cache_parent)
         try:
-            parent_fd, _ = _open_secure_absolute_directory(
-                self._verified_private_cache_parent,
-                create=True,
-            )
+            with blocked_sigint():
+                parent_fd, _ = _open_secure_absolute_directory(
+                    self._verified_private_cache_parent,
+                    create=True,
+                )
             parent_stat = os.fstat(parent_fd)
             if (
                 parent_stat.st_uid != os.geteuid()
@@ -1804,7 +1831,8 @@ class FastLeRobotDataset(_LeRobotDataset):
             )
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
-            cache_fd = os.open(leaf, flags, dir_fd=parent_fd)
+            with blocked_sigint():
+                cache_fd = os.open(leaf, flags, dir_fd=parent_fd)
             os.fchmod(cache_fd, 0o700)
             cache_stat = os.fstat(cache_fd)
             if (
@@ -1839,14 +1867,15 @@ class FastLeRobotDataset(_LeRobotDataset):
                 except OSError:
                     pass
                 finally:
-                    try:
-                        if cache_fd is not None:
-                            old_fd, cache_fd = cache_fd, None
-                            _close_fd_once(old_fd)
-                    finally:
-                        if parent_fd is not None:
-                            old_fd, parent_fd = parent_fd, None
-                            _close_fd_once(old_fd)
+                    with blocked_sigint():
+                        try:
+                            if cache_fd is not None:
+                                old_fd, cache_fd = cache_fd, None
+                                _close_fd_once(old_fd)
+                        finally:
+                            if parent_fd is not None:
+                                old_fd, parent_fd = parent_fd, None
+                                _close_fd_once(old_fd)
             raise
 
     def _assert_private_cache_directory_bound(self) -> None:

@@ -236,6 +236,21 @@ or matched-control config hash. Mode 0700 isolates other UIDs; deployments that
 treat arbitrary code under the training UID as hostile still require an OS
 boundary such as a distinct UID or mount namespace.
 
+FD acquisition, adoption, multi-FD transfer, publication, and consume-close
+transitions use short POSIX per-thread `pthread_sigmask` critical sections and
+restore the exact prior mask in `finally`; they never replace the process-wide
+SIGINT handler. Ordinary exceptions retain caller/owner cleanup. This guarantee
+applies to SIGINT targeted at the participating thread, and to process-directed
+SIGINT when all other threads that can receive it have inherited or installed
+the same block. POSIX may deliver a process-directed SIGINT to an already
+existing unblocked thread; this implementation does not claim to defer that
+case. Python executes its signal handler on the main thread, and termination
+reclaims any process FDs; the limitation is an availability boundary, not an
+authorization for consuming unverified bytes or changing the pinned inode.
+Synthetic `sys.settrace` exceptions inside a signal-blocked transfer are not a
+production admission criterion; explicit function exceptions still exercise
+the RAII cleanup paths.
+
 ## Current decision
 
 Current data are **No-Go for production Stage1**. The 66-episode inventory lacks
