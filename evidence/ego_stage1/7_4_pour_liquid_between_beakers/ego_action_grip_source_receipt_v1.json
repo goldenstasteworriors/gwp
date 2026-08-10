@@ -5,6 +5,15 @@
     "per-file worktree_matches_head records any upstream checkout drift; both HEAD and audited worktree semantic fragments and hashes were checked"
   ],
   "receipt_version": "ego-action-grip-source-receipt/v1",
+  "runtime_dependencies": {
+    "lerobot_dataset": {
+      "module": "lerobot.datasets.lerobot_dataset",
+      "path_record_only": "/home/ykj/project/lab/LabVLA/src/lerobot/src/lerobot/datasets/lerobot_dataset.py",
+      "sha256": "bb4b1f7cb2dca6b440f846b35670eba2ddb39434db0f03591a53fef6f022a9f8",
+      "size_bytes": 78358,
+      "version": "0.4.4"
+    }
+  },
   "upstream": {
     "files": [
       {
@@ -70,12 +79,28 @@
         "runtime_size_bytes": 7256
       },
       {
-        "git_blob_sha1": "f5c120f1e35d3f65eb2c3311010b98483649169e",
-        "head_blob_sha256": "9d93916ba48542223b739376af1ec32029d508ae7132bb19fde2387ff7f77dfc",
-        "head_blob_size_bytes": 23951,
+        "git_blob_sha1": "a97247963da72ff3e0299fddc0e96c2af78ecc0b",
+        "head_blob_sha256": "35dfab45c0e0258708b6cd52965cda2830ffd938a503530653404f7671246861",
+        "head_blob_size_bytes": 19737,
+        "logical_path": "world_action_model/ego_dataset_fingerprint.py",
+        "runtime_sha256": "35dfab45c0e0258708b6cd52965cda2830ffd938a503530653404f7671246861",
+        "runtime_size_bytes": 19737
+      },
+      {
+        "git_blob_sha1": "b758e2ce2d81d05250359630d3d8bc02306e325f",
+        "head_blob_sha256": "109951d046307484af5390f7f98062a4c27d7cecbbf232c968f6f4512e8ef5c4",
+        "head_blob_size_bytes": 28546,
         "logical_path": "world_action_model/ego_hand_active_sidecar.py",
-        "runtime_sha256": "9d93916ba48542223b739376af1ec32029d508ae7132bb19fde2387ff7f77dfc",
-        "runtime_size_bytes": 23951
+        "runtime_sha256": "109951d046307484af5390f7f98062a4c27d7cecbbf232c968f6f4512e8ef5c4",
+        "runtime_size_bytes": 28546
+      },
+      {
+        "git_blob_sha1": "4bfb752150932af2f50b411bbfe95e5f0a2b422f",
+        "head_blob_sha256": "8efed9f23a46ff61f253de3a3477479330800f9482008d635cd83955359d32e4",
+        "head_blob_size_bytes": 14649,
+        "logical_path": "world_action_model/verified_io.py",
+        "runtime_sha256": "8efed9f23a46ff61f253de3a3477479330800f9482008d635cd83955359d32e4",
+        "runtime_size_bytes": 14649
       },
       {
         "git_blob_sha1": "e40b348e25ef05e1f987e3f36561d8fd57aef1ec",
@@ -86,12 +111,12 @@
         "runtime_size_bytes": 39112
       },
       {
-        "git_blob_sha1": "0ad2098a5bbc2483843475f1eb9a74fd1b91afff",
-        "head_blob_sha256": "67693cc90bf992c671c224ecb74bbddfb8296ed23f351a851e44b7a672ef68a3",
-        "head_blob_size_bytes": 42404,
+        "git_blob_sha1": "e90e8d995f02c5911fd426b88b3a403b8dfbd28f",
+        "head_blob_sha256": "246c8681e4b3d7426a129bfd0114bbb70ccf180b3255cdf809ccbb52cb01aade",
+        "head_blob_size_bytes": 44589,
         "logical_path": "world_action_model/transforms/wa_transforms_lerobot_pretrain.py",
-        "runtime_sha256": "67693cc90bf992c671c224ecb74bbddfb8296ed23f351a851e44b7a672ef68a3",
-        "runtime_size_bytes": 42404
+        "runtime_sha256": "246c8681e4b3d7426a129bfd0114bbb70ccf180b3255cdf809ccbb52cb01aade",
+        "runtime_size_bytes": 44589
       },
       {
         "git_blob_sha1": "ae6111aa137bad719b5f3c66f82dd9b9f27133c2",
@@ -102,44 +127,60 @@
         "runtime_size_bytes": 25932
       },
       {
-        "git_blob_sha1": "07a42d22ae06390f9f216c3ba6c1136579d704e6",
-        "head_blob_sha256": "c13b9bce34ff9adfa29274cca6172727eeb8fb3a5daf86c947438a7d45f6840f",
-        "head_blob_size_bytes": 79084,
+        "git_blob_sha1": "26990170ab83cd6dbd5b10d85ea0196c80de63ca",
+        "head_blob_sha256": "e480ddd5172f49302c465a3c5d5fd71737f1250c18851486af63ec610d1477fe",
+        "head_blob_size_bytes": 87654,
         "logical_path": "world_action_model/contact_ego_stage1_preflight.py",
-        "runtime_sha256": "c13b9bce34ff9adfa29274cca6172727eeb8fb3a5daf86c947438a7d45f6840f",
-        "runtime_size_bytes": 79084
+        "runtime_sha256": "e480ddd5172f49302c465a3c5d5fd71737f1250c18851486af63ec610d1477fe",
+        "runtime_size_bytes": 87654
       },
       {
-        "git_blob_sha1": "5b583df378104eb54db8bd68e9fda69007c53242",
-        "head_blob_sha256": "3badfcaf1cf0708cc4e671a0cf501509c92b93a292429412b2089a5a1a3e0e12",
-        "head_blob_size_bytes": 8890,
+        "git_blob_sha1": "c6a7101c7dc8e4d7f9ef2f2b47b35fdf096af711",
+        "head_blob_sha256": "b262186f03866a0be1f98dae3275f4b00ccfabf2f24f198ca1483fbbe556581f",
+        "head_blob_size_bytes": 11018,
         "logical_path": "world_action_model/ego_stage1_gate_bootstrap.py",
-        "runtime_sha256": "3badfcaf1cf0708cc4e671a0cf501509c92b93a292429412b2089a5a1a3e0e12",
-        "runtime_size_bytes": 8890
+        "runtime_sha256": "b262186f03866a0be1f98dae3275f4b00ccfabf2f24f198ca1483fbbe556581f",
+        "runtime_size_bytes": 11018
       },
       {
-        "git_blob_sha1": "c3efc25bc2044533cbd61a4d50456211be700bb3",
-        "head_blob_sha256": "74c2721954783ef46fafd2dc231d84e65c9772536692b359c76ac69070a32ed4",
-        "head_blob_size_bytes": 7277,
+        "git_blob_sha1": "c2279caabd751d188513d582406faffd6075d840",
+        "head_blob_sha256": "79f5b694e8827ae83a4fea793d821cda6b85968623de5079966e0bc3a3d43203",
+        "head_blob_size_bytes": 17120,
+        "logical_path": "world_action_model/ego_group_metadata_recovery.py",
+        "runtime_sha256": "79f5b694e8827ae83a4fea793d821cda6b85968623de5079966e0bc3a3d43203",
+        "runtime_size_bytes": 17120
+      },
+      {
+        "git_blob_sha1": "df7272b55a1ac73e96376a361cd41199c26c31b9",
+        "head_blob_sha256": "9348bf5c96a3274a21943e12a58328e3707a2b55dc25dcb2304ec9164fd3fe5f",
+        "head_blob_size_bytes": 115414,
+        "logical_path": "third_party/giga-datasets/giga_datasets/datasets/lerobot_dataset.py",
+        "runtime_sha256": "9348bf5c96a3274a21943e12a58328e3707a2b55dc25dcb2304ec9164fd3fe5f",
+        "runtime_size_bytes": 115414
+      },
+      {
+        "git_blob_sha1": "0eca790f1afaa3e5e18d670a89ee0cfd8e798d6f",
+        "head_blob_sha256": "d940df52f71e0125fa0a78a46d0b9d7114c609dcaa727fe7377bbb4bfe6a6634",
+        "head_blob_size_bytes": 7665,
         "logical_path": "scripts/build_ego_hand_active_sidecars.py",
-        "runtime_sha256": "74c2721954783ef46fafd2dc231d84e65c9772536692b359c76ac69070a32ed4",
-        "runtime_size_bytes": 7277
+        "runtime_sha256": "d940df52f71e0125fa0a78a46d0b9d7114c609dcaa727fe7377bbb4bfe6a6634",
+        "runtime_size_bytes": 7665
       },
       {
-        "git_blob_sha1": "f2e2f5d49c60d1ffd3f5410ae06f0b958293fab6",
-        "head_blob_sha256": "2b3e0604e0dada087d0b334fa87f56a51c0baf12acf302a02898723a33d6de9f",
-        "head_blob_size_bytes": 13961,
+        "git_blob_sha1": "ff374a625ed5680745fcd50e901c13409a2d3e26",
+        "head_blob_sha256": "c8d4704198e199e2379f4227db32731e820b7e99510cdfdded59ec2dd4bea3c3",
+        "head_blob_size_bytes": 14329,
         "logical_path": "scripts/compute_ego_wam_norm.py",
-        "runtime_sha256": "2b3e0604e0dada087d0b334fa87f56a51c0baf12acf302a02898723a33d6de9f",
-        "runtime_size_bytes": 13961
+        "runtime_sha256": "c8d4704198e199e2379f4227db32731e820b7e99510cdfdded59ec2dd4bea3c3",
+        "runtime_size_bytes": 14329
       },
       {
-        "git_blob_sha1": "9a4769e8a766637d118c6de5067fc6b94d544eae",
-        "head_blob_sha256": "ed36e1d4d1bf8ff9ca6d31d00025b00134e056c0951d76ec6f556236fce45ecc",
-        "head_blob_size_bytes": 17982,
+        "git_blob_sha1": "bedffc0a1a37ae46cb3ce41456d4fc950f5f7b26",
+        "head_blob_sha256": "07c326154adffa583b3a0897970dd24f80a89524872d9cc39e146e933e454fc4",
+        "head_blob_size_bytes": 17957,
         "logical_path": "scripts/audit_ego_action_grip_evidence.py",
-        "runtime_sha256": "ed36e1d4d1bf8ff9ca6d31d00025b00134e056c0951d76ec6f556236fce45ecc",
-        "runtime_size_bytes": 17982
+        "runtime_sha256": "07c326154adffa583b3a0897970dd24f80a89524872d9cc39e146e933e454fc4",
+        "runtime_size_bytes": 17957
       },
       {
         "git_blob_sha1": "1264f278285e494731a2115120c59da7d1c28119",
@@ -150,7 +191,8 @@
         "runtime_size_bytes": 7851
       }
     ],
-    "git_commit": "10cae35212b28f6986e02a20c900b0990a22f80c",
-    "repository_path_record_only": "/home/ykj/project/WM/gwp-agent-op28-grip-evidence"
-  }
+    "git_commit": "c8db13d15626223c081345b7a027aacfb3732993",
+    "repository_path_record_only": "/home/ykj/project/WM/gwp-agent-op30-integration"
+  },
+  "wam_code_receipt_sha256": "0351922c6724cf9e2c64b42175a49d2c08eb29532bb4750c40932e117e962a54"
 }

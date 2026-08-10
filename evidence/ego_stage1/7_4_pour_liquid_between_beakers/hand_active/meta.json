@@ -215,6 +215,8 @@
   "frame_clock": "processed_action_20hz",
   "hand_active_semantics": "binary_tracker_validity_0_inactive_1_active",
   "horizon_frames": 48,
+  "lerobot_runtime_source_sha256": "bb4b1f7cb2dca6b440f846b35670eba2ddb39434db0f03591a53fef6f022a9f8",
+  "lerobot_runtime_version": "0.4.4",
   "limitations": [
     "hand_active is tracker validity, not physical contact truth",
     "hand_status is a square-wave closure proxy, not a calibrated aperture",
@@ -570,5 +572,6 @@
       "stored_dtype_cast_exact": true
     }
   },
-  "target_fps": 20.0
+  "target_fps": 20.0,
+  "wam_code_receipt_sha256": "0351922c6724cf9e2c64b42175a49d2c08eb29532bb4750c40932e117e962a54"
 }
