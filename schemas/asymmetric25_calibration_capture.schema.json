@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-giga.ai/schemas/asymmetric25_calibration_capture.schema.json",
+  "title": "Asymmetric 25D calibration capture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capture_version", "verification_level", "capture_id", "captured_at_utc",
+    "operator", "source_revision", "devices", "measurements", "approval"
+  ],
+  "properties": {
+    "$schema": {"type": "string"},
+    "$comment": {"type": "string"},
+    "capture_version": {"const": "asymmetric25-calibration-capture/v1"},
+    "verification_level": {
+      "enum": ["documentation_only", "bench_verified", "robot_verified"]
+    },
+    "capture_id": {"type": "string", "minLength": 1},
+    "captured_at_utc": {"type": "string", "format": "date-time"},
+    "operator": {"type": "string", "minLength": 1},
+    "source_revision": {"type": "string", "minLength": 1},
+    "devices": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["left_rh56dftp_serial", "right_omnipicker_serial"],
+      "properties": {
+        "left_rh56dftp_serial": {"type": "string", "minLength": 1},
+        "right_omnipicker_serial": {"type": "string", "minLength": 1}
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hardware", "wrists", "wbc", "timing", "safety"],
+      "properties": {
+        "hardware": {"$ref": "#/$defs/measurement"},
+        "wrists": {"$ref": "#/$defs/measurement"},
+        "wbc": {"$ref": "#/$defs/measurement"},
+        "timing": {"$ref": "#/$defs/measurement"},
+        "safety": {"$ref": "#/$defs/measurement"}
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approved", "approved_by", "approved_at_utc"],
+      "properties": {
+        "approved": {"const": true},
+        "approved_by": {"type": "string", "minLength": 1},
+        "approved_at_utc": {"type": "string", "format": "date-time"}
+      }
+    }
+  },
+  "$defs": {
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verified", "method", "sample_count", "result"],
+      "properties": {
+        "verified": {"const": true},
+        "method": {"type": "string", "minLength": 1},
+        "sample_count": {"type": "integer", "minimum": 1},
+        "result": {"type": "object"}
+      }
+    }
+  }
+}

@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-giga.ai/schemas/asymmetric25_hardware_manifest.schema.json",
+  "title": "Asymmetric 25D hardware action contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "action_schema_id",
+    "contract_id",
+    "canonical_hand_semantics",
+    "readiness",
+    "hardware",
+    "wrists",
+    "wbc",
+    "timing",
+    "safety",
+    "calibration"
+  ],
+  "properties": {
+    "$schema": {"type": "string"},
+    "$comment": {"type": "string"},
+    "manifest_version": {"const": "asymmetric25-hardware-contract/v1"},
+    "action_schema_id": {"const": "sonic_g1_rh56dftp6_omnipicker1_v1"},
+    "contract_id": {"type": "string", "minLength": 1},
+    "canonical_hand_semantics": {"const": "open_fraction_0_closed_1_open"},
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["training", "deployment", "approved_by", "approved_at_utc"],
+      "properties": {
+        "training": {"type": "boolean"},
+        "deployment": {"type": "boolean"},
+        "approved_by": {"type": "string", "minLength": 1},
+        "approved_at_utc": {"type": "string", "format": "date-time"}
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["left_hand", "right_gripper"],
+      "properties": {
+        "left_hand": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "manufacturer", "model", "side", "active_dof", "serial_number",
+            "state_feature", "command_feature", "interface", "channels"
+          ],
+          "properties": {
+            "manufacturer": {"const": "Inspire Robots"},
+            "model": {"const": "RH56DFTP"},
+            "side": {"const": "left"},
+            "active_dof": {"const": 6},
+            "serial_number": {"type": "string", "minLength": 1},
+            "state_feature": {"type": "string", "minLength": 1},
+            "command_feature": {"type": "string", "minLength": 1},
+            "interface": {"$ref": "#/$defs/interface"},
+            "channels": {
+              "type": "array",
+              "minItems": 6,
+              "maxItems": 6,
+              "prefixItems": [
+                {"$ref": "#/$defs/littleChannel"},
+                {"$ref": "#/$defs/ringChannel"},
+                {"$ref": "#/$defs/middleChannel"},
+                {"$ref": "#/$defs/indexChannel"},
+                {"$ref": "#/$defs/thumbBendChannel"},
+                {"$ref": "#/$defs/thumbRotateChannel"}
+              ],
+              "items": false
+            }
+          }
+        },
+        "right_gripper": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "manufacturer", "model", "side", "active_dof", "jaw_count",
+            "serial_number", "state_feature", "command_feature", "interface", "channel"
+          ],
+          "properties": {
+            "manufacturer": {"const": "AGIBOT"},
+            "model": {"const": "OmniPicker"},
+            "side": {"const": "right"},
+            "active_dof": {"const": 1},
+            "jaw_count": {"const": 2},
+            "serial_number": {"type": "string", "minLength": 1},
+            "state_feature": {"type": "string", "minLength": 1},
+            "command_feature": {"type": "string", "minLength": 1},
+            "interface": {"$ref": "#/$defs/interface"},
+            "channel": {"$ref": "#/$defs/apertureChannel"}
+          }
+        }
+      }
+    },
+    "wrists": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_feature", "state_representation", "action_representation",
+        "rotation_6d_layout", "relative_transform_convention",
+        "left", "right", "translation_step_limit_m", "rotation_step_limit_rad"
+      ],
+      "properties": {
+        "state_feature": {"type": "string", "minLength": 1},
+        "state_representation": {"const": "xyz_quat_wxyz"},
+        "action_representation": {"const": "current_wbc_fk_local_delta_xyz_rotation_6d"},
+        "rotation_6d_layout": {"const": "first_two_rotation_matrix_columns_column_major"},
+        "relative_transform_convention": {"const": "T_current_inverse_times_T_next"},
+        "left": {"$ref": "#/$defs/wristFrames"},
+        "right": {"$ref": "#/$defs/wristFrames"},
+        "translation_step_limit_m": {"type": "number", "exclusiveMinimum": 0, "maximum": 2},
+        "rotation_step_limit_rad": {"type": "number", "exclusiveMinimum": 0, "maximum": 3.141592653589793}
+      }
+    },
+    "wbc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_feature", "command_feature", "command_semantics",
+        "state_joint_names", "command_joint_names"
+      ],
+      "properties": {
+        "state_feature": {"type": "string", "minLength": 1},
+        "command_feature": {"type": "string", "minLength": 1},
+        "command_semantics": {"const": "absolute_joint_position_target"},
+        "state_joint_names": {
+          "type": "array",
+          "minItems": 29,
+          "maxItems": 29,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "command_joint_names": {
+          "type": "array",
+          "minItems": 29,
+          "maxItems": 29,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timestamp_feature", "unit", "clock_domain", "timestamp_origin",
+        "state_sample_semantics", "action_sample_semantics", "action_index_offset",
+        "terminal_policy", "nominal_rate_hz", "max_period_jitter_s",
+        "measured_command_latency_s", "max_command_latency_s",
+        "max_state_action_skew_s", "max_camera_state_skew_s",
+        "latency_measurement_method"
+      ],
+      "properties": {
+        "timestamp_feature": {"type": "string", "minLength": 1},
+        "unit": {"const": "s"},
+        "clock_domain": {"type": "string", "minLength": 1},
+        "timestamp_origin": {"const": "hardware_or_synchronized_clock"},
+        "state_sample_semantics": {"const": "measured_at_timestamp"},
+        "action_sample_semantics": {"const": "absolute_target_issued_at_timestamp"},
+        "action_index_offset": {"const": 1},
+        "terminal_policy": {"const": "repeat_last_hand_target_and_identity_wrist_delta"},
+        "nominal_rate_hz": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000},
+        "max_period_jitter_s": {"type": "number", "minimum": 0},
+        "measured_command_latency_s": {"type": "number", "minimum": 0},
+        "max_command_latency_s": {"type": "number", "exclusiveMinimum": 0},
+        "max_state_action_skew_s": {"type": "number", "minimum": 0},
+        "max_camera_state_skew_s": {"type": "number", "minimum": 0},
+        "latency_measurement_method": {"type": "string", "minLength": 1}
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["emergency_stop_endpoint", "watchdog_timeout_s", "max_consecutive_invalid_commands"],
+      "properties": {
+        "emergency_stop_endpoint": {"type": "string", "minLength": 1},
+        "watchdog_timeout_s": {"type": "number", "exclusiveMinimum": 0},
+        "max_consecutive_invalid_commands": {"type": "integer", "minimum": 1}
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verification_level", "capture_id", "capture_sha256", "captured_at_utc", "source_revision", "verified_by"],
+      "properties": {
+        "verification_level": {"enum": ["documentation_only", "bench_verified", "robot_verified"]},
+        "capture_id": {"type": "string", "minLength": 1},
+        "capture_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "captured_at_utc": {"type": "string", "format": "date-time"},
+        "source_revision": {"type": "string", "minLength": 1},
+        "verified_by": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "$defs": {
+    "interface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "state_endpoint", "command_endpoint", "driver_revision", "firmware_revision"],
+      "properties": {
+        "protocol": {"type": "string", "minLength": 1},
+        "state_endpoint": {"type": "string", "minLength": 1},
+        "command_endpoint": {"type": "string", "minLength": 1},
+        "driver_revision": {"type": "string", "minLength": 1},
+        "firmware_revision": {"type": "string", "minLength": 1}
+      }
+    },
+    "stateSignal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "unit", "closed_value", "open_value", "valid_min", "valid_max"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "unit": {"type": "string", "minLength": 1},
+        "closed_value": {"type": "number"},
+        "open_value": {"type": "number"},
+        "valid_min": {"type": "number"},
+        "valid_max": {"type": "number"}
+      }
+    },
+    "commandSignal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "unit", "closed_value", "open_value", "valid_min", "valid_max",
+        "semantics", "safety_min_open_fraction", "safety_max_open_fraction", "max_step_open_fraction"
+      ],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "unit": {"type": "string", "minLength": 1},
+        "closed_value": {"type": "number"},
+        "open_value": {"type": "number"},
+        "valid_min": {"type": "number"},
+        "valid_max": {"type": "number"},
+        "semantics": {"const": "absolute_position_target"},
+        "safety_min_open_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "safety_max_open_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "max_step_open_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+      }
+    },
+    "channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semantic", "state", "command"],
+      "properties": {
+        "semantic": {"type": "string"},
+        "state": {"$ref": "#/$defs/stateSignal"},
+        "command": {"$ref": "#/$defs/commandSignal"}
+      }
+    },
+    "littleChannel": {"allOf": [{"$ref": "#/$defs/channel"}, {"properties": {"semantic": {"const": "little"}}}]},
+    "ringChannel": {"allOf": [{"$ref": "#/$defs/channel"}, {"properties": {"semantic": {"const": "ring"}}}]},
+    "middleChannel": {"allOf": [{"$ref": "#/$defs/channel"}, {"properties": {"semantic": {"const": "middle"}}}]},
+    "indexChannel": {"allOf": [{"$ref": "#/$defs/channel"}, {"properties": {"semantic": {"const": "index"}}}]},
+    "thumbBendChannel": {"allOf": [{"$ref": "#/$defs/channel"}, {"properties": {"semantic": {"const": "thumb_bend"}}}]},
+    "thumbRotateChannel": {"allOf": [{"$ref": "#/$defs/channel"}, {"properties": {"semantic": {"const": "thumb_rotate"}}}]},
+    "apertureChannel": {"allOf": [{"$ref": "#/$defs/channel"}, {"properties": {"semantic": {"const": "aperture"}}}]},
+    "wristFrames": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state_parent_frame", "state_child_frame", "wbc_fk_frame"],
+      "properties": {
+        "state_parent_frame": {"type": "string", "minLength": 1},
+        "state_child_frame": {"type": "string", "minLength": 1},
+        "wbc_fk_frame": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

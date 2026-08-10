@@ -10,6 +10,7 @@ legacy 30-D representation to 25 dimensions is never a valid conversion.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import re
 
 import numpy as np
 
@@ -19,6 +20,7 @@ LEGACY_SONIC_ACTION_DIM = 30
 ASYMMETRIC_ACTION_DIM = 25
 ASYMMETRIC_SCHEMA_ID = "sonic_g1_rh56dftp6_omnipicker1_v1"
 LEGACY_SCHEMA_ID = "sonic_g1_inspire6x2_wrist_delta_v1"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 LEFT_WRIST_SLICE = slice(0, 9)
 RIGHT_WRIST_SLICE = slice(9, 18)
@@ -165,6 +167,8 @@ def validate_asymmetric_norm_payload(
     payload: Mapping,
     *,
     model_dim: int = MODEL_ACTION_DIM,
+    expected_hardware_contract_sha256: str | None = None,
+    expected_calibration_capture_sha256: str | None = None,
 ) -> None:
     """Reject legacy or unlabelled normalization statistics on the 25-D path."""
 
@@ -177,6 +181,22 @@ def validate_asymmetric_norm_payload(
             f"normalization stats action_schema_id={schema_id!r}; expected {ASYMMETRIC_SCHEMA_ID!r}. "
             "Legacy 30-D SONIC stats cannot be used for asymmetric hardware."
         )
+    hardware_digest = metadata.get("hardware_contract_sha256")
+    calibration_digest = metadata.get("calibration_capture_sha256")
+    if not isinstance(hardware_digest, str) or not _SHA256_RE.fullmatch(hardware_digest):
+        raise ValueError("asymmetric normalization stats require hardware_contract_sha256")
+    if not isinstance(calibration_digest, str) or not _SHA256_RE.fullmatch(calibration_digest):
+        raise ValueError("asymmetric normalization stats require calibration_capture_sha256")
+    if (
+        expected_hardware_contract_sha256 is not None
+        and hardware_digest != expected_hardware_contract_sha256
+    ):
+        raise ValueError("normalization stats were produced for a different hardware contract")
+    if (
+        expected_calibration_capture_sha256 is not None
+        and calibration_digest != expected_calibration_capture_sha256
+    ):
+        raise ValueError("normalization stats were produced from a different calibration capture")
     stats = payload.get("norm_stats")
     if not isinstance(stats, Mapping):
         raise ValueError("normalization stats payload is missing norm_stats")

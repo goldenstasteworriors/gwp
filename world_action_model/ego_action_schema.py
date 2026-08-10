@@ -4,8 +4,9 @@ The processed EgoHumanoid dataset stores an absolute dual-wrist pose as
 ``[xyz, qx, qy, qz, qw] x 2`` and a local-frame increment as
 ``[xyz, roll, pitch, yaw] x 2``.  WAM uses the continuous rotation-6D
 representation already adopted by the SONIC wrist-delta pipeline.  Two final
-dimensions retain the dataset's left/right binary hand-closure proxy; they are
-not interpreted as dexterous finger joints.
+dimensions retain the dataset's left/right binary hand-closure proxy.  The
+upstream EgoHumanoid collection/deployment code defines it as ``0=open,
+1=closed``; it is not an OmniPicker aperture or a dexterous joint vector.
 """
 
 from __future__ import annotations
@@ -14,6 +15,11 @@ import numpy as np
 
 
 EGO_WAM_ACTION_DIM = 20
+EGO_HAND_STATUS_SEMANTICS = "closure_fraction_0_open_1_closed"
+CANONICAL_OPEN_FRACTION_SEMANTICS = "open_fraction_0_closed_1_open"
+SUPPORTED_HAND_STATUS_SEMANTICS = frozenset(
+    {EGO_HAND_STATUS_SEMANTICS, CANONICAL_OPEN_FRACTION_SEMANTICS}
+)
 
 
 def _as_float_array(value, *, trailing_dim: int, name: str) -> np.ndarray:
@@ -25,6 +31,35 @@ def _as_float_array(value, *, trailing_dim: int, name: str) -> np.ndarray:
     if not np.isfinite(array).all():
         raise ValueError(f"{name} contains non-finite values")
     return array
+
+
+def convert_hand_status_semantics(
+    hand_status: np.ndarray,
+    *,
+    source_semantics: str,
+    target_semantics: str,
+) -> np.ndarray:
+    """Explicitly convert between closure fraction and canonical open fraction.
+
+    The conversion is deliberately opt-in.  Callers may not infer polarity
+    from a column name or silently reuse the Ego binary proxy as a hardware
+    aperture target.
+    """
+
+    hand_status = _as_float_array(
+        hand_status,
+        trailing_dim=2,
+        name="hand status",
+    )
+    if source_semantics not in SUPPORTED_HAND_STATUS_SEMANTICS:
+        raise ValueError(f"unsupported source hand-status semantics: {source_semantics!r}")
+    if target_semantics not in SUPPORTED_HAND_STATUS_SEMANTICS:
+        raise ValueError(f"unsupported target hand-status semantics: {target_semantics!r}")
+    if np.any(hand_status < 0.0) or np.any(hand_status > 1.0):
+        raise ValueError("hand status must lie in [0, 1]")
+    if source_semantics == target_semantics:
+        return hand_status.copy()
+    return (1.0 - hand_status).astype(np.float32, copy=False)
 
 
 def matrix_to_rot6d(matrix: np.ndarray) -> np.ndarray:

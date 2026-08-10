@@ -1,0 +1,110 @@
+{
+  "$schema": "../../schemas/asymmetric25_hardware_manifest.schema.json",
+  "$comment": "INCOMPLETE TEMPLATE: null/empty values are deliberate. Do not mark ready until measured and approved.",
+  "manifest_version": "asymmetric25-hardware-contract/v1",
+  "action_schema_id": "sonic_g1_rh56dftp6_omnipicker1_v1",
+  "contract_id": null,
+  "canonical_hand_semantics": "open_fraction_0_closed_1_open",
+  "readiness": {
+    "training": false,
+    "deployment": false,
+    "approved_by": null,
+    "approved_at_utc": null
+  },
+  "hardware": {
+    "left_hand": {
+      "manufacturer": "Inspire Robots",
+      "model": "RH56DFTP",
+      "side": "left",
+      "active_dof": 6,
+      "serial_number": null,
+      "state_feature": null,
+      "command_feature": null,
+      "interface": {
+        "protocol": null,
+        "state_endpoint": null,
+        "command_endpoint": null,
+        "driver_revision": null,
+        "firmware_revision": null
+      },
+      "channels": [
+        {"semantic": "little", "state": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null}, "command": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null, "semantics": "absolute_position_target", "safety_min_open_fraction": null, "safety_max_open_fraction": null, "max_step_open_fraction": null}},
+        {"semantic": "ring", "state": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null}, "command": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null, "semantics": "absolute_position_target", "safety_min_open_fraction": null, "safety_max_open_fraction": null, "max_step_open_fraction": null}},
+        {"semantic": "middle", "state": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null}, "command": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null, "semantics": "absolute_position_target", "safety_min_open_fraction": null, "safety_max_open_fraction": null, "max_step_open_fraction": null}},
+        {"semantic": "index", "state": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null}, "command": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null, "semantics": "absolute_position_target", "safety_min_open_fraction": null, "safety_max_open_fraction": null, "max_step_open_fraction": null}},
+        {"semantic": "thumb_bend", "state": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null}, "command": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null, "semantics": "absolute_position_target", "safety_min_open_fraction": null, "safety_max_open_fraction": null, "max_step_open_fraction": null}},
+        {"semantic": "thumb_rotate", "state": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null}, "command": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null, "semantics": "absolute_position_target", "safety_min_open_fraction": null, "safety_max_open_fraction": null, "max_step_open_fraction": null}}
+      ]
+    },
+    "right_gripper": {
+      "manufacturer": "AGIBOT",
+      "model": "OmniPicker",
+      "side": "right",
+      "active_dof": 1,
+      "jaw_count": 2,
+      "serial_number": null,
+      "state_feature": null,
+      "command_feature": null,
+      "interface": {
+        "protocol": null,
+        "state_endpoint": null,
+        "command_endpoint": null,
+        "driver_revision": null,
+        "firmware_revision": null
+      },
+      "channel": {
+        "semantic": "aperture",
+        "state": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null},
+        "command": {"name": null, "unit": null, "closed_value": null, "open_value": null, "valid_min": null, "valid_max": null, "semantics": "absolute_position_target", "safety_min_open_fraction": null, "safety_max_open_fraction": null, "max_step_open_fraction": null}
+      }
+    }
+  },
+  "wrists": {
+    "state_feature": null,
+    "state_representation": "xyz_quat_wxyz",
+    "action_representation": "current_wbc_fk_local_delta_xyz_rotation_6d",
+    "rotation_6d_layout": "first_two_rotation_matrix_columns_column_major",
+    "relative_transform_convention": "T_current_inverse_times_T_next",
+    "left": {"state_parent_frame": null, "state_child_frame": null, "wbc_fk_frame": null},
+    "right": {"state_parent_frame": null, "state_child_frame": null, "wbc_fk_frame": null},
+    "translation_step_limit_m": null,
+    "rotation_step_limit_rad": null
+  },
+  "wbc": {
+    "state_feature": null,
+    "command_feature": null,
+    "command_semantics": "absolute_joint_position_target",
+    "state_joint_names": [],
+    "command_joint_names": []
+  },
+  "timing": {
+    "timestamp_feature": null,
+    "unit": "s",
+    "clock_domain": null,
+    "timestamp_origin": "hardware_or_synchronized_clock",
+    "state_sample_semantics": "measured_at_timestamp",
+    "action_sample_semantics": "absolute_target_issued_at_timestamp",
+    "action_index_offset": 1,
+    "terminal_policy": "repeat_last_hand_target_and_identity_wrist_delta",
+    "nominal_rate_hz": null,
+    "max_period_jitter_s": null,
+    "measured_command_latency_s": null,
+    "max_command_latency_s": null,
+    "max_state_action_skew_s": null,
+    "max_camera_state_skew_s": null,
+    "latency_measurement_method": null
+  },
+  "safety": {
+    "emergency_stop_endpoint": null,
+    "watchdog_timeout_s": null,
+    "max_consecutive_invalid_commands": null
+  },
+  "calibration": {
+    "verification_level": null,
+    "capture_id": null,
+    "capture_sha256": null,
+    "captured_at_utc": null,
+    "source_revision": null,
+    "verified_by": null
+  }
+}

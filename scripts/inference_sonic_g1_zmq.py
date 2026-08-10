@@ -37,6 +37,13 @@ from world_action_model.asymmetric_action_schema import (
     LEGACY_SONIC_ACTION_DIM,
     validate_asymmetric_norm_payload,
 )
+from world_action_model.asymmetric_hardware_manifest import (
+    calibration_capture_sha256,
+    hardware_contract_sha256,
+    load_hardware_manifest,
+    validate_asymmetric_action,
+    validate_manifest_capture_binding,
+)
 from world_action_model.models import CasualWorldActionTransformer_MoT
 
 
@@ -79,12 +86,22 @@ def _load_stats(
     *,
     physical_dim: int,
     action_schema_id: str,
+    hardware_manifest: dict | None = None,
 ) -> tuple[torch.Tensor, ...]:
     import json
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     if action_schema_id == ASYMMETRIC_SCHEMA_ID:
-        validate_asymmetric_norm_payload(payload, model_dim=MODEL_ACTION_DIM)
+        if hardware_manifest is None:
+            raise ValueError("asymmetric25 inference requires a robot-verified hardware manifest")
+        validate_asymmetric_norm_payload(
+            payload,
+            model_dim=MODEL_ACTION_DIM,
+            expected_hardware_contract_sha256=hardware_contract_sha256(hardware_manifest),
+            expected_calibration_capture_sha256=hardware_manifest["calibration"][
+                "capture_sha256"
+            ],
+        )
     stats = payload["norm_stats"]
     state_low = torch.tensor(stats["observation.state"]["q01"][:physical_dim], device=device)
     state_high = torch.tensor(stats["observation.state"]["q99"][:physical_dim], device=device)
@@ -167,6 +184,8 @@ class SonicG1Policy:
         prompt_embedding: torch.Tensor | None,
         inference_steps: int,
         action_schema: str = "legacy30",
+        hardware_manifest: Path | None = None,
+        calibration_capture: Path | None = None,
     ) -> None:
         self.pipeline = pipeline
         self.device = torch.device(device)
@@ -176,9 +195,28 @@ class SonicG1Policy:
         if self.action_schema == "legacy30":
             self.physical_dim = LEGACY_SONIC_ACTION_DIM
             self.action_schema_id = LEGACY_SCHEMA_ID
+            self.hardware_manifest = None
+            self.hardware_contract_sha256 = None
+            self.calibration_capture_sha256 = None
         elif self.action_schema == "asymmetric25":
             self.physical_dim = ASYMMETRIC_ACTION_DIM
             self.action_schema_id = ASYMMETRIC_SCHEMA_ID
+            if hardware_manifest is None:
+                raise ValueError("asymmetric25 inference requires --hardware-manifest")
+            self.hardware_manifest = load_hardware_manifest(
+                hardware_manifest,
+                mode="deployment",
+            )
+            if calibration_capture is None:
+                raise ValueError("asymmetric25 inference requires --calibration-capture")
+            import json
+
+            capture = json.loads(calibration_capture.resolve().read_text(encoding="utf-8"))
+            validate_manifest_capture_binding(self.hardware_manifest, capture)
+            self.hardware_contract_sha256 = hardware_contract_sha256(
+                self.hardware_manifest
+            )
+            self.calibration_capture_sha256 = calibration_capture_sha256(capture)
         else:
             raise ValueError(f"unsupported action_schema={self.action_schema!r}")
         self.state_low, self.state_high, self.action_low, self.action_high = _load_stats(
@@ -186,6 +224,7 @@ class SonicG1Policy:
             self.device,
             physical_dim=self.physical_dim,
             action_schema_id=self.action_schema_id,
+            hardware_manifest=self.hardware_manifest,
         )
 
     @torch.inference_mode()
@@ -241,6 +280,12 @@ class SonicG1Policy:
         action_range = (self.action_high - self.action_low).clamp_min(1e-8)
         action = ((normalized_action + 1.0) * 0.5 * action_range + self.action_low)
         action = action[0].float().cpu().numpy()
+        if self.hardware_manifest is not None:
+            validate_asymmetric_action(
+                action,
+                self.hardware_manifest,
+                name="inference action",
+            )
         return {"unnormalized_actions": action, "inference_latency_s": latency}
 
 
@@ -268,6 +313,8 @@ class MsgpackPolicyServer:
                             "policy": "giga-world-policy-0.5-sonic-g1",
                             "action_schema": self.policy.action_schema,
                             "action_schema_id": self.policy.action_schema_id,
+                            "hardware_contract_sha256": self.policy.hardware_contract_sha256,
+                            "calibration_capture_sha256": self.policy.calibration_capture_sha256,
                             "state_dim": self.policy.physical_dim,
                             "action_dim": self.policy.physical_dim,
                             "action_horizon": 48,
@@ -309,6 +356,18 @@ def parse_args() -> argparse.Namespace:
         default="legacy30",
         help="Legacy 30-D remains the default; asymmetric25 requires schema-labelled norm stats.",
     )
+    parser.add_argument(
+        "--hardware-manifest",
+        type=Path,
+        default=None,
+        help="Required for asymmetric25 and must be robot_verified with matching norm stats.",
+    )
+    parser.add_argument(
+        "--calibration-capture",
+        type=Path,
+        default=None,
+        help="Required for asymmetric25; structured result must exactly match the manifest.",
+    )
     parser.add_argument("--no-compile-transformer", action="store_true")
     return parser.parse_args()
 
@@ -328,7 +387,9 @@ def main() -> None:
         args.device,
         fixed_t5,
         args.inference_steps,
-        args.action_schema,
+        action_schema=args.action_schema,
+        hardware_manifest=args.hardware_manifest,
+        calibration_capture=args.calibration_capture,
     )
     MsgpackPolicyServer(policy, args.host, args.port).run()
 
