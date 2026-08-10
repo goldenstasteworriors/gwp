@@ -17,6 +17,17 @@ from world_action_model.ego_action_schema import (
     dual_eef_pose_to_state,
 )
 from world_action_model.asymmetric_action_schema import ASYMMETRIC_SCHEMA_ID
+from world_action_model.matched_control_hashes import (
+    SAMPLE_AUGMENTATION_KEY,
+    SAMPLE_DATA_PATH_KEY,
+    SAMPLE_IDENTITY_KEY,
+    SAMPLE_RAW_HASH_KEY,
+    TRACE_VERSION,
+    build_sample_identity,
+    canonical_json_dumps,
+    canonical_sha256,
+    normalize_path,
+)
 
 
 @TRANSFORMS.register
@@ -52,6 +63,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         emit_action_denorm_scale=False,
         max_prompt_len=64,
         subtask_prob=0,
+        matched_control_capture=False,
     ):
         if norm_path is None:
             raise ValueError("norm_path list is none")
@@ -180,6 +192,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         self.max_prompt_len = int(max_prompt_len)
         self.subtask_prob = float(subtask_prob)
         self.image_augmentation = dict(image_augmentation or {})
+        self.matched_control_capture = bool(matched_control_capture)
         self._warned_unknown_robotype = False
 
     def _parse_robotype(self, robotype):
@@ -254,10 +267,34 @@ class WALeRobotTransformsPretrain(WATransforms):
             x = x_f.clamp(0.0, 255.0).to(dtype=torch.uint8)
         return x
 
-    def _process_images(self, input_images: torch.Tensor, dst_width: int, dst_height: int) -> torch.Tensor:
+    def _process_images(
+        self,
+        input_images: torch.Tensor,
+        dst_width: int,
+        dst_height: int,
+        *,
+        trace: dict | None = None,
+        view_key: str | None = None,
+    ) -> torch.Tensor:
+        view_trace = None
+        if trace is not None:
+            view_trace = {
+                "view_key": str(view_key),
+                "input_dtype": str(input_images.dtype),
+                "input_shape": [int(dim) for dim in input_images.shape],
+                "augmentation_enabled": bool(
+                    self.is_train and self.image_augmentation.get("enabled", False)
+                ),
+                "sampled_augmentation": None,
+                "resize_crop": None,
+            }
+            trace["views"].append(view_trace)
         input_images = input_images.to(dtype=torch.float32) / 255.0
         if self.is_train and self.image_augmentation.get("enabled", False):
-            input_images = self._augment_images(input_images)
+            input_images = self._augment_images(
+                input_images,
+                trace=None if view_trace is None else view_trace,
+            )
         height = int(input_images.shape[2])
         width = int(input_images.shape[3])
         if float(dst_height) / height < float(dst_width) / width:
@@ -269,14 +306,30 @@ class WALeRobotTransformsPretrain(WATransforms):
         input_images = F.resize(input_images, (new_height, new_width), InterpolationMode.BILINEAR)
         x1 = random.randint(0, new_width - dst_width)
         y1 = random.randint(0, new_height - dst_height)
+        if view_trace is not None:
+            view_trace["resize_crop"] = {
+                "new_height": new_height,
+                "new_width": new_width,
+                "top": y1,
+                "left": x1,
+                "height": int(dst_height),
+                "width": int(dst_width),
+            }
         input_images = F.crop(input_images, y1, x1, dst_height, dst_width)
         input_images = self.normalize(input_images)
         return input_images
 
-    def _augment_images(self, input_images: torch.Tensor) -> torch.Tensor:
+    def _augment_images(
+        self, input_images: torch.Tensor, *, trace: dict | None = None
+    ) -> torch.Tensor:
         """Apply one shared augmentation sample to every temporal frame."""
         cfg = self.image_augmentation
         height, width = input_images.shape[-2:]
+        sampled = {
+            "crop": None,
+            "rotation_degrees": None,
+            "jitter_application_order": [],
+        }
 
         crop_scale = float(cfg.get("crop_scale", 1.0))
         if not 0.0 < crop_scale <= 1.0:
@@ -286,6 +339,12 @@ class WALeRobotTransformsPretrain(WATransforms):
             crop_width = max(1, int(round(width * crop_scale)))
             top = random.randint(0, height - crop_height)
             left = random.randint(0, width - crop_width)
+            sampled["crop"] = {
+                "top": top,
+                "left": left,
+                "height": crop_height,
+                "width": crop_width,
+            }
             input_images = F.resized_crop(
                 input_images,
                 top,
@@ -300,6 +359,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         rotation_degrees = float(cfg.get("rotation_degrees", 0.0))
         if rotation_degrees > 0.0:
             angle = random.uniform(-rotation_degrees, rotation_degrees)
+            sampled["rotation_degrees"] = angle
             input_images = F.rotate(
                 input_images,
                 angle,
@@ -318,10 +378,15 @@ class WALeRobotTransformsPretrain(WATransforms):
                 raise ValueError(f"image_augmentation.{name} must be non-negative, got {strength}")
             if strength > 0.0:
                 factor = random.uniform(max(0.0, 1.0 - strength), 1.0 + strength)
-                jitter.append((fn, factor))
+                jitter.append((name, fn, factor))
         random.shuffle(jitter)
-        for fn, factor in jitter:
+        for name, fn, factor in jitter:
+            sampled["jitter_application_order"].append(
+                {"name": name, "factor": factor}
+            )
             input_images = fn(input_images, factor)
+        if trace is not None:
+            trace["sampled_augmentation"] = sampled
         return input_images.clamp_(0.0, 1.0)
 
     def _to_prompt_tensor(self, prompt_embed) -> torch.Tensor:
@@ -329,18 +394,28 @@ class WALeRobotTransformsPretrain(WATransforms):
             prompt_embed = torch.from_numpy(prompt_embed)
         return prompt_embed.to(dtype=torch.float32)
 
-    def _build_prompt_embeds(self, data_dict) -> torch.Tensor:
+    def _build_prompt_embeds(
+        self, data_dict, *, trace: dict | None = None
+    ) -> torch.Tensor:
         prompt_embed = data_dict.get("t5_embedding", None)
         assert prompt_embed is not None, "t5_embedding must be provided"
         prompt_embed = self._to_prompt_tensor(prompt_embed)
         subtask_prompt_embed = data_dict.get('subtask_t5_embedding', None)
-        if (
-            self.is_train
-            and subtask_prompt_embed is not None
-            and random.random() < self.subtask_prob
-        ):
+        subtask_draw = None
+        subtask_selected = False
+        if self.is_train and subtask_prompt_embed is not None:
+            subtask_draw = random.random()
+            subtask_selected = subtask_draw < self.subtask_prob
+        if subtask_selected:
             subtask_prompt_embed = self._to_prompt_tensor(subtask_prompt_embed)
             prompt_embed = torch.cat([prompt_embed, subtask_prompt_embed], dim=0)
+        if trace is not None:
+            trace["subtask_prompt"] = {
+                "eligible": bool(self.is_train and subtask_prompt_embed is not None),
+                "draw": subtask_draw,
+                "probability": self.subtask_prob,
+                "selected": subtask_selected,
+            }
         prompt_embed = prompt_embed[:self.max_prompt_len]
 
         return torch_F.pad(prompt_embed, (0, 0, 0, self.max_prompt_len - prompt_embed.shape[0]), value=0)
@@ -349,6 +424,62 @@ class WALeRobotTransformsPretrain(WATransforms):
         if self.dst_size is None:
             raise ValueError("dst_size is required")
         dst_width, dst_height = self.dst_size
+
+        matched_trace = None
+        if self.matched_control_capture:
+            sample_identity = build_sample_identity(
+                dataset_id=data_dict.get("matched_control_dataset_id"),
+                episode_index=data_dict.get("episode_index"),
+                frame_index=data_dict.get("frame_index"),
+                global_index=data_dict.get("matched_control_global_index"),
+            )
+            raw_inputs = {
+                "pixels": [
+                    {"key": key, "value": data_dict[key]}
+                    for key in self.view_keys[: self.num_views]
+                ],
+                "state_action": (
+                    {
+                        "mode": "ego_dual_eef_sources",
+                        "pose": data_dict[str(self.ego_dual_eef_cfg.get("pose_key", "action_eef"))],
+                        "delta": data_dict[str(self.ego_dual_eef_cfg.get("delta_key", "action_delta_eef"))],
+                        "hand_status": data_dict[str(self.ego_dual_eef_cfg.get("hand_status_key", "hand_status"))],
+                    }
+                    if self.ego_dual_eef_cfg is not None
+                    else {
+                        "mode": "direct_state_action",
+                        "state": data_dict[self.state_key],
+                        "action": data_dict[self.action_key],
+                    }
+                ),
+                "conditioning": {
+                    key: data_dict[key]
+                    for key in (
+                        "t5_embedding",
+                        "subtask_t5_embedding",
+                        "contact_target",
+                        "contact_loss_mask",
+                        "contact_confidence",
+                        "contact_condition",
+                        "contact_condition_mask",
+                        "action_time_mask",
+                        "action_loss_mask",
+                        "action_loss_weight",
+                        f"{self.action_key}_is_pad",
+                        "action_is_pad",
+                    )
+                    if key in data_dict and data_dict[key] is not None
+                },
+            }
+            matched_trace = {
+                "trace_version": TRACE_VERSION,
+                "views": [],
+                "reference_mask": None,
+                "subtask_prompt": None,
+            }
+            matched_identity_json = canonical_json_dumps(sample_identity)
+            matched_raw_sha256 = canonical_sha256(raw_inputs)
+            matched_diagnostic_path = normalize_path(data_dict.get("data_path", ""))
 
         if "robotype" not in data_dict:
             raise KeyError("Missing robotype key")
@@ -366,9 +497,18 @@ class WALeRobotTransformsPretrain(WATransforms):
                 left_w = int(dst_width) // 2
                 right_w = int(dst_width) - left_w
 
-                cam_high = self._process_images(cam_high, dst_width=int(dst_width), dst_height=top_h)
-                cam_left = self._process_images(cam_left, dst_width=left_w, dst_height=bottom_h)
-                cam_right = self._process_images(cam_right, dst_width=right_w, dst_height=bottom_h)
+                cam_high = self._process_images(
+                    cam_high, dst_width=int(dst_width), dst_height=top_h,
+                    trace=matched_trace, view_key=self.view_keys[0]
+                )
+                cam_left = self._process_images(
+                    cam_left, dst_width=left_w, dst_height=bottom_h,
+                    trace=matched_trace, view_key=self.view_keys[1]
+                )
+                cam_right = self._process_images(
+                    cam_right, dst_width=right_w, dst_height=bottom_h,
+                    trace=matched_trace, view_key=self.view_keys[2]
+                )
 
                 cam_bottom = torch.cat([cam_left, cam_right], dim=-1)
                 input_images = torch.cat([cam_high, cam_bottom], dim=-2)
@@ -381,7 +521,10 @@ class WALeRobotTransformsPretrain(WATransforms):
                     if not isinstance(v, torch.Tensor):
                         raise TypeError(f"Unsupported image type for {k}: {type(v)}")
                     v = self._to_nchw_uint8(v)
-                    v = self._process_images(v, dst_width=dst_width, dst_height=dst_height)
+                    v = self._process_images(
+                        v, dst_width=dst_width, dst_height=dst_height,
+                        trace=matched_trace, view_key=k,
+                    )
                     views.append(v)
                 input_images = torch.cat(views, dim=-1)
             else:
@@ -393,7 +536,10 @@ class WALeRobotTransformsPretrain(WATransforms):
                 if isinstance(v, np.ndarray):
                     v = torch.from_numpy(v)
                 v = self._to_nchw_uint8(torch.as_tensor(v))
-                v = self._process_images(v, dst_width=dst_width, dst_height=dst_height)
+                v = self._process_images(
+                    v, dst_width=dst_width, dst_height=dst_height,
+                    trace=matched_trace, view_key=k,
+                )
                 views.append(v)
 
             if len(views) == 1:
@@ -405,6 +551,11 @@ class WALeRobotTransformsPretrain(WATransforms):
 
         if self.image_cfg is not None:
             ref_masks, ref_latent_masks = self.mask_generator.get_mask(data_dict["input_images"].shape[0])
+            if matched_trace is not None:
+                matched_trace["reference_mask"] = {
+                    "num_ref_frames": int(ref_masks.sum().item()),
+                    "num_ref_latents": int(ref_latent_masks.sum().item()),
+                }
             ref_masks = ref_masks[:, None, None, None]
             ref_latent_masks = ref_latent_masks[None, :, None, None]
             ref_images = data_dict["input_images"].clone() * ref_masks
@@ -606,7 +757,7 @@ class WALeRobotTransformsPretrain(WATransforms):
             device=action.device,
         )
 
-        prompt_embeds = self._build_prompt_embeds(data_dict)
+        prompt_embeds = self._build_prompt_embeds(data_dict, trace=matched_trace)
 
         out = {}
         out["fps"] = torch.tensor(self.fps, dtype=torch.float32)
@@ -629,6 +780,11 @@ class WALeRobotTransformsPretrain(WATransforms):
             * action_time_mask[:, None].to(dtype=action_loss_weight.dtype)
             * valid_dim_mask[None, :].to(dtype=action_loss_weight.dtype)
         )
+        if matched_trace is not None:
+            out[SAMPLE_IDENTITY_KEY] = matched_identity_json
+            out[SAMPLE_DATA_PATH_KEY] = matched_diagnostic_path
+            out[SAMPLE_RAW_HASH_KEY] = matched_raw_sha256
+            out[SAMPLE_AUGMENTATION_KEY] = canonical_json_dumps(matched_trace)
         dim = out["action"].shape[-1]
         if self.emit_action_denorm_scale:
             scale = torch.ones(dim, dtype=torch.float32, device=action.device)

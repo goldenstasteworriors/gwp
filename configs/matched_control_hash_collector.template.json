@@ -5,6 +5,34 @@
   "collector_code": {"path": null, "sha256": null, "version": null},
   "dry_run_passed": false,
   "matched_batch_count": 0,
+  "all_hashes_equal": false,
   "all_hashes_equal_across_variants": false,
-  "captured_hashes": []
+  "captured_hashes": [
+    "ordered_sample_ids",
+    "raw_batch",
+    "augmentation_parameters",
+    "visual_action_timesteps",
+    "visual_noise",
+    "action_noise"
+  ],
+  "hash_schema": {
+    "ordered_sample_ids": "ordered dataset_id/episode_index/frame_index/global_index identities",
+    "raw_batch": "ordered authoritative pre-augmentation per-sample input hashes",
+    "augmentation_parameters": "ordered explicit sampled transform parameter traces",
+    "visual_action_timesteps": "typed pair of independent visual_timestep and action_timestep tensors",
+    "visual_noise": "visual flow-noise tensor",
+    "action_noise": "masked action flow-noise tensor used by the objective"
+  },
+  "seeds": [],
+  "run_id": null,
+  "dataset_id": null,
+  "dataset_ids": [],
+  "variants": [],
+  "trace_files": {},
+  "variant_config_sha256": {},
+  "control_config_sha256": null,
+  "config_hash_scope": null,
+  "git_commit": null,
+  "global_hashes": {},
+  "errors": ["template only: run the real collector and offline comparator"]
 }

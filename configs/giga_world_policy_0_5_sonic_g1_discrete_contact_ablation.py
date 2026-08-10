@@ -15,6 +15,9 @@ from world_action_model.contact_transition_schema import (
     SEGMENT_TARGET_DIM,
     contact_transport_capacity_metadata,
 )
+from world_action_model.matched_control_config import (
+    configure_matched_control_from_environment,
+)
 
 
 config = copy.deepcopy(base_config)
@@ -52,4 +55,18 @@ config["contact_transport_metadata"].update(
     schema_version=SEGMENT_SCHEMA_VERSION,
     labels_gate="required",
     asymmetric25_gate="required_before_5b_robot_finetune",
+)
+
+_matched_variant_ids = {
+    "soft": "soft_semantic",
+    "hard_st": "hard_st",
+    "hard_detached": "hard_detached",
+}
+if transport_mode not in _matched_variant_ids:
+    raise ValueError(
+        f"unsupported contact transport mode for this ablation: {transport_mode!r}"
+    )
+configure_matched_control_from_environment(
+    config,
+    variant_id=_matched_variant_ids[transport_mode],
 )
