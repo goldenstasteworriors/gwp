@@ -28,6 +28,13 @@ view_keys = ["observation.images.left"]
 image_frame_offsets = [0, 12, 24, 36, 48]
 episode_text = _env("GWP_EGO_EPISODES", "")
 episodes = [int(value) for value in episode_text.split(",") if value.strip()]
+contact_schema_version = _env(
+    "GWP_CONTACT_SCHEMA_VERSION", "contact_transition_v1"
+)
+contact_semantic_bottleneck = (
+    _env("GWP_CONTACT_SEMANTIC_BOTTLENECK", "0") == "1"
+)
+contact_target_dim = 22 if contact_schema_version == "contact_segment_v1_1" else 54
 
 dataset_config = dict(
     _class_name="WAMLeRobotDataset",
@@ -148,9 +155,11 @@ config = dict(
             out_action_channels=32,
             num_embodiments=2,
             num_contact_tokens=int(_env("GWP_CONTACT_TOKENS", "12")),
-            contact_target_dim=54,
-            contact_condition_dim=54,
+            contact_target_dim=contact_target_dim,
+            contact_condition_dim=contact_target_dim,
             contact_bottleneck=_env("GWP_CONTACT_STRICT_BOTTLENECK", "1") == "1",
+            contact_schema_version=contact_schema_version,
+            contact_semantic_bottleneck=contact_semantic_bottleneck,
         ),
         visual_flow_shift=2.0,
         action_flow_shift=5.0,
@@ -159,6 +168,7 @@ config = dict(
         skip_action_expert=False,
         contact_loss_weight=float(_env("GWP_CONTACT_LOSS_WEIGHT", "0.25")),
         contact_loss_type=_env("GWP_CONTACT_LOSS_TYPE", "bce"),
+        contact_schema_version=contact_schema_version,
         contact_condition_mode=_env("GWP_CONTACT_CONDITION_MODE", "predicted"),
         require_contact_targets=_env("GWP_REQUIRE_CONTACT_TARGETS", "1") == "1",
     ),

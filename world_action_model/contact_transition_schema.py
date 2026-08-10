@@ -14,6 +14,7 @@ import numpy as np
 
 
 SCHEMA_VERSION = "contact_transition_v1"
+SEGMENT_SCHEMA_VERSION = "contact_segment_v1_1"
 
 FIELD_WIDTHS = {
     "presence": 1,
@@ -54,6 +55,74 @@ def _build_slices() -> dict[str, slice]:
 
 FIELD_SLICES = _build_slices()
 TARGET_DIM = sum(FIELD_WIDTHS.values())
+
+
+# v1.1 is deliberately an opt-in per-segment schema.  Keep the v1 event
+# constants above as the public defaults so existing 54-D sidecars and
+# checkpoints continue to load unchanged.
+SEGMENT_FIELD_WIDTHS = {
+    "presence": 1,
+    "side": 3,
+    "site": 6,
+    "object_role": 4,
+    "contact_mode": 4,
+    "start_tau": 1,
+    "end_tau": 1,
+    "left_censored": 1,
+    "right_censored": 1,
+}
+
+SEGMENT_ENUM_VALUES = {
+    "side": ("left", "right", "object_object"),
+    "site": (
+        "opposition",
+        "primary",
+        "support",
+        "palm_or_jaw",
+        "tool_tip",
+        "other_surface",
+    ),
+    "object_role": ("manipulated", "tool", "receptacle", "fixture"),
+    "contact_mode": ("stick", "slide", "roll", "impact"),
+}
+
+
+def _build_slices_from_widths(widths: Mapping[str, int]) -> dict[str, slice]:
+    offset = 0
+    result = {}
+    for name, width in widths.items():
+        result[name] = slice(offset, offset + width)
+        offset += width
+    return result
+
+
+SEGMENT_FIELD_SLICES = _build_slices_from_widths(SEGMENT_FIELD_WIDTHS)
+SEGMENT_TARGET_DIM = sum(SEGMENT_FIELD_WIDTHS.values())
+
+SEGMENT_BINARY_FIELDS = ("presence", "left_censored", "right_censored")
+SEGMENT_CATEGORICAL_FIELDS = ("side", "site", "object_role", "contact_mode")
+SEGMENT_CONTINUOUS_FIELDS = ("start_tau", "end_tau")
+
+
+@dataclass(frozen=True)
+class ContactSegment:
+    """One contact interval clipped to the current action horizon.
+
+    ``start_frame`` and ``end_frame`` use half-open window coordinates in
+    ``[0, horizon_frames]``.  Censor flags distinguish an observed boundary
+    from a segment that began before, or continues after, the window.
+    Unknown categorical fields stay unsupervised through their field mask.
+    """
+
+    start_frame: int
+    end_frame: int
+    side: str | None = None
+    site: str | None = None
+    object_role: str | None = None
+    contact_mode: str | None = None
+    left_censored: bool = False
+    right_censored: bool = False
+    confidence: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -214,6 +283,117 @@ def encode_ordered_events(
             event.normal_proxy,
             weight,
         )
+
+    return {
+        "contact_target": target,
+        "contact_loss_mask": loss_mask,
+        "contact_confidence": confidence,
+        "contact_condition_mask": condition_mask,
+    }
+
+
+def _set_segment_one_hot(
+    target: np.ndarray,
+    mask: np.ndarray,
+    confidence: np.ndarray,
+    row: int,
+    field: str,
+    value: str | None,
+    weight: float,
+) -> None:
+    if value is None:
+        return
+    choices = SEGMENT_ENUM_VALUES[field]
+    if value not in choices:
+        raise ValueError(f"invalid {field}={value!r}; expected one of {choices}")
+    field_slice = SEGMENT_FIELD_SLICES[field]
+    target[row, field_slice.start + choices.index(value)] = 1.0
+    mask[row, field_slice] = 1.0
+    confidence[row, field_slice] = weight
+
+
+def encode_ordered_segments(
+    segments: Sequence[ContactSegment],
+    *,
+    num_queries: int,
+    horizon_frames: int,
+    coverage_is_exhaustive: bool = True,
+    negative_confidence: float = 0.1,
+) -> Mapping[str, np.ndarray]:
+    """Encode ordered v1.1 contact segments into 22-D query targets.
+
+    Query order is a deterministic fallback for the first implementation.
+    Object tracking IDs intentionally do not enter the cross-embodiment
+    target.  A future Hungarian matcher may replace this ordering in the loss
+    without changing the sidecar tensor contract.
+    """
+
+    if num_queries <= 0:
+        raise ValueError(f"num_queries must be positive, got {num_queries}")
+    if horizon_frames <= 0:
+        raise ValueError(f"horizon_frames must be positive, got {horizon_frames}")
+    if len(segments) > num_queries:
+        raise ValueError(f"{len(segments)} segments exceed num_queries={num_queries}")
+    if not 0.0 <= negative_confidence <= 1.0:
+        raise ValueError("negative_confidence must be in [0, 1]")
+
+    target = np.zeros((num_queries, SEGMENT_TARGET_DIM), dtype=np.float32)
+    loss_mask = np.zeros_like(target)
+    confidence = np.zeros_like(target)
+    condition_mask = np.zeros_like(target)
+    presence_slice = SEGMENT_FIELD_SLICES["presence"]
+    if coverage_is_exhaustive:
+        loss_mask[:, presence_slice] = 1.0
+        confidence[:, presence_slice] = negative_confidence
+        condition_mask[:, presence_slice] = 1.0
+
+    ordered = sorted(
+        segments,
+        key=lambda segment: (
+            int(segment.start_frame),
+            int(segment.end_frame),
+            str(segment.side or ""),
+            str(segment.site or ""),
+        ),
+    )
+    for row, segment in enumerate(ordered):
+        if not 0.0 <= segment.confidence <= 1.0:
+            raise ValueError(
+                f"segment confidence must be in [0, 1], got {segment.confidence}"
+            )
+        if not 0 <= segment.start_frame <= segment.end_frame <= horizon_frames:
+            raise ValueError(
+                "segment bounds must satisfy 0 <= start <= end <= horizon, got "
+                f"[{segment.start_frame}, {segment.end_frame}] for H={horizon_frames}"
+            )
+        weight = float(segment.confidence)
+        target[row, presence_slice] = 1.0
+        loss_mask[row, presence_slice] = 1.0
+        confidence[row, presence_slice] = weight
+        condition_mask[row, presence_slice] = 1.0
+
+        for field, value in (
+            ("side", segment.side),
+            ("site", segment.site),
+            ("object_role", segment.object_role),
+            ("contact_mode", segment.contact_mode),
+        ):
+            _set_segment_one_hot(
+                target, loss_mask, confidence, row, field, value, weight
+            )
+
+        for field, value in (
+            ("start_tau", float(segment.start_frame) / horizon_frames),
+            ("end_tau", float(segment.end_frame) / horizon_frames),
+            ("left_censored", float(segment.left_censored)),
+            ("right_censored", float(segment.right_censored)),
+        ):
+            field_slice = SEGMENT_FIELD_SLICES[field]
+            target[row, field_slice] = value
+            loss_mask[row, field_slice] = 1.0
+            confidence[row, field_slice] = weight
+
+        condition_mask[row] = loss_mask[row]
 
     return {
         "contact_target": target,

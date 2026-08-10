@@ -21,6 +21,15 @@ from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import FP32LayerNorm
 from diffusers.utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscale_lora_layers
 
+from world_action_model.contact_transition_schema import (
+    SEGMENT_BINARY_FIELDS,
+    SEGMENT_CATEGORICAL_FIELDS,
+    SEGMENT_CONTINUOUS_FIELDS,
+    SEGMENT_FIELD_SLICES,
+    SEGMENT_SCHEMA_VERSION,
+    SEGMENT_TARGET_DIM,
+)
+
 from .transformer_wa_casual import (
     WanRotaryPosEmbed,
     WanRotaryPosEmbed1D,
@@ -107,6 +116,8 @@ def build_mot_attention_mask(
     dtype: torch.dtype,
     num_contact_tokens: int = 0,
     action_attends_ref: bool = True,
+    state_attends_ref: bool = True,
+    contact_attends_ref: bool = True,
 ) -> torch.Tensor:
     """
     Causal mask for concatenated sequence [action_stream | visual_stream].
@@ -141,13 +152,18 @@ def build_mot_attention_mask(
         row_grid, col_grid = torch.meshgrid(rows, cols, indexing="ij")
         mask[row_grid, col_grid] = 0.0
 
+    state_cols = [state_idx]
+    if state_attends_ref:
+        state_cols.append(ref_idx)
+    allow_rows(torch.cat(state_cols), state_idx)
     state_ref_cols = torch.cat([state_idx, ref_idx])
-    allow_rows(state_ref_cols, state_idx)
     allow_rows(state_ref_cols, ref_idx)
 
     if num_contact_tokens:
-        contact_cols = torch.cat([state_idx, ref_idx, contact_idx])
-        allow_rows(contact_cols, contact_idx)
+        contact_cols = [state_idx, contact_idx]
+        if contact_attends_ref:
+            contact_cols.insert(1, ref_idx)
+        allow_rows(torch.cat(contact_cols), contact_idx)
 
     action_cols = [state_idx, contact_idx, action_only_idx]
     if action_attends_ref:
@@ -588,6 +604,9 @@ class CasualWorldActionTransformer_MoT(
         contact_target_dim: int = 0,
         contact_condition_dim: Optional[int] = None,
         contact_bottleneck: bool = False,
+        contact_schema_version: str = "contact_transition_v1",
+        contact_semantic_bottleneck: bool = False,
+        contact_planner_num_heads: int = 8,
     ) -> None:
         super().__init__()
 
@@ -664,12 +683,38 @@ class CasualWorldActionTransformer_MoT(
             else contact_target_dim
         )
         self.contact_bottleneck = bool(contact_bottleneck)
+        self.contact_schema_version = str(contact_schema_version)
+        self.contact_semantic_bottleneck = bool(contact_semantic_bottleneck)
         if self.num_contact_tokens < 0:
             raise ValueError("num_contact_tokens must be non-negative")
         if self.contact_target_dim < 0 or self.contact_condition_dim < 0:
             raise ValueError("contact target/condition dimensions must be non-negative")
         if self.contact_bottleneck and not self.num_contact_tokens:
             raise ValueError("contact_bottleneck=True requires num_contact_tokens > 0")
+        if self.contact_semantic_bottleneck:
+            if not self.contact_bottleneck:
+                raise ValueError(
+                    "contact_semantic_bottleneck=True requires contact_bottleneck=True"
+                )
+            if self.contact_schema_version != SEGMENT_SCHEMA_VERSION:
+                raise ValueError(
+                    "semantic bottleneck requires contact_schema_version="
+                    f"{SEGMENT_SCHEMA_VERSION!r}"
+                )
+            if self.contact_target_dim != SEGMENT_TARGET_DIM:
+                raise ValueError(
+                    "semantic bottleneck requires contact_target_dim="
+                    f"{SEGMENT_TARGET_DIM}, got {self.contact_target_dim}"
+                )
+            if self.contact_condition_dim != SEGMENT_TARGET_DIM:
+                raise ValueError(
+                    "semantic bottleneck requires contact_condition_dim="
+                    f"{SEGMENT_TARGET_DIM}, got {self.contact_condition_dim}"
+                )
+            if action_expert_dim % int(contact_planner_num_heads) != 0:
+                raise ValueError(
+                    "action_expert_dim must be divisible by contact_planner_num_heads"
+                )
 
         if self.num_contact_tokens:
             self.contact_query_tokens = nn.Parameter(
@@ -686,10 +731,38 @@ class CasualWorldActionTransformer_MoT(
                 if self.contact_target_dim
                 else None
             )
+            if self.contact_semantic_bottleneck:
+                self.contact_planner_ref_proj = nn.Linear(inner_dim, action_expert_dim)
+                self.contact_planner_text_proj = nn.Linear(text_dim, action_expert_dim)
+                self.contact_planner_attention = nn.MultiheadAttention(
+                    action_expert_dim,
+                    int(contact_planner_num_heads),
+                    batch_first=True,
+                )
+                self.contact_planner_norm1 = nn.LayerNorm(action_expert_dim, eps=eps)
+                self.contact_planner_ffn = nn.Sequential(
+                    nn.Linear(action_expert_dim, action_expert_dim * 2),
+                    nn.GELU(),
+                    nn.Linear(action_expert_dim * 2, action_expert_dim),
+                )
+                self.contact_planner_norm2 = nn.LayerNorm(action_expert_dim, eps=eps)
+            else:
+                self.contact_planner_ref_proj = None
+                self.contact_planner_text_proj = None
+                self.contact_planner_attention = None
+                self.contact_planner_norm1 = None
+                self.contact_planner_ffn = None
+                self.contact_planner_norm2 = None
         else:
             self.register_parameter("contact_query_tokens", None)
             self.contact_condition_encoder = None
             self.contact_decoder = None
+            self.contact_planner_ref_proj = None
+            self.contact_planner_text_proj = None
+            self.contact_planner_attention = None
+            self.contact_planner_norm1 = None
+            self.contact_planner_ffn = None
+            self.contact_planner_norm2 = None
 
     def _encode_state_tokens(self, state: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         if getattr(self.state_encoder, "uses_embodiment_id", False):
@@ -881,6 +954,92 @@ class CasualWorldActionTransformer_MoT(
         self.load_state_dict(own_state, strict=True)
         return loaded, skipped, unexpected
 
+    @staticmethod
+    def activate_contact_segment_logits(logits: torch.Tensor) -> torch.Tensor:
+        """Map raw v1.1 planner logits to the auditable 22-D semantics."""
+
+        if logits.shape[-1] != SEGMENT_TARGET_DIM:
+            raise ValueError(
+                f"expected {SEGMENT_TARGET_DIM}-D contact logits, got {logits.shape[-1]}"
+            )
+        semantic = torch.empty_like(logits)
+        for field in SEGMENT_BINARY_FIELDS + SEGMENT_CONTINUOUS_FIELDS:
+            field_slice = SEGMENT_FIELD_SLICES[field]
+            semantic[..., field_slice] = logits[..., field_slice].sigmoid()
+        for field in SEGMENT_CATEGORICAL_FIELDS:
+            field_slice = SEGMENT_FIELD_SLICES[field]
+            semantic[..., field_slice] = logits[..., field_slice].softmax(dim=-1)
+        return semantic
+
+    def plan_contact_semantic(
+        self,
+        state: torch.Tensor,
+        ref_visual_hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        embodiment_id: Optional[torch.Tensor] = None,
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Plan v1.1 segments and optionally merge field-masked oracle values.
+
+        The returned action-visible tensor is exactly 22-D.  Raw planner
+        hidden states never leave this method and are never appended to the
+        action stream.
+        """
+
+        if not self.contact_semantic_bottleneck:
+            raise RuntimeError("contact semantic planner is not enabled")
+        if ref_visual_hidden_states is None or ref_visual_hidden_states.shape[1] == 0:
+            raise ValueError("semantic contact planner requires reference visual tokens")
+        state_states = self._encode_state_tokens(state, embodiment_id=embodiment_id)
+        batch_size = state_states.shape[0]
+        planner_query = self.contact_query_tokens.to(
+            device=state_states.device, dtype=state_states.dtype
+        ).expand(batch_size, -1, -1)
+        ref_context = self.contact_planner_ref_proj(
+            ref_visual_hidden_states.to(dtype=state_states.dtype)
+        )
+        text_context = self.contact_planner_text_proj(
+            encoder_hidden_states.to(dtype=state_states.dtype)
+        )
+        planner_context = torch.cat([state_states, ref_context, text_context], dim=1)
+        attended, _ = self.contact_planner_attention(
+            planner_query, planner_context, planner_context, need_weights=False
+        )
+        planner_hidden = self.contact_planner_norm1(planner_query + attended)
+        planner_hidden = self.contact_planner_norm2(
+            planner_hidden + self.contact_planner_ffn(planner_hidden)
+        )
+        contact_logits = self.contact_decoder(planner_hidden)
+        predicted_semantic = self.activate_contact_segment_logits(contact_logits)
+
+        if contact_condition is None:
+            return contact_logits, predicted_semantic
+        expected = (batch_size, self.num_contact_tokens, SEGMENT_TARGET_DIM)
+        if tuple(contact_condition.shape) != expected:
+            raise ValueError(
+                f"contact_condition shape mismatch: got {tuple(contact_condition.shape)}, "
+                f"expected {expected}"
+            )
+        if contact_condition_mask is None:
+            raise ValueError("masked oracle merge requires contact_condition_mask")
+        mask = contact_condition_mask.to(
+            device=predicted_semantic.device, dtype=predicted_semantic.dtype
+        )
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(-1)
+        if mask.shape not in {expected, expected[:2] + (1,)}:
+            raise ValueError(
+                "contact_condition_mask must have shape [B,Q], [B,Q,1], "
+                f"or [B,Q,{SEGMENT_TARGET_DIM}], got {tuple(mask.shape)}"
+            )
+        mask = torch.broadcast_to(mask, expected).clamp(0.0, 1.0)
+        oracle = contact_condition.to(
+            device=predicted_semantic.device, dtype=predicted_semantic.dtype
+        )
+        semantic = mask * oracle + (1.0 - mask) * predicted_semantic.detach()
+        return contact_logits, semantic
+
     def encode_action_tokens(
         self,
         state: torch.Tensor,
@@ -888,6 +1047,7 @@ class CasualWorldActionTransformer_MoT(
         embodiment_id: Optional[torch.Tensor] = None,
         contact_condition: Optional[torch.Tensor] = None,
         contact_condition_mask: Optional[torch.Tensor] = None,
+        contact_semantic: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], int, int, int]:
         """Encode [state, contact queries, action] and build action RoPE.
 
@@ -899,7 +1059,29 @@ class CasualWorldActionTransformer_MoT(
         state_states = self._encode_state_tokens(state, embodiment_id=embodiment_id)
         action_states = self._encode_action_tokens_only(action, embodiment_id=embodiment_id)
         contact_states = state_states.new_zeros(state_states.shape[0], 0, state_states.shape[-1])
-        if self.num_contact_tokens:
+        if self.num_contact_tokens and self.contact_semantic_bottleneck:
+            if contact_semantic is None:
+                raise ValueError(
+                    "semantic bottleneck requires planned contact_semantic"
+                )
+            expected = (
+                state_states.shape[0],
+                self.num_contact_tokens,
+                SEGMENT_TARGET_DIM,
+            )
+            if tuple(contact_semantic.shape) != expected:
+                raise ValueError(
+                    f"contact_semantic shape mismatch: got {tuple(contact_semantic.shape)}, "
+                    f"expected {expected}"
+                )
+            # This 22 -> action width projection is the only planner-to-action
+            # route.  In particular, planner_hidden is not concatenated here.
+            contact_states = self.contact_condition_encoder(
+                contact_semantic.to(
+                    device=state_states.device, dtype=state_states.dtype
+                )
+            )
+        elif self.num_contact_tokens:
             contact_states = self.contact_query_tokens.to(
                 device=state_states.device,
                 dtype=state_states.dtype,
@@ -983,6 +1165,67 @@ class CasualWorldActionTransformer_MoT(
                 "p_w": p_w,
             }
         return visual_hidden_states, visual_rotary_emb, num_ref_tokens, num_future_tokens, grid_info
+
+    def encode_joint_streams(
+        self,
+        state: torch.Tensor,
+        action: torch.Tensor,
+        ref_latents: torch.Tensor,
+        future_latents: Optional[torch.Tensor],
+        encoder_hidden_states: torch.Tensor,
+        embodiment_id: Optional[torch.Tensor] = None,
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[
+        torch.Tensor,
+        Tuple[torch.Tensor, torch.Tensor],
+        int,
+        int,
+        torch.Tensor,
+        Tuple[torch.Tensor, torch.Tensor],
+        int,
+        Optional[Dict[str, int]],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
+        """Encode visual/action streams and run the opt-in semantic planner."""
+
+        visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, grid_info = (
+            self.encode_visual_tokens(ref_latents, future_latents)
+        )
+        contact_logits = None
+        contact_semantic = None
+        if self.contact_semantic_bottleneck:
+            contact_logits, contact_semantic = self.plan_contact_semantic(
+                state,
+                visual_hidden_states[:, :num_ref_tokens],
+                encoder_hidden_states,
+                embodiment_id=embodiment_id,
+                contact_condition=contact_condition,
+                contact_condition_mask=contact_condition_mask,
+            )
+        action_hidden_states, action_rotary_emb, num_state_tokens, num_contact_tokens, _ = (
+            self.encode_action_tokens(
+                state,
+                action,
+                embodiment_id=embodiment_id,
+                contact_condition=contact_condition,
+                contact_condition_mask=contact_condition_mask,
+                contact_semantic=contact_semantic,
+            )
+        )
+        return (
+            action_hidden_states,
+            action_rotary_emb,
+            num_state_tokens,
+            num_contact_tokens,
+            visual_hidden_states,
+            visual_rotary_emb,
+            num_ref_tokens,
+            grid_info,
+            contact_logits,
+            contact_semantic,
+        )
 
     def _split_timestep(
         self,
@@ -1126,6 +1369,7 @@ class CasualWorldActionTransformer_MoT(
         output_visual: bool = True,
         visual_grid_info: Optional[Dict[str, int]] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        contact_pred_override: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
@@ -1207,6 +1451,8 @@ class CasualWorldActionTransformer_MoT(
             action_hidden_states.dtype,
             num_contact_tokens=num_contact_tokens,
             action_attends_ref=not self.contact_bottleneck,
+            state_attends_ref=not self.contact_semantic_bottleneck,
+            contact_attends_ref=not self.contact_semantic_bottleneck,
         )
 
         action_hidden_states, visual_hidden_states = self._process_blocks(
@@ -1222,7 +1468,7 @@ class CasualWorldActionTransformer_MoT(
         )
 
         action_pred = None
-        contact_pred = None
+        contact_pred = contact_pred_override
         video_output = None
 
         if output_action:
@@ -1241,7 +1487,11 @@ class CasualWorldActionTransformer_MoT(
             # action_hidden_states = (action_hidden_states.float() + action_scale * action_shift).type_as(action_hidden_states)
             action_hidden_states = (self.action_norm_out(action_hidden_states.float()) * (1 + action_scale) + action_shift).type_as(action_hidden_states)
             contact_end = num_state_tokens + num_contact_tokens
-            if num_contact_tokens and self.contact_decoder is not None:
+            if (
+                contact_pred is None
+                and num_contact_tokens
+                and self.contact_decoder is not None
+            ):
                 contact_slice = action_hidden_states[:, num_state_tokens:contact_end]
                 contact_pred = self.contact_decoder(contact_slice)
             action_slice = action_hidden_states[:, contact_end:]
@@ -1312,15 +1562,26 @@ class CasualWorldActionTransformer_MoT(
         contact_condition: Optional[torch.Tensor] = None,
         contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
-        action_hidden_states, action_rotary_emb, num_state_tokens, num_contact_tokens, _ = self.encode_action_tokens(
+        (
+            action_hidden_states,
+            action_rotary_emb,
+            num_state_tokens,
+            num_contact_tokens,
+            visual_hidden_states,
+            visual_rotary_emb,
+            num_ref_tokens,
+            grid_info,
+            contact_logits,
+            _,
+        ) = self.encode_joint_streams(
             state,
             action,
+            ref_latents,
+            noisy_latents,
+            encoder_hidden_states,
             embodiment_id=embodiment_id,
             contact_condition=contact_condition,
             contact_condition_mask=contact_condition_mask,
-        )
-        visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, grid_info = self.encode_visual_tokens(
-            ref_latents, noisy_latents
         )
         return self._forward_tokens(
             action_hidden_states=action_hidden_states,
@@ -1339,6 +1600,7 @@ class CasualWorldActionTransformer_MoT(
             output_visual=True,
             visual_grid_info=grid_info,
             embodiment_id=embodiment_id,
+            contact_pred_override=contact_logits,
         )
 
     def _forward_train_action_only(
@@ -1356,15 +1618,26 @@ class CasualWorldActionTransformer_MoT(
         contact_condition: Optional[torch.Tensor] = None,
         contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
-        action_hidden_states, action_rotary_emb, num_state_tokens, num_contact_tokens, _ = self.encode_action_tokens(
+        (
+            action_hidden_states,
+            action_rotary_emb,
+            num_state_tokens,
+            num_contact_tokens,
+            visual_hidden_states,
+            visual_rotary_emb,
+            num_ref_tokens,
+            _,
+            contact_logits,
+            _,
+        ) = self.encode_joint_streams(
             state,
             action,
+            ref_latents,
+            noisy_latents,
+            encoder_hidden_states,
             embodiment_id=embodiment_id,
             contact_condition=contact_condition,
             contact_condition_mask=contact_condition_mask,
-        )
-        visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, _ = self.encode_visual_tokens(
-            ref_latents, noisy_latents
         )
         return self._forward_tokens(
             action_hidden_states=action_hidden_states,
@@ -1382,6 +1655,7 @@ class CasualWorldActionTransformer_MoT(
             output_action=True,
             output_visual=False,
             embodiment_id=embodiment_id,
+            contact_pred_override=contact_logits,
         )
 
     def _forward_train_action_only_no_video(
@@ -1399,16 +1673,18 @@ class CasualWorldActionTransformer_MoT(
         contact_condition: Optional[torch.Tensor] = None,
         contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
-        action_hidden_states, action_rotary_emb, num_state_tokens, num_contact_tokens, _ = self.encode_action_tokens(
-            state,
-            action,
-            embodiment_id=embodiment_id,
-            contact_condition=contact_condition,
-            contact_condition_mask=contact_condition_mask,
-        )
-        if ref_latents is not None:
-            visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, _ = self.encode_visual_tokens(ref_latents)
-        else:
+        if ref_latents is None:
+            if self.contact_semantic_bottleneck:
+                raise ValueError(
+                    "semantic contact planner requires ref_latents in action-only training"
+                )
+            action_hidden_states, action_rotary_emb, num_state_tokens, num_contact_tokens, _ = self.encode_action_tokens(
+                state,
+                action,
+                embodiment_id=embodiment_id,
+                contact_condition=contact_condition,
+                contact_condition_mask=contact_condition_mask,
+            )
             visual_hidden_states, visual_rotary_emb = self._empty_visual_stream(
                 action_hidden_states.shape[0],
                 action_hidden_states.shape[2],
@@ -1416,6 +1692,29 @@ class CasualWorldActionTransformer_MoT(
                 action_hidden_states.dtype,
             )
             num_ref_tokens = 0
+            contact_logits = None
+        else:
+            (
+                action_hidden_states,
+                action_rotary_emb,
+                num_state_tokens,
+                num_contact_tokens,
+                visual_hidden_states,
+                visual_rotary_emb,
+                num_ref_tokens,
+                _,
+                contact_logits,
+                _,
+            ) = self.encode_joint_streams(
+                state,
+                action,
+                ref_latents,
+                None,
+                encoder_hidden_states,
+                embodiment_id=embodiment_id,
+                contact_condition=contact_condition,
+                contact_condition_mask=contact_condition_mask,
+            )
         return self._forward_tokens(
             action_hidden_states=action_hidden_states,
             visual_hidden_states=visual_hidden_states,
@@ -1432,6 +1731,7 @@ class CasualWorldActionTransformer_MoT(
             output_action=True,
             output_visual=False,
             embodiment_id=embodiment_id,
+            contact_pred_override=contact_logits,
         )
 
     def _forward_inference(
@@ -1449,15 +1749,26 @@ class CasualWorldActionTransformer_MoT(
         contact_condition: Optional[torch.Tensor] = None,
         contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
-        action_hidden_states, action_rotary_emb, num_state_tokens, num_contact_tokens, _ = self.encode_action_tokens(
+        (
+            action_hidden_states,
+            action_rotary_emb,
+            num_state_tokens,
+            num_contact_tokens,
+            visual_hidden_states,
+            visual_rotary_emb,
+            num_ref_tokens,
+            grid_info,
+            contact_logits,
+            _,
+        ) = self.encode_joint_streams(
             state,
             action,
+            ref_latents,
+            noisy_latents,
+            encoder_hidden_states,
             embodiment_id=embodiment_id,
             contact_condition=contact_condition,
             contact_condition_mask=contact_condition_mask,
-        )
-        visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, grid_info = self.encode_visual_tokens(
-            ref_latents, noisy_latents
         )
         return self._forward_tokens(
             action_hidden_states=action_hidden_states,
@@ -1476,6 +1787,7 @@ class CasualWorldActionTransformer_MoT(
             output_visual=True,
             visual_grid_info=grid_info,
             embodiment_id=embodiment_id,
+            contact_pred_override=contact_logits,
         )
 
     def reset_action_only_prefix_cache(self) -> None:
@@ -1515,6 +1827,8 @@ class CasualWorldActionTransformer_MoT(
         encoder_hidden_states_image: Optional[torch.Tensor],
         num_state_tokens: int,
         num_contact_tokens: int,
+        contact_semantic: Optional[torch.Tensor] = None,
+        contact_logits: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         cache = getattr(self, "_action_only_prefix_cache", None)
         if cache is not None:
@@ -1565,6 +1879,8 @@ class CasualWorldActionTransformer_MoT(
             dtype=action_prefix_hidden_states.dtype,
             num_contact_tokens=num_contact_tokens,
             action_attends_ref=not self.contact_bottleneck,
+            state_attends_ref=not self.contact_semantic_bottleneck,
+            contact_attends_ref=not self.contact_semantic_bottleneck,
         )
 
         block_caches = []
@@ -1600,6 +1916,10 @@ class CasualWorldActionTransformer_MoT(
             "encoder_action_hidden_states": encoder_action_hidden_states.detach(),
             "num_ref_tokens": int(visual_hidden_states.shape[1]),
         }
+        if contact_semantic is not None:
+            cache["contact_semantic"] = contact_semantic.detach()
+        if contact_logits is not None:
+            cache["contact_logits"] = contact_logits.detach()
         self._action_only_prefix_cache = cache
         return cache
 
@@ -1651,6 +1971,33 @@ class CasualWorldActionTransformer_MoT(
                 )
 
         try:
+            cache = getattr(self, "_action_only_prefix_cache", None)
+            contact_logits = None
+            contact_semantic = None
+            if cache is None:
+                visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, _ = (
+                    self.encode_visual_tokens(ref_latents)
+                )
+                if self.contact_semantic_bottleneck:
+                    contact_logits, contact_semantic = self.plan_contact_semantic(
+                        state,
+                        visual_hidden_states[:, :num_ref_tokens],
+                        encoder_hidden_states,
+                        embodiment_id=embodiment_id,
+                        contact_condition=contact_condition,
+                        contact_condition_mask=contact_condition_mask,
+                    )
+            else:
+                visual_hidden_states = None
+                visual_rotary_emb = None
+                num_ref_tokens = int(cache["num_ref_tokens"])
+                if self.contact_semantic_bottleneck:
+                    if "contact_semantic" not in cache:
+                        raise RuntimeError(
+                            "semantic action-only cache is missing contact_semantic"
+                        )
+                    contact_semantic = cache["contact_semantic"]
+
             (
                 action_hidden_states,
                 action_rotary_emb,
@@ -1663,14 +2010,8 @@ class CasualWorldActionTransformer_MoT(
                 embodiment_id=embodiment_id,
                 contact_condition=contact_condition,
                 contact_condition_mask=contact_condition_mask,
+                contact_semantic=contact_semantic,
             )
-            cache = getattr(self, "_action_only_prefix_cache", None)
-            if cache is None:
-                visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, _ = self.encode_visual_tokens(ref_latents)
-            else:
-                visual_hidden_states = None
-                visual_rotary_emb = None
-                num_ref_tokens = int(cache["num_ref_tokens"])
             interleaved_len = num_state_tokens + num_ref_tokens + num_action_tokens
             if timestep.ndim == 2:
                 timestep = timestep[:, :interleaved_len]
@@ -1709,6 +2050,8 @@ class CasualWorldActionTransformer_MoT(
                     encoder_hidden_states_image,
                     num_state_tokens,
                     num_contact_tokens,
+                    contact_semantic=contact_semantic,
+                    contact_logits=contact_logits,
                 )
 
             if action_timestep.ndim == 2:

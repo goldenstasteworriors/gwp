@@ -23,7 +23,15 @@ config["project_dir"] = _env(
 )
 
 num_contact_tokens = int(_env("GWP_CONTACT_TOKENS", "12"))
-contact_target_dim = int(_env("GWP_CONTACT_TARGET_DIM", "54"))
+contact_schema_version = _env(
+    "GWP_CONTACT_SCHEMA_VERSION", "contact_transition_v1"
+)
+default_contact_target_dim = (
+    "22" if contact_schema_version == "contact_segment_v1_1" else "54"
+)
+contact_target_dim = int(
+    _env("GWP_CONTACT_TARGET_DIM", default_contact_target_dim)
+)
 
 contact_sidecar_dir = _env("GWP_CONTACT_SIDECAR_DIR", "")
 if contact_sidecar_dir:
@@ -40,10 +48,15 @@ config["models"]["transformer"].update(
     contact_target_dim=contact_target_dim,
     contact_condition_dim=contact_target_dim,
     contact_bottleneck=_env("GWP_CONTACT_STRICT_BOTTLENECK", "1") == "1",
+    contact_schema_version=contact_schema_version,
+    contact_semantic_bottleneck=(
+        _env("GWP_CONTACT_SEMANTIC_BOTTLENECK", "0") == "1"
+    ),
 )
 config["models"].update(
     contact_loss_weight=float(_env("GWP_CONTACT_LOSS_WEIGHT", "0.25")),
     contact_loss_type=_env("GWP_CONTACT_LOSS_TYPE", "bce"),
+    contact_schema_version=contact_schema_version,
     contact_condition_mode=_env("GWP_CONTACT_CONDITION_MODE", "predicted"),
     require_contact_targets=_env("GWP_CONTACT_REQUIRE_TARGETS", "0") == "1",
 )

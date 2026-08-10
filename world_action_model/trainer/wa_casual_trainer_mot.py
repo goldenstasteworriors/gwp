@@ -7,6 +7,14 @@ from diffusers.models import AutoencoderKLWan
 from diffusers.video_processor import VideoProcessor
 from einops import rearrange
 from giga_models import utils as gm_utils
+from world_action_model.contact_transition_schema import (
+    SEGMENT_BINARY_FIELDS,
+    SEGMENT_CATEGORICAL_FIELDS,
+    SEGMENT_CONTINUOUS_FIELDS,
+    SEGMENT_FIELD_SLICES,
+    SEGMENT_SCHEMA_VERSION,
+    SEGMENT_TARGET_DIM,
+)
 from world_action_model.models import CasualWorldActionTransformer_MoT
 from world_action_model.trainer.wa_casual_trainer_pretrain import (
     _as_dim_mask,
@@ -62,6 +70,185 @@ def masked_contact_loss(
     denominator = weight.sum().clamp_min(1.0)
     return (element_loss * weight).sum() / denominator
 
+
+def apply_contact_query_assignment(
+    prediction,
+    target,
+    mask,
+    confidence,
+    matcher=None,
+):
+    """Return query-aligned targets, leaving a clean Hungarian hook.
+
+    v1.1 sidecars currently use deterministic segment ordering.  A future
+    Hungarian matcher can be supplied as a callable with this same signature
+    and must return ``(target, mask, confidence)`` aligned to prediction query
+    order.  Keeping assignment outside the grouped loss avoids baking an
+    ordering assumption into the loss implementation.
+    """
+
+    if matcher is None:
+        return target, mask, confidence
+    aligned = matcher(prediction, target, mask, confidence)
+    if not isinstance(aligned, tuple) or len(aligned) != 3:
+        raise TypeError("contact matcher must return (target, mask, confidence)")
+    return aligned
+
+
+def grouped_contact_segment_loss(
+    prediction,
+    target,
+    mask=None,
+    confidence=None,
+    matcher=None,
+):
+    """Field-balanced v1.1 BCE/CE/Smooth-L1 loss on raw planner logits."""
+
+    if prediction.shape != target.shape or prediction.shape[-1] != SEGMENT_TARGET_DIM:
+        raise ValueError(
+            "v1.1 contact shape mismatch: "
+            f"prediction={tuple(prediction.shape)}, target={tuple(target.shape)}, "
+            f"expected last dim {SEGMENT_TARGET_DIM}"
+        )
+    target = target.to(device=prediction.device, dtype=prediction.dtype)
+    if mask is None:
+        mask = torch.ones_like(target)
+    else:
+        mask = mask.to(device=prediction.device, dtype=prediction.dtype)
+        mask = torch.broadcast_to(mask, target.shape)
+    if confidence is None:
+        confidence = torch.ones_like(target)
+    else:
+        confidence = confidence.to(device=prediction.device, dtype=prediction.dtype)
+        confidence = torch.broadcast_to(confidence, target.shape)
+
+    target, mask, confidence = apply_contact_query_assignment(
+        prediction, target, mask, confidence, matcher
+    )
+    components = []
+    active_components = []
+
+    def weighted_mean(values, weights):
+        denominator = weights.sum()
+        value = (values * weights).sum() / denominator.clamp_min(1.0)
+        return value, (denominator > 0).to(dtype=value.dtype)
+
+    for field in SEGMENT_BINARY_FIELDS:
+        field_slice = SEGMENT_FIELD_SLICES[field]
+        values = F.binary_cross_entropy_with_logits(
+            prediction[..., field_slice].float(),
+            target[..., field_slice].float(),
+            reduction="none",
+        )
+        weights = (mask[..., field_slice] * confidence[..., field_slice]).float()
+        component, active = weighted_mean(values, weights)
+        components.append(component)
+        active_components.append(active)
+
+    for field in SEGMENT_CATEGORICAL_FIELDS:
+        field_slice = SEGMENT_FIELD_SLICES[field]
+        field_target = target[..., field_slice].float()
+        # Categorical supervision is valid only when the complete one-hot
+        # group is known.  Partial category masks are treated as unknown.
+        field_weight = (
+            mask[..., field_slice].amin(dim=-1)
+            * confidence[..., field_slice].amin(dim=-1)
+        ).float()
+        values = -(field_target * F.log_softmax(
+            prediction[..., field_slice].float(), dim=-1
+        )).sum(dim=-1)
+        component, active = weighted_mean(values, field_weight)
+        components.append(component)
+        active_components.append(active)
+
+    for field in SEGMENT_CONTINUOUS_FIELDS:
+        field_slice = SEGMENT_FIELD_SLICES[field]
+        values = F.smooth_l1_loss(
+            prediction[..., field_slice].float().sigmoid(),
+            target[..., field_slice].float(),
+            reduction="none",
+        )
+        weights = (mask[..., field_slice] * confidence[..., field_slice]).float()
+        component, active = weighted_mean(values, weights)
+        components.append(component)
+        active_components.append(active)
+
+    values = torch.stack(components)
+    active = torch.stack(active_components)
+    return (values * active).sum() / active.sum().clamp_min(1.0)
+
+
+def _as_action_loss_weight(
+    weight: torch.Tensor,
+    batch_size: int,
+    seq_len: int,
+    dim: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Normalize per-dimension action weights to a broadcastable [B,T,D]."""
+
+    weight = torch.as_tensor(weight, device=device)
+    if weight.ndim == 1:
+        weight = weight[None, None, :]
+    elif weight.ndim == 2:
+        if tuple(weight.shape) == (seq_len, dim):
+            weight = weight[None, :, :]
+        elif tuple(weight.shape) == (batch_size, dim):
+            weight = weight[:, None, :]
+        else:
+            raise ValueError(
+                "rank-2 action_loss_weight must be [T,D] or [B,D], got "
+                f"{tuple(weight.shape)}"
+            )
+    elif weight.ndim != 3:
+        raise ValueError(
+            f"action_loss_weight must have 1/2/3 dims, got {tuple(weight.shape)}"
+        )
+    expected = (batch_size, seq_len, dim)
+    try:
+        return torch.broadcast_to(weight, expected)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"action_loss_weight shape {tuple(weight.shape)} cannot broadcast to {expected}"
+        ) from exc
+
+
+def masked_weighted_action_mse(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    dim_mask: torch.Tensor | None,
+    time_mask: torch.Tensor | None,
+    action_loss_weight: torch.Tensor | None,
+) -> torch.Tensor:
+    """Preserve ``masked_mse`` exactly unless explicit dimension weights exist."""
+
+    if action_loss_weight is None:
+        return masked_mse(pred, target, dim_mask=dim_mask, time_mask=time_mask)
+
+    sq = (pred - target).pow(2)
+    weights = _as_action_loss_weight(
+        action_loss_weight,
+        batch_size=pred.shape[0],
+        seq_len=pred.shape[1],
+        dim=pred.shape[2],
+        device=pred.device,
+    ).to(dtype=sq.dtype)
+    if dim_mask is not None:
+        weights = weights * dim_mask.to(dtype=sq.dtype, device=sq.device)
+
+    # Normalize dimensions independently per token, matching masked_mse when
+    # all explicit weights are one while allowing the ego grip channels to be
+    # downweighted to 0.25.
+    per_token = (sq * weights).sum(dim=-1) / weights.sum(dim=-1).clamp_min(1.0)
+    if time_mask is None:
+        valid_token = (weights.sum(dim=-1) > 0).to(dtype=per_token.dtype)
+        return (per_token * valid_token).sum() / valid_token.sum().clamp_min(1.0)
+    time_mask = time_mask.to(dtype=per_token.dtype, device=per_token.device)
+    valid_token = (weights.sum(dim=-1) > 0).to(dtype=per_token.dtype)
+    time_weight = time_mask * valid_token
+    return (per_token * time_weight).sum() / time_weight.sum().clamp_min(1.0)
+
+
 class CasualWATrainerMoT(Trainer):
     """WAM pretraining trainer for the Mixture-of-Transformers policy."""
 
@@ -76,6 +263,9 @@ class CasualWATrainerMoT(Trainer):
         self.num_embodiments = int(model_config.get("num_embodiments", 1))
         self.contact_loss_weight = float(model_config.get("contact_loss_weight", 0.0))
         self.contact_loss_type = str(model_config.get("contact_loss_type", "bce"))
+        self.contact_schema_version = str(
+            model_config.get("contact_schema_version", "contact_transition_v1")
+        )
         self.contact_condition_mode = str(
             model_config.get("contact_condition_mode", "predicted")
         )
@@ -236,7 +426,11 @@ class CasualWATrainerMoT(Trainer):
             contact_condition = contact_target
             if contact_condition_mask is None:
                 contact_condition_mask = batch_dict.get("contact_loss_mask")
-                if contact_condition_mask is not None and contact_condition_mask.ndim == 3:
+                if (
+                    self.contact_schema_version != SEGMENT_SCHEMA_VERSION
+                    and contact_condition_mask is not None
+                    and contact_condition_mask.ndim == 3
+                ):
                     contact_condition_mask = contact_condition_mask.amax(dim=-1)
 
         model_output = transformer(
@@ -261,30 +455,48 @@ class CasualWATrainerMoT(Trainer):
 
         time_mask = None
         if "action_loss_mask" in batch_dict:
+            raw_time_mask = batch_dict["action_loss_mask"]
+            if self.action_repeats > 1:
+                raw_time_mask = raw_time_mask.repeat(1, self.action_repeats)
             time_mask = _as_time_mask(
-                batch_dict["action_loss_mask"],
+                raw_time_mask,
                 batch_size=bs,
                 seq_len=action.shape[1],
                 device=action_pred.device,
             )
-        action_loss = masked_mse(
+        action_loss_weight = batch_dict.get("action_loss_weight")
+        if action_loss_weight is not None and self.action_repeats > 1:
+            action_loss_weight = action_loss_weight.repeat(
+                1, self.action_repeats, 1
+            )
+        action_loss = masked_weighted_action_mse(
             action_pred.float(),
             action_target.float(),
             dim_mask=dim_mask,
             time_mask=time_mask,
+            action_loss_weight=action_loss_weight,
         )
         losses = {
             "visual_loss": visual_loss,
             "action_loss": action_loss,
         }
         if contact_pred is not None and contact_target is not None:
-            losses["contact_loss"] = self.contact_loss_weight * masked_contact_loss(
-                contact_pred,
-                contact_target,
-                mask=batch_dict.get("contact_loss_mask"),
-                confidence=batch_dict.get("contact_confidence"),
-                loss_type=self.contact_loss_type,
-            )
+            if self.contact_schema_version == SEGMENT_SCHEMA_VERSION:
+                contact_loss = grouped_contact_segment_loss(
+                    contact_pred,
+                    contact_target,
+                    mask=batch_dict.get("contact_loss_mask"),
+                    confidence=batch_dict.get("contact_confidence"),
+                )
+            else:
+                contact_loss = masked_contact_loss(
+                    contact_pred,
+                    contact_target,
+                    mask=batch_dict.get("contact_loss_mask"),
+                    confidence=batch_dict.get("contact_confidence"),
+                    loss_type=self.contact_loss_type,
+                )
+            losses["contact_loss"] = self.contact_loss_weight * contact_loss
         elif self.require_contact_targets:
             missing = "contact_target" if contact_target is None else "contact prediction head"
             raise ValueError(f"required {missing} is missing")
