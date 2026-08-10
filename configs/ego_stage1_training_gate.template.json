@@ -1,5 +1,5 @@
 {
-  "gate_version": "ego-discrete-contact-stage1-training-gate/v4",
+  "gate_version": "ego-discrete-contact-stage1-training-gate/v5",
   "evidence_valid_until_utc": null,
   "training_run_nonce": null,
   "human_adjudicated_sidecar_passed": false,
@@ -22,6 +22,10 @@
     "t5_independent_replay_attestation_sha256": null,
     "norm_stats_sha256": null,
     "hdf5_bundle_sha256": null,
+    "hand_active_meta_sha256": null,
+    "hand_active_sidecar_bundle_sha256": null,
+    "hand_active_raw_hdf5_bundle_sha256": null,
+    "hand_active_statistics_sha256": null,
     "sidecar_meta_sha256": null,
     "sidecar_bundle_sha256": null,
     "split_manifest_sha256": null,

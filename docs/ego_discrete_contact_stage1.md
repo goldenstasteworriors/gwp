@@ -290,7 +290,7 @@ python -B scripts/verify_ego_t5_replay.py \
 ```
 
 The verifier has no gate argument and cannot modify the source or gate. A
-reviewer must separately place the attestation raw SHA-256 in both the v4
+reviewer must separately place the attestation raw SHA-256 in both the v5
 gate's `artifact_fingerprints.t5_independent_replay_attestation_sha256` and
 `evidence_reports.t5_independent_replay.sha256`, plus its path. The checked-in
 template keeps these values null and every authorization flag false. A v3 gate,
@@ -307,14 +307,45 @@ proxies, not device aperture or finger contact. Weight 1.0 is a separate
 ablation: the norm builder requires an explicit `--ablation-id`, changes the
 action-schema identity, and the production preflight rejects it.
 
-`scripts/compute_ego_wam_norm.py` requires both the authoritative LeRobot root
-and the matching `final_hdf5` root. Its v2 metadata binds the dataset
+The source tracker-validity fields are separate, scalar
+`left_hand_active`/`right_hand_active` arrays with `0=inactive, 1=active`.
+`scripts/build_ego_hand_active_sidecars.py` verifies the exact raw-100-Hz to
+processed-20-Hz timestamp relation (`raw[::5]`), fixes field order to
+`[left,right]`, and writes H=48 masks. For a source frame `f`, future target
+slot `k` uses validity at `f+k+1`; targets beyond the episode boundary are
+false rather than last-value held. Its record-only transition mask requires
+validity at both target-1 and target. No transition auxiliary is enabled.
+
+For the production path, action dimensions 18/19 receive weight
+`0.25 * active_at_target` independently for the left/right columns. Dimensions
+0..17 remain unchanged, 20..31 remain padding, and the action-time mask also
+zeros clamped horizon padding. Without the optional validity keys the legacy
+transform behavior is unchanged (0.25 on both grip dimensions); the gated Ego
+entry always configures the strict sidecars. `hand_active` is tracker validity,
+not physical-contact truth.
+
+The audited 66 episodes contain 99,953 raw frames and 20,013 exact-stride
+processed frames. Raw active counts are 35,445 left and 32,877 right; 20-Hz
+current active counts are 7,087 left and 6,574 right. Across all valid H=48
+future targets there are 335,074 left and 308,116 right grip supervision
+samples. The zero-active episode counts must not be mixed: raw-100-Hz has 28
+left/29 right, exact-stride current-20-Hz has 30 left/29 right, and H=48 future
+targets have 30 left/29 right. Left episodes 15 (raw indices 418,419) and 48
+(512,513,514) lose their only raw active samples because none lies on an index
+divisible by five.
+
+`scripts/compute_ego_wam_norm.py` requires the authoritative LeRobot root, the
+matching raw/final HDF5 roots, and the verified validity sidecar bundle. Its v3
+metadata binds the dataset
 fingerprint, full source manifest/receipt, canonical episode metadata,
-source/target grip semantics, 20-to-32 zero padding, dimension mask, time-mask
-policy, 0.25 grip weight, each HDF5 SHA-256, and a bundle SHA-256. The preflight
-recomputes LeRobot, T5, and HDF5 hashes, so same-length content replacement is
-rejected. Absolute T5/HDF5 paths are audit records only and do not affect their
-portable receipts.
+source/target grip semantics, validity statistics, raw/final HDF5 and NPZ
+bundle hashes, 20-to-32 zero padding, dimension mask, time-mask policy, 0.25
+active grip weight, each HDF5 SHA-256, and a bundle SHA-256. Grip dimensions
+18/19 are normalized only from their corresponding active samples; inactive
+held proxy values and clamped targets are excluded. The preflight independently
+replays these masked grip statistics and recomputes LeRobot, T5, HDF5, and
+sidecar hashes, so same-length content replacement is rejected. Absolute
+T5/HDF5 paths are audit records only and do not affect their portable receipts.
 
 ## Sidecar and evidence gates
 
@@ -335,7 +366,7 @@ requires artifact-bound A/B agreement, Ego action/grip evidence, matched-control
 collector evidence, and separate `allow_server_training` and
 `allow_5b_training` decisions. No true gate example is provided.
 
-Gate v3 additionally requires a reviewer-authored
+Gate v5 additionally requires a reviewer-authored
 `evidence_valid_until_utc` and a 16-128 character `training_run_nonce` that
 must exactly equal `GWP_EGO_TRAINING_RUN_NONCE`. Expiry is a launch-admission
 deadline: it does not terminate an already admitted run. This is bounded

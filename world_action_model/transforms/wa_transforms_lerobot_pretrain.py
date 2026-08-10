@@ -14,6 +14,7 @@ from world_action_model.ego_action_schema import (
     convert_hand_status_semantics,
     dual_eef_delta_to_action,
     dual_eef_pose_to_state,
+    ego_grip_loss_weight_multiplier,
 )
 from world_action_model.asymmetric_action_schema import ASYMMETRIC_SCHEMA_ID
 from world_action_model.matched_control_hashes import (
@@ -54,6 +55,8 @@ class WALeRobotTransformsPretrain(WATransforms):
         action_key="action",
         ego_dual_eef_cfg=None,
         ego_grip_semantics=None,
+        ego_hand_active_future_key=None,
+        ego_hand_active_transition_pair_key=None,
         require_exact_effective_dim=False,
         expected_action_schema_id=None,
         expected_hardware_contract_sha256=None,
@@ -166,6 +169,16 @@ class WALeRobotTransformsPretrain(WATransforms):
         self.ego_grip_semantics = (
             None if ego_grip_semantics is None else str(ego_grip_semantics)
         )
+        self.ego_hand_active_future_key = (
+            None
+            if ego_hand_active_future_key is None
+            else str(ego_hand_active_future_key)
+        )
+        self.ego_hand_active_transition_pair_key = (
+            None
+            if ego_hand_active_transition_pair_key is None
+            else str(ego_hand_active_transition_pair_key)
+        )
         self.require_exact_effective_dim = bool(require_exact_effective_dim)
         self.expected_action_schema_id = (
             None if expected_action_schema_id is None else str(expected_action_schema_id)
@@ -182,6 +195,14 @@ class WALeRobotTransformsPretrain(WATransforms):
         )
         if self.ego_grip_semantics is not None and self.ego_dual_eef_cfg is None:
             raise ValueError("ego_grip_semantics requires ego_dual_eef_cfg")
+        if (self.ego_hand_active_future_key is None) != (
+            self.ego_hand_active_transition_pair_key is None
+        ):
+            raise ValueError(
+                "Ego hand-active future and transition-pair keys must be configured together"
+            )
+        if self.ego_hand_active_future_key is not None and self.ego_dual_eef_cfg is None:
+            raise ValueError("Ego hand-active masks require ego_dual_eef_cfg")
         if (
             self.ego_dual_eef_cfg is not None
             and self.expected_action_schema_id == ASYMMETRIC_SCHEMA_ID
@@ -471,6 +492,18 @@ class WALeRobotTransformsPretrain(WATransforms):
                         "pose": data_dict[str(self.ego_dual_eef_cfg.get("pose_key", "action_eef"))],
                         "delta": data_dict[str(self.ego_dual_eef_cfg.get("delta_key", "action_delta_eef"))],
                         "hand_status": data_dict[str(self.ego_dual_eef_cfg.get("hand_status_key", "hand_status"))],
+                        **(
+                            {
+                                "hand_active_future": data_dict[
+                                    self.ego_hand_active_future_key
+                                ],
+                                "hand_active_transition_pair": data_dict[
+                                    self.ego_hand_active_transition_pair_key
+                                ],
+                            }
+                            if self.ego_hand_active_future_key is not None
+                            else {}
+                        ),
                     }
                     if self.ego_dual_eef_cfg is not None
                     else {
@@ -590,6 +623,8 @@ class WALeRobotTransformsPretrain(WATransforms):
             data_dict["input_ref_masks"] = ref_latent_masks
 
         action_is_precomputed_delta = False
+        ego_grip_active_mask = None
+        ego_grip_transition_pair_mask = None
         if self.ego_dual_eef_cfg is not None:
             cfg = self.ego_dual_eef_cfg
             pose_key = str(cfg.get("pose_key", "action_eef"))
@@ -618,6 +653,36 @@ class WALeRobotTransformsPretrain(WATransforms):
             state = torch.from_numpy(dual_eef_pose_to_state(pose, state_hand_status))
             action = torch.from_numpy(dual_eef_delta_to_action(delta, hand_status))
             action_is_precomputed_delta = True
+            if self.ego_hand_active_future_key is not None:
+                if self.ego_hand_active_future_key not in data_dict:
+                    raise KeyError(
+                        f"missing required Ego hand-active mask: {self.ego_hand_active_future_key}"
+                    )
+                if self.ego_hand_active_transition_pair_key not in data_dict:
+                    raise KeyError(
+                        "missing required Ego hand-active transition-pair mask: "
+                        f"{self.ego_hand_active_transition_pair_key}"
+                    )
+                ego_grip_active_mask = torch.as_tensor(
+                    data_dict[self.ego_hand_active_future_key],
+                    dtype=torch.bool,
+                )
+                ego_grip_transition_pair_mask = torch.as_tensor(
+                    data_dict[self.ego_hand_active_transition_pair_key],
+                    dtype=torch.bool,
+                )
+                expected_grip_shape = (int(action.shape[0]), 2)
+                if (
+                    tuple(ego_grip_active_mask.shape) != expected_grip_shape
+                    or tuple(ego_grip_transition_pair_mask.shape)
+                    != expected_grip_shape
+                ):
+                    raise ValueError(
+                        "Ego hand-active masks must align to the future action chunk: "
+                        f"expected {expected_grip_shape}, got "
+                        f"{tuple(ego_grip_active_mask.shape)} and "
+                        f"{tuple(ego_grip_transition_pair_mask.shape)}"
+                    )
         else:
             action = data_dict[self.action_key]
             if isinstance(action, np.ndarray):
@@ -674,7 +739,19 @@ class WALeRobotTransformsPretrain(WATransforms):
                     f"action shape {tuple(action.shape)}"
                 )
         if self.ego_dual_eef_cfg is not None and action_loss_weight.shape[-1] >= 20:
-            action_loss_weight[:, 18:20] *= self.ego_grip_proxy_weight
+            if ego_grip_active_mask is not None:
+                multiplier = ego_grip_loss_weight_multiplier(
+                    ego_grip_active_mask.cpu().numpy(),
+                    action_dim=int(action_loss_weight.shape[-1]),
+                    active_weight=self.ego_grip_proxy_weight,
+                )
+                action_loss_weight *= torch.as_tensor(
+                    multiplier,
+                    dtype=action_loss_weight.dtype,
+                    device=action_loss_weight.device,
+                )
+            else:
+                action_loss_weight[:, 18:20] *= self.ego_grip_proxy_weight
 
         if action.shape[0] != self.num_frames:
             t = int(self.num_frames)
@@ -683,6 +760,9 @@ class WALeRobotTransformsPretrain(WATransforms):
                 action = action[:t]
                 action_time_mask = action_time_mask[:t]
                 action_loss_weight = action_loss_weight[:t]
+                if ego_grip_active_mask is not None:
+                    ego_grip_active_mask = ego_grip_active_mask[:t]
+                    ego_grip_transition_pair_mask = ego_grip_transition_pair_mask[:t]
             else:
                 pad = torch.zeros((t - cur_t, action.shape[1]), dtype=action.dtype, device=action.device)
                 action = torch.cat([action, pad], dim=0)
@@ -704,6 +784,21 @@ class WALeRobotTransformsPretrain(WATransforms):
                     ],
                     dim=0,
                 )
+                if ego_grip_active_mask is not None:
+                    ego_grip_active_mask = torch.cat(
+                        (
+                            ego_grip_active_mask,
+                            torch.zeros((t - cur_t, 2), dtype=torch.bool),
+                        ),
+                        dim=0,
+                    )
+                    ego_grip_transition_pair_mask = torch.cat(
+                        (
+                            ego_grip_transition_pair_mask,
+                            torch.zeros((t - cur_t, 2), dtype=torch.bool),
+                        ),
+                        dim=0,
+                    )
 
         base = self._get_delta_mask(embodiment_id)
         assert base is not None, f"embodiment_id {embodiment_id} not found in delta_mask_by_embodiment_id"
@@ -807,6 +902,13 @@ class WALeRobotTransformsPretrain(WATransforms):
             * action_time_mask[:, None].to(dtype=action_loss_weight.dtype)
             * valid_dim_mask[None, :].to(dtype=action_loss_weight.dtype)
         )
+        if ego_grip_transition_pair_mask is not None:
+            # Record-only.  Stage1 currently has no transition auxiliary loss;
+            # any future explicit ablation must use both-adjacent-frame validity.
+            out["ego_grip_transition_loss_mask"] = (
+                ego_grip_transition_pair_mask.to(device=action.device)
+                & action_time_mask[:, None]
+            )
         if matched_trace is not None:
             out[SAMPLE_IDENTITY_KEY] = matched_identity_json
             out[SAMPLE_DATA_PATH_KEY] = matched_diagnostic_path

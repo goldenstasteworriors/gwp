@@ -63,6 +63,28 @@ def convert_hand_status_semantics(
     return (1.0 - hand_status).astype(np.float32, copy=False)
 
 
+def ego_grip_loss_weight_multiplier(
+    hand_active_future: np.ndarray,
+    *,
+    action_dim: int,
+    active_weight: float = 0.25,
+) -> np.ndarray:
+    """Return [T,D] multipliers that affect only canonical grip dims 18/19."""
+
+    active = np.asarray(hand_active_future)
+    if active.dtype != np.bool_ or active.ndim != 2 or active.shape[1] != 2:
+        raise ValueError(
+            f"future hand-active mask must be bool [T,2], got {active.dtype} {active.shape}"
+        )
+    if isinstance(action_dim, bool) or not isinstance(action_dim, int) or action_dim < 20:
+        raise ValueError("Ego grip loss multipliers require action_dim>=20")
+    if not np.isfinite(active_weight) or not 0.0 <= active_weight <= 1.0:
+        raise ValueError("Ego active grip weight must be finite in [0,1]")
+    result = np.ones((len(active), action_dim), dtype=np.float32)
+    result[:, 18:20] = active.astype(np.float32) * np.float32(active_weight)
+    return result
+
+
 def matrix_to_rot6d(matrix: np.ndarray) -> np.ndarray:
     """Return the first two rotation-matrix columns in SONIC's ordering."""
 

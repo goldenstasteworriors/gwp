@@ -15,11 +15,13 @@ import re
 from world_action_model.verified_io import read_verified_bytes, strict_json_loads
 
 
-EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v4"
+EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v5"
 EGO_STAGE1_REQUIRED_ENV_PATHS = (
     "GWP_EGO_DATA_PATH",
     "GWP_EGO_NORM_STATS_PATH",
     "GWP_EGO_FINAL_HDF5_DIR",
+    "GWP_EGO_RAW_HDF5_DIR",
+    "GWP_EGO_HAND_ACTIVE_SIDECAR_DIR",
     "GWP_CONTACT_SIDECAR_DIR",
     "GWP_CONTACT_COVERAGE_CSV",
     "GWP_CONTACT_SEGMENTS_CSV",
