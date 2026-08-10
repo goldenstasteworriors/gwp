@@ -94,6 +94,32 @@ def _is_file_descriptor_exhaustion(error: BaseException) -> bool:
     return False
 
 
+def _close_fd_once(fd: int) -> bool:
+    """Attempt exactly one close; callers must relinquish the integer first."""
+
+    try:
+        os.close(fd)
+    except OSError:
+        # A failed close is never retried: on some kernels/errors the original
+        # descriptor has already been released and its integer may be reused.
+        return False
+    return True
+
+
+def _close_fd_sequence_once(fds: Iterable[int]) -> None:
+    """Close every captured FD once, then re-raise the first cancellation/error."""
+
+    first_error = None
+    for fd in fds:
+        try:
+            _close_fd_once(fd)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
 def _get_env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     if value is None:
@@ -393,14 +419,15 @@ def _open_secure_absolute_directory(path: Path, *, create: bool) -> tuple[int, d
                     # authority and rejects non-directories/symlinks.
                     pass
                 next_fd = os.open(part, flags, dir_fd=current_fd)
-            os.close(current_fd)
-            current_fd = next_fd
+            old_fd, current_fd = current_fd, next_fd
+            os.close(old_fd)
         runtime_stat = stat_identity(os.fstat(current_fd))
         if not stat.S_ISDIR(runtime_stat["mode"]):
             raise ValueError("private HF cache parent is not a directory")
         return current_fd, runtime_stat
-    except Exception:
-        os.close(current_fd)
+    except BaseException:
+        old_fd, current_fd = current_fd, None
+        _close_fd_once(old_fd)
         raise
 
 
@@ -445,18 +472,20 @@ def _open_verified_regular_fd_at(
     if hasattr(os, "O_NOFOLLOW"):
         directory_flags |= os.O_NOFOLLOW
         file_flags |= os.O_NOFOLLOW
-    directory_fd = os.dup(root_fd)
+    fd = None
     try:
-        for part in relative.parts[:-1]:
-            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = next_fd
-        name = relative.parts[-1]
-        path_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        fd = os.open(name, file_flags, dir_fd=directory_fd)
-    finally:
-        os.close(directory_fd)
-    try:
+        directory_fd = os.dup(root_fd)
+        try:
+            for part in relative.parts[:-1]:
+                next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+                old_fd, directory_fd = directory_fd, next_fd
+                os.close(old_fd)
+            name = relative.parts[-1]
+            path_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            fd = os.open(name, file_flags, dir_fd=directory_fd)
+        finally:
+            old_fd, directory_fd = directory_fd, None
+            _close_fd_once(old_fd)
         before = os.fstat(fd)
         if (
             not stat.S_ISREG(path_stat.st_mode)
@@ -476,9 +505,13 @@ def _open_verified_regular_fd_at(
         if stat_identity(before) != stat_identity(after):
             raise ValueError("private Arrow cache changed while hashing")
         os.lseek(fd, 0, os.SEEK_SET)
-        return fd, digest.hexdigest(), stat_identity(after)
-    except Exception:
-        os.close(fd)
+        result = fd, digest.hexdigest(), stat_identity(after)
+        fd = None
+        return result
+    except BaseException:
+        if fd is not None:
+            old_fd, fd = fd, None
+            _close_fd_once(old_fd)
         raise
 
 
@@ -500,8 +533,8 @@ def _stat_regular_at(root_fd: int, relative_path: str) -> dict:
     try:
         for part in relative.parts[:-1]:
             next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = next_fd
+            old_fd, directory_fd = directory_fd, next_fd
+            os.close(old_fd)
         path_stat = os.stat(
             relative.parts[-1],
             dir_fd=directory_fd,
@@ -511,7 +544,8 @@ def _stat_regular_at(root_fd: int, relative_path: str) -> dict:
             raise ValueError("private Arrow pathname is not a regular file")
         return stat_identity(path_stat)
     finally:
-        os.close(directory_fd)
+        old_fd, directory_fd = directory_fd, None
+        _close_fd_once(old_fd)
 
 
 class _LeRobotDatasetMetadata(_OriginalLeRobotDatasetMetadata):
@@ -984,12 +1018,7 @@ class FastLeRobotDataset(_LeRobotDataset):
             else Path(verified_private_cache_parent).expanduser().absolute()
         )
         self._verified_training_run_nonce = verified_training_run_nonce
-        self._verified_private_parent_fd: int | None = None
-        self._verified_private_parent_stat: dict | None = None
-        self._verified_private_cache_fd: int | None = None
-        self._verified_private_cache_stat: dict | None = None
-        self._verified_private_cache_leaf: str | None = None
-        self._verified_private_cache_owner_pid: int | None = None
+        self._verified_private_cache_state: dict[str, object] | None = None
         token = None
         try:
             if verified_source_receipt is not None:
@@ -1024,7 +1053,7 @@ class FastLeRobotDataset(_LeRobotDataset):
                 video_backend=video_backend,
             )
             self._assert_verified_sources_unchanged()
-        except Exception as exc:
+        except BaseException as exc:
             self.close_verified_sources()
             if _is_file_descriptor_exhaustion(exc):
                 raise ValueError(
@@ -1195,12 +1224,8 @@ class FastLeRobotDataset(_LeRobotDataset):
                         reopened_fds.append(new_fd)
                         entry["fd"] = new_fd
                         entry["pinned_path"] = Path(f"/proc/self/fd/{new_fd}")
-                except Exception:
-                    for fd in reopened_fds:
-                        try:
-                            os.close(fd)
-                        except OSError:
-                            pass
+                except BaseException:
+                    _close_fd_sequence_once(reopened_fds)
                     raise
                 self._verified_source_fds = reopened_fds
                 self._verified_parquet_paths = [
@@ -1278,33 +1303,34 @@ class FastLeRobotDataset(_LeRobotDataset):
     def _create_private_cache(self) -> str:
         if self._verified_private_cache_parent is None:
             raise ValueError("verified private-cache parent is missing")
-        if self._verified_private_cache_fd is not None:
+        if getattr(self, "_verified_private_cache_state", None) is not None:
             raise ValueError("verified private cache is already open")
-        parent_fd, _ = _open_secure_absolute_directory(
-            self._verified_private_cache_parent,
-            create=True,
-        )
-        parent_stat = os.fstat(parent_fd)
-        if (
-            parent_stat.st_uid != os.geteuid()
-            or stat.S_IMODE(parent_stat.st_mode) != 0o700
-        ):
-            os.close(parent_fd)
-            raise ValueError(
-                "verified private-cache parent must be owned by this user and mode 0700"
-            )
-        rank_text = os.environ.get("RANK", "unranked")
-        if rank_text != "unranked" and not re.fullmatch(
-            r"[0-9]+", rank_text, flags=re.ASCII
-        ):
-            os.close(parent_fd)
-            raise ValueError("RANK must be canonical ASCII decimal for private cache")
-        nonce_tag = hashlib.sha256(
-            self._verified_training_run_nonce.encode("utf-8")
-        ).hexdigest()[:16]
+        parent_fd = None
         cache_fd = None
         leaf = None
         try:
+            parent_fd, _ = _open_secure_absolute_directory(
+                self._verified_private_cache_parent,
+                create=True,
+            )
+            parent_stat = os.fstat(parent_fd)
+            if (
+                parent_stat.st_uid != os.geteuid()
+                or stat.S_IMODE(parent_stat.st_mode) != 0o700
+            ):
+                raise ValueError(
+                    "verified private-cache parent must be owned by this user and mode 0700"
+                )
+            rank_text = os.environ.get("RANK", "unranked")
+            if rank_text != "unranked" and not re.fullmatch(
+                r"[0-9]+", rank_text, flags=re.ASCII
+            ):
+                raise ValueError(
+                    "RANK must be canonical ASCII decimal for private cache"
+                )
+            nonce_tag = hashlib.sha256(
+                self._verified_training_run_nonce.encode("utf-8")
+            ).hexdigest()[:16]
             for _ in range(32):
                 candidate = (
                     f"run-{nonce_tag}-rank-{rank_text}-pid-{os.getpid()}-"
@@ -1333,37 +1359,52 @@ class FastLeRobotDataset(_LeRobotDataset):
                 or stat.S_IMODE(cache_stat.st_mode) != 0o700
             ):
                 raise ValueError("private HF cache is not owned mode 0700")
-            self._verified_private_parent_fd = parent_fd
-            self._verified_private_parent_stat = self._directory_binding(
-                os.fstat(parent_fd)
-            )
-            self._verified_private_cache_fd = cache_fd
-            self._verified_private_cache_stat = self._directory_binding(cache_stat)
-            self._verified_private_cache_leaf = leaf
-            self._verified_private_cache_owner_pid = os.getpid()
-            self._assert_private_cache_directory_bound()
-            return f"/proc/self/fd/{cache_fd}"
-        except Exception:
-            if cache_fd is not None:
-                try:
+            pending_state = {
+                "parent_fd": parent_fd,
+                "parent_stat": self._directory_binding(os.fstat(parent_fd)),
+                "cache_fd": cache_fd,
+                "cache_stat": self._directory_binding(cache_stat),
+                "leaf": leaf,
+                "owner_pid": os.getpid(),
+            }
+            self._assert_private_cache_state_bound(pending_state)
+            # The state dictionary is the single ownership publication point.
+            # Before this assignment cleanup cannot observe either local FD.
+            parent_fd = None
+            cache_fd = None
+            self._verified_private_cache_state = pending_state
+            return f"/proc/self/fd/{pending_state['cache_fd']}"
+        except BaseException:
+            try:
+                if cache_fd is not None:
                     _secure_clear_directory_fd(cache_fd)
-                except Exception:
-                    pass
-                finally:
-                    os.close(cache_fd)
-            if leaf is not None:
-                try:
+                if leaf is not None and parent_fd is not None:
                     os.rmdir(leaf, dir_fd=parent_fd)
-                except OSError:
-                    pass
-            os.close(parent_fd)
+            except OSError:
+                pass
+            finally:
+                try:
+                    if cache_fd is not None:
+                        old_fd, cache_fd = cache_fd, None
+                        _close_fd_once(old_fd)
+                finally:
+                    if parent_fd is not None:
+                        old_fd, parent_fd = parent_fd, None
+                        _close_fd_once(old_fd)
             raise
 
-    def _assert_private_cache_directory_bound(self) -> None:
-        parent_fd = self._verified_private_parent_fd
-        cache_fd = self._verified_private_cache_fd
-        leaf = self._verified_private_cache_leaf
-        if parent_fd is None or cache_fd is None or leaf is None:
+    def _assert_private_cache_state_bound(self, state: Mapping[str, object]) -> None:
+        parent_fd = state.get("parent_fd")
+        cache_fd = state.get("cache_fd")
+        leaf = state.get("leaf")
+        if (
+            isinstance(parent_fd, bool)
+            or not isinstance(parent_fd, int)
+            or isinstance(cache_fd, bool)
+            or not isinstance(cache_fd, int)
+            or not isinstance(leaf, str)
+            or not leaf
+        ):
             raise ValueError("verified private HF cache is not pinned")
         verified_parent_fd, _ = _open_secure_absolute_directory(
             self._verified_private_cache_parent,
@@ -1374,19 +1415,26 @@ class FastLeRobotDataset(_LeRobotDataset):
                 os.fstat(verified_parent_fd)
             )
         finally:
-            os.close(verified_parent_fd)
+            old_fd, verified_parent_fd = verified_parent_fd, None
+            _close_fd_once(old_fd)
         leaf_path_stat = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
         if (
             self._directory_binding(os.fstat(parent_fd))
-            != self._verified_private_parent_stat
-            or parent_path_binding != self._verified_private_parent_stat
+            != state.get("parent_stat")
+            or parent_path_binding != state.get("parent_stat")
             or self._directory_binding(os.fstat(cache_fd))
-            != self._verified_private_cache_stat
+            != state.get("cache_stat")
             or self._directory_binding(leaf_path_stat)
-            != self._verified_private_cache_stat
+            != state.get("cache_stat")
             or not stat.S_ISDIR(leaf_path_stat.st_mode)
         ):
             raise ValueError("verified private HF cache directory binding changed")
+
+    def _assert_private_cache_directory_bound(self) -> None:
+        state = getattr(self, "_verified_private_cache_state", None)
+        if not isinstance(state, Mapping):
+            raise ValueError("verified private HF cache is not pinned")
+        self._assert_private_cache_state_bound(state)
 
     def _open_pinned_arrow_dataset(
         self, reader, builder_cache_dir: Path
@@ -1408,12 +1456,18 @@ class FastLeRobotDataset(_LeRobotDataset):
         entries = {}
         fds = []
         parts = []
-        private_root = f"/proc/self/fd/{self._verified_private_cache_fd}"
+        private_state = getattr(self, "_verified_private_cache_state", None)
+        if not isinstance(private_state, Mapping):
+            raise ValueError("verified private HF cache is not pinned")
+        private_cache_fd = private_state.get("cache_fd")
+        if isinstance(private_cache_fd, bool) or not isinstance(private_cache_fd, int):
+            raise ValueError("verified private HF cache FD is invalid")
+        private_root = f"/proc/self/fd/{private_cache_fd}"
         try:
             for index, arrow_path in enumerate(arrow_paths):
                 relative_path = os.path.relpath(str(arrow_path), private_root)
                 fd, digest, runtime_stat = _open_verified_regular_fd_at(
-                    self._verified_private_cache_fd,
+                    private_cache_fd,
                     Path(relative_path).as_posix(),
                 )
                 fds.append(fd)
@@ -1457,12 +1511,8 @@ class FastLeRobotDataset(_LeRobotDataset):
                 raise ValueError(
                     "HF Dataset is not mmap-backed by the pinned private Arrow FDs"
                 )
-        except Exception:
-            for fd in fds:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
+        except BaseException:
+            _close_fd_sequence_once(fds)
             raise
         self._verified_cache_entries = entries
         self._verified_cache_fds = fds
@@ -1470,13 +1520,22 @@ class FastLeRobotDataset(_LeRobotDataset):
         return result
 
     def _assert_verified_cache_unchanged(self) -> None:
-        if self._verified_source_entries:
-            self._assert_private_cache_directory_bound()
+        if not self._verified_source_entries:
+            return
+        self._assert_private_cache_directory_bound()
+        private_state = getattr(self, "_verified_private_cache_state", None)
+        private_cache_fd = (
+            private_state.get("cache_fd")
+            if isinstance(private_state, Mapping)
+            else None
+        )
+        if isinstance(private_cache_fd, bool) or not isinstance(private_cache_fd, int):
+            raise ValueError("verified private HF cache FD is invalid")
         for entry in self._verified_cache_entries.values():
             if (
                 stat_identity(os.fstat(entry["fd"])) != entry["stat"]
                 or _stat_regular_at(
-                    self._verified_private_cache_fd,
+                    private_cache_fd,
                     entry["relative_path"],
                 )
                 != entry["stat"]
@@ -1503,71 +1562,89 @@ class FastLeRobotDataset(_LeRobotDataset):
         state["_verified_cache_entries"] = {}
         state["_verified_cache_fds"] = []
         state["_verified_dataset_pid"] = None
-        state["_verified_private_parent_fd"] = None
-        state["_verified_private_parent_stat"] = None
-        state["_verified_private_cache_fd"] = None
-        state["_verified_private_cache_stat"] = None
-        state["_verified_private_cache_leaf"] = None
-        state["_verified_private_cache_owner_pid"] = None
+        state["_verified_private_cache_state"] = None
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
 
     def close_verified_sources(self) -> None:
-        for fd in getattr(self, "_verified_source_fds", []):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        self._verified_source_fds = []
-        self._release_private_cache(delete_owned=True)
+        source_fds = self.__dict__.pop("_verified_source_fds", [])
+        try:
+            _close_fd_sequence_once(source_fds)
+        finally:
+            self._release_private_cache(delete_owned=True)
 
     def _release_private_cache(self, *, delete_owned: bool) -> None:
-        for fd in getattr(self, "_verified_cache_fds", []):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        self._verified_cache_fds = []
-        self._verified_cache_entries = {}
-        parent_fd = getattr(self, "_verified_private_parent_fd", None)
-        cache_fd = getattr(self, "_verified_private_cache_fd", None)
-        leaf = getattr(self, "_verified_private_cache_leaf", None)
-        owner_pid = getattr(self, "_verified_private_cache_owner_pid", None)
-        should_delete = (
-            delete_owned
-            and owner_pid == os.getpid()
-            and parent_fd is not None
-            and cache_fd is not None
-            and leaf is not None
+        # Atomically take all published ownership before any fstat/close.  A
+        # reentrant/repeated close therefore sees no stale integer FD that the
+        # OS may already have reassigned to an unrelated resource.
+        cache_fds = self.__dict__.pop("_verified_cache_fds", [])
+        self.__dict__.pop("_verified_cache_entries", None)
+        private_state = self.__dict__.pop("_verified_private_cache_state", None)
+        self.__dict__.pop("_verified_dataset_pid", None)
+        parent_fd = (
+            private_state.get("parent_fd")
+            if isinstance(private_state, Mapping)
+            else None
         )
-        if should_delete:
+        cache_fd = (
+            private_state.get("cache_fd")
+            if isinstance(private_state, Mapping)
+            else None
+        )
+        leaf = (
+            private_state.get("leaf")
+            if isinstance(private_state, Mapping)
+            else None
+        )
+        owner_pid = (
+            private_state.get("owner_pid")
+            if isinstance(private_state, Mapping)
+            else None
+        )
+        try:
+            _close_fd_sequence_once(cache_fds)
+            should_delete = (
+                delete_owned
+                and owner_pid == os.getpid()
+                and not isinstance(parent_fd, bool)
+                and isinstance(parent_fd, int)
+                and not isinstance(cache_fd, bool)
+                and isinstance(cache_fd, int)
+                and isinstance(leaf, str)
+                and bool(leaf)
+            )
+            if should_delete:
+                try:
+                    self._assert_private_cache_state_bound(private_state)
+                    _secure_clear_directory_fd(cache_fd)
+                except Exception as exc:
+                    logging.error(
+                        "cannot safely remove owned private HF cache: %s", exc
+                    )
+                else:
+                    old_fd, cache_fd = cache_fd, None
+                    if _close_fd_once(old_fd):
+                        try:
+                            os.rmdir(leaf, dir_fd=parent_fd)
+                        except OSError as exc:
+                            logging.error(
+                                "cannot safely remove owned private HF cache: %s", exc
+                            )
+                    else:
+                        logging.error(
+                            "cannot safely remove owned private HF cache: close failed"
+                        )
+        finally:
             try:
-                self._assert_private_cache_directory_bound()
-                _secure_clear_directory_fd(cache_fd)
-                os.close(cache_fd)
-                cache_fd = None
-                os.rmdir(leaf, dir_fd=parent_fd)
-            except Exception as exc:
-                logging.error("cannot safely remove owned private HF cache: %s", exc)
-        if cache_fd is not None:
-            try:
-                os.close(cache_fd)
-            except OSError:
-                pass
-        if parent_fd is not None:
-            try:
-                os.close(parent_fd)
-            except OSError:
-                pass
-        self._verified_private_parent_fd = None
-        self._verified_private_parent_stat = None
-        self._verified_private_cache_fd = None
-        self._verified_private_cache_stat = None
-        self._verified_private_cache_leaf = None
-        self._verified_private_cache_owner_pid = None
-        self._verified_dataset_pid = None
+                if not isinstance(cache_fd, bool) and isinstance(cache_fd, int):
+                    old_fd, cache_fd = cache_fd, None
+                    _close_fd_once(old_fd)
+            finally:
+                if not isinstance(parent_fd, bool) and isinstance(parent_fd, int):
+                    old_fd, parent_fd = parent_fd, None
+                    _close_fd_once(old_fd)
 
     def __del__(self):
         self.close_verified_sources()

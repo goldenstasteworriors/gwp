@@ -79,8 +79,12 @@ def _open_regular_fd(
         if expected_stat is not None and stat_identity(before) != dict(expected_stat):
             raise VerifiedIOError(f"verified source stat receipt differs: {absolute}")
         return fd, absolute, stat_identity(before)
-    except Exception:
-        os.close(fd)
+    except BaseException:
+        old_fd, fd = fd, None
+        try:
+            os.close(old_fd)
+        except OSError:
+            pass
         raise
 
 
@@ -128,8 +132,12 @@ def open_verified_regular_fd(
         if expected_sha256 is not None and actual_sha256 != expected_sha256:
             raise VerifiedIOError(f"verified source content SHA differs: {absolute}")
         return fd, actual_sha256, identity
-    except Exception:
-        os.close(fd)
+    except BaseException:
+        old_fd, fd = fd, None
+        try:
+            os.close(old_fd)
+        except OSError:
+            pass
         raise
 
 
