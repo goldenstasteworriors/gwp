@@ -323,6 +323,7 @@ def main() -> None:
         "limitations": [
             "the HDF5 files do not record the exact historical generator Git commit",
             "source-code evidence establishes the checked-out semantic contract, not physical contact",
+            "per-file worktree_matches_head records any upstream checkout drift; both HEAD and audited worktree semantic fragments and hashes were checked",
         ],
     }
     _write_json(args.source_receipt_output, source_receipt, overwrite=args.overwrite)
@@ -392,6 +393,7 @@ def main() -> None:
             "zero-supervision hand/episode pairs cannot support a bimanual truth claim",
             "the transition-pair mask is record-only because Stage1 has no transition auxiliary loss",
             "the exact historical HDF5 generator commit was not recorded",
+            "the audited upstream checkout has per-file HEAD/worktree equality recorded in the source receipt rather than assumed",
         ],
     }
     _write_json(args.report_output, report, overwrite=args.overwrite)
