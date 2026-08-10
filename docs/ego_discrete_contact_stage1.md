@@ -91,6 +91,13 @@ requires artifact-bound A/B agreement, Ego action/grip evidence, matched-control
 collector evidence, and separate `allow_server_training` and
 `allow_5b_training` decisions. No true gate example is provided.
 
+The matched-control report must expose exactly one `dataset_id`. Both its
+scalar `dataset_id` and singleton `dataset_ids` list must equal the portable ID
+derived by the Stage1 preflight. Optional in-process capture receives that same
+receipt as `expected_dataset_id`; an environment value cannot replace it. With
+`GWP_MATCHED_CONTROL_OUTPUT_DIR` unset, collector wiring returns before reading
+other collector variables, hashing files, mutating config, or creating paths.
+
 ## Current decision
 
 Current data are **No-Go for production Stage1**. The 66-episode inventory lacks
