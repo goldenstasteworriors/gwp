@@ -172,7 +172,7 @@ def main() -> None:
             "action": feature_stats(actions),
         },
         "metadata": {
-            "norm_contract_version": "ego-stage1-norm/v1",
+            "norm_contract_version": "ego-stage1-norm/v2",
             "action_schema_id": action_schema_id,
             "source_dim": EGO_WAM_ACTION_DIM,
             "model_dim": args.model_dim,
@@ -192,6 +192,14 @@ def main() -> None:
             "dataset_fingerprint_sha256": identity["dataset_fingerprint_sha256"],
             "info_identity_sha256": identity["info_identity_sha256"],
             "episode_metadata_sha256": identity["episode_metadata_sha256"],
+            "dataset_portable_info_ignored_fields": identity[
+                "portable_info_ignored_fields"
+            ],
+            "dataset_training_source_roots": identity["training_source_roots"],
+            "dataset_source_manifest": identity["source_manifest"],
+            "dataset_source_manifest_sha256": identity["source_manifest_sha256"],
+            "dataset_source_receipt": identity["source_receipt"],
+            "dataset_source_receipt_sha256": identity["source_receipt_sha256"],
             "fps": identity["fps"],
             "frame_clock": identity["frame_clock"],
             "source_hand_status_semantics": EGO_HAND_STATUS_SEMANTICS,

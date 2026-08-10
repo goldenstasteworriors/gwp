@@ -37,6 +37,7 @@ _FIXED_ENV = {
     "GWP_CONTACT_REQUIRE_TARGETS": "1",
     "GWP_CONTACT_CONDITION_MODE": "predicted",
     "GWP_EGO_EPISODES": "",
+    "GWP_T5_LOAD_FROM": "dir",
 }
 for _name, _expected in _FIXED_ENV.items():
     _actual = os.environ.get(_name)
@@ -61,6 +62,14 @@ if len(datasets) != 1 or os.path.realpath(datasets[0]["data_path"]) != preflight
     raise ContactEgoStage1PreflightError("legacy dataloader root differs from preflighted Ego root")
 dataset = datasets[0]
 dataset.pop("episodes", None)
+if (
+    dataset.get("t5_load_from") != "dir"
+    or os.path.realpath(dataset.get("t5_cfg", {}).get("t5_embedding_dir", ""))
+    != preflight_receipt["t5_embedding_dir"]
+):
+    raise ContactEgoStage1PreflightError(
+        "legacy dataloader T5 source differs from the preflighted source"
+    )
 dataset.update(
     contact_sidecar_dir=os.environ["GWP_CONTACT_SIDECAR_DIR"],
     contact_sidecar_pattern="episode_{episode_index:06d}.npz",

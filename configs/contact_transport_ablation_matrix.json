@@ -4,6 +4,8 @@
   "seeds": [6666, 7777, 8888],
   "control_capture": {
     "implementation_status": "implemented_opt_in_rank_local_jsonl_offline_compare",
+    "implemented_runner_variants": ["soft_semantic", "hard_st", "hard_detached"],
+    "runner_set_policy": "exact_set_no_missing_extra_or_alias_variants",
     "collector_code": "world_action_model/matched_control_hashes.py",
     "runner_config": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
     "compare_cli": "scripts/compare_matched_control_hashes.py",

@@ -1,7 +1,9 @@
-# Matched-control hash collector v1
+# Matched-control hash collector v2
 
 This collector is an opt-in scientific control for WAM contact-transport
-ablations. It is not a training or hardware-deployment gate by itself.
+ablations. It is not a training or hardware-deployment gate by itself. The
+only implemented runner IDs are exactly `soft_semantic`, `hard_st`, and
+`hard_detached`; missing, extra, or alias variants are rejected.
 
 ## Observed values
 
@@ -27,8 +29,9 @@ ranks numerically and constructs global hashes from the rank-local hashes.
 
 `configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py` enables
 capture only when `GWP_MATCHED_CONTROL_OUTPUT_DIR` is set. It then also
-requires an explicit dataset ID, run ID, one of seeds 6666/7777/8888, and an
-output directory below `GWP05_PROJECT_DIR`. With the opt-in variable absent,
+requires an explicit dataset ID, run ID, 16-128 character run nonce, one of
+seeds 6666/7777/8888, actual `RANK`/`WORLD_SIZE`, and an output directory below
+`GWP05_PROJECT_DIR`. With the opt-in variable absent,
 the dataset, transform, trainer output, and RNG path remain on the legacy
 route.
 
@@ -54,10 +57,18 @@ expectation receipt: Git commit, control hash, variant hash mapping, world/rank
 topology, collector version, and collector source hash. The enabled helper
 recomputes all locally knowable values before mutating the config. Each runtime
 collector independently checks its rank/world identity, Git commit, version,
-and source bytes before creating its rank-local file. The comparator emits
+source bytes, run ID, and nonce before creating its rank-local file. The
+comparator emits
 `world_size`, `rank_set`, and an exact `topology` object so the production
 preflight can bind the report to that external receipt instead of allowing the
 report to certify itself.
+
+The production expectation receipt also fixes the report byte SHA-256, exact
+variant-to-trace path/SHA mapping, trace-manifest SHA, global-hashes SHA, and
+hash-schema SHA. The preflight verifies report bytes before consuming fields,
+then reopens and hashes every trace. A copied old report, missing trace,
+same-path trace replacement, or self-consistent but externally unapproved
+manifest cannot pass.
 
 The comparator rejects missing fields; duplicate runs, files, or record keys;
 different seed/step/rank sets; incomplete ranks; different sample identities;
@@ -71,6 +82,6 @@ scalar `dataset_id` and auditable `dataset_ids` list for the Stage-1/Stage-2
 preflight binding.
 
 The Q0, capacity-control, auxiliary-only, raw-latent, shuffled, delayed, and
-oracle rows remain without a matched-control runner. The implemented runner
-scope is `soft_semantic`, `hard_st`, and `hard_detached`; label and
+oracle rows remain without a matched-control runner. The exact implemented
+runner set is `soft_semantic`, `hard_st`, and `hard_detached`; label and
 asymmetric25 scientific gates remain closed.

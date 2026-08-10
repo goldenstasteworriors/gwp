@@ -1,5 +1,5 @@
 {
-  "report_version": "matched-control-hash-collector/v1",
+  "report_version": "matched-control-hash-collector/v2",
   "status": "not_run",
   "collector_implemented": false,
   "collector_code": {"path": null, "sha256": null, "version": null},
@@ -25,6 +25,7 @@
   },
   "seeds": [],
   "run_id": null,
+  "run_nonce": null,
   "dataset_id": null,
   "dataset_ids": [],
   "variants": [],
@@ -36,6 +37,9 @@
   "world_size": null,
   "rank_set": null,
   "topology": null,
+  "trace_manifest_sha256": null,
+  "global_hashes_sha256": null,
+  "hash_schema_sha256": null,
   "global_hashes": {},
   "errors": ["template only: run the real collector and offline comparator"]
 }
