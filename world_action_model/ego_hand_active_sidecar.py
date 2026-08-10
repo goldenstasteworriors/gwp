@@ -227,6 +227,7 @@ def read_aligned_hand_active(
         left.shape != (raw_length,)
         or right.shape != (raw_length,)
         or raw_timestamps.shape != (raw_length,)
+        or not np.issubdtype(raw_timestamps.dtype, np.integer)
         or not np.isin(left, (0, 1)).all()
         or not np.isin(right, (0, 1)).all()
         or not np.isfinite(raw_timestamps).all()
@@ -238,6 +239,7 @@ def read_aligned_hand_active(
         hand_status.shape != (final_length, 2)
         or action_eef.shape != (final_length, 14)
         or action_delta.shape != (final_length, 12)
+        or final_timestamps.dtype != np.dtype(np.float64)
         or not np.isfinite(hand_status).all()
         or not np.isin(hand_status, (0.0, 1.0)).all()
         or not np.isfinite(final_timestamps).all()
@@ -257,10 +259,25 @@ def read_aligned_hand_active(
     downsampled_timestamps = raw_timestamps[::5]
     if (
         len(downsampled_timestamps) != final_length
-        or not np.array_equal(downsampled_timestamps, final_timestamps)
+        or not np.array_equal(
+            downsampled_timestamps.astype(final_timestamps.dtype),
+            final_timestamps,
+        )
     ):
         raise EgoHandActiveSidecarError(
-            "processed timestamps are not exact raw 100 Hz indices [::5]"
+            "processed timestamps are not raw 100 Hz indices [::5] after the stored dtype cast"
+        )
+    timestamp_rounding_residual = np.abs(
+        final_timestamps.astype(np.int64)
+        - downsampled_timestamps.astype(np.int64)
+    )
+    max_timestamp_rounding_residual_ns = int(timestamp_rounding_residual.max())
+    max_allowed_rounding_residual_ns = int(
+        np.ceil(np.spacing(final_timestamps).max() / 2.0)
+    )
+    if max_timestamp_rounding_residual_ns > max_allowed_rounding_residual_ns:
+        raise EgoHandActiveSidecarError(
+            "processed timestamp rounding exceeds half a stored float64 ULP"
         )
     if final_length > 1 and not np.all(np.diff(final_timestamps) > 0):
         raise EgoHandActiveSidecarError("processed timestamps are not strictly increasing")
@@ -277,6 +294,11 @@ def read_aligned_hand_active(
         "raw_interval_seconds": raw_interval,
         "processed_interval_seconds": final_interval,
         "downsample_rate": downsample_rate,
+        "processed_timestamp_storage_dtype": str(final_timestamps.dtype),
+        "max_timestamp_rounding_residual_ns": max_timestamp_rounding_residual_ns,
+        "max_allowed_timestamp_rounding_residual_ns": (
+            max_allowed_rounding_residual_ns
+        ),
     }
 
 
@@ -285,6 +307,14 @@ def _aggregate_statistics(
 ) -> dict:
     processed_frames = sum(len(active) for active, _, _ in per_episode.values())
     raw_frames = sum(int(audit["raw_frames"]) for _, _, audit in per_episode.values())
+    max_timestamp_rounding_residual_ns = max(
+        int(audit["max_timestamp_rounding_residual_ns"])
+        for _, _, audit in per_episode.values()
+    )
+    max_allowed_timestamp_rounding_residual_ns = max(
+        int(audit["max_allowed_timestamp_rounding_residual_ns"])
+        for _, _, audit in per_episode.values()
+    )
     raw_active_frames = np.zeros(2, dtype=np.int64)
     active_frames = np.zeros(2, dtype=np.int64)
     future_target_active = np.zeros(2, dtype=np.int64)
@@ -365,6 +395,17 @@ def _aggregate_statistics(
         "episode_count": len(per_episode),
         "raw_100hz_frames": raw_frames,
         "processed_frames": processed_frames,
+        "timestamp_alignment": {
+            "source_index_rule": "raw_100hz_indices_[::5]",
+            "stored_dtype_cast_exact": True,
+            "processed_storage_dtype": "float64",
+            "max_integer_rounding_residual_ns": (
+                max_timestamp_rounding_residual_ns
+            ),
+            "max_allowed_half_ulp_rounding_residual_ns": (
+                max_allowed_timestamp_rounding_residual_ns
+            ),
+        },
         "supervision_domain_definitions": {
             "raw_100hz_active": (
                 "source left/right_hand_active before temporal downsampling"

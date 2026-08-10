@@ -309,12 +309,17 @@ action-schema identity, and the production preflight rejects it.
 
 The source tracker-validity fields are separate, scalar
 `left_hand_active`/`right_hand_active` arrays with `0=inactive, 1=active`.
-`scripts/build_ego_hand_active_sidecars.py` verifies the exact raw-100-Hz to
-processed-20-Hz timestamp relation (`raw[::5]`), fixes field order to
+`scripts/build_ego_hand_active_sidecars.py` verifies the exact raw-100-Hz
+index selection (`raw[::5]`) after the processed file's recorded `float64`
+timestamp cast, fixes field order to
 `[left,right]`, and writes H=48 masks. For a source frame `f`, future target
 slot `k` uses validity at `f+k+1`; targets beyond the episode boundary are
 false rather than last-value held. Its record-only transition mask requires
 validity at both target-1 and target. No transition auxiliary is enabled.
+The stored cast differs from the original integer nanoseconds by at most 128
+ns, exactly the half-ULP bound at these epoch-valued timestamps; this is
+reported as storage rounding rather than misrepresented as zero-nanosecond
+identity.
 
 For the production path, action dimensions 18/19 receive weight
 `0.25 * active_at_target` independently for the left/right columns. Dimensions

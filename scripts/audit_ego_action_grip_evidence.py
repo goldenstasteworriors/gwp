@@ -166,6 +166,8 @@ def _delta_and_clock_audit(final_root: Path, raw_root: Path, episodes: list[int]
     max_first_delta = 0.0
     max_quaternion_norm_error = 0.0
     max_timestamp_downsample_residual_ns = 0.0
+    max_allowed_timestamp_rounding_residual_ns = 0.0
+    stored_dtype_cast_exact = True
     min_step_seconds = float("inf")
     max_step_seconds = 0.0
     step_sum = 0.0
@@ -174,12 +176,28 @@ def _delta_and_clock_audit(final_root: Path, raw_root: Path, episodes: list[int]
         with h5py.File(final_root / f"episode_{episode}.hdf5", "r") as final:
             pose = np.asarray(final["action_eef"], dtype=np.float64)
             delta = np.asarray(final["action_delta_eef"], dtype=np.float64)
-            timestamps = np.asarray(final["local_timestamps_ns"], dtype=np.int64)
+            timestamps = np.asarray(final["local_timestamps_ns"])
         with h5py.File(raw_root / f"episode_{episode}.hdf5", "r") as raw:
-            raw_timestamps = np.asarray(raw["local_timestamps_ns"], dtype=np.int64)
+            raw_timestamps = np.asarray(raw["local_timestamps_ns"])
+        raw_downsampled = raw_timestamps[::5][: len(timestamps)]
+        stored_dtype_cast_exact = stored_dtype_cast_exact and np.array_equal(
+            timestamps,
+            raw_downsampled.astype(timestamps.dtype),
+        )
         max_timestamp_downsample_residual_ns = max(
             max_timestamp_downsample_residual_ns,
-            float(np.max(np.abs(timestamps - raw_timestamps[::5][: len(timestamps)]))),
+            float(
+                np.max(
+                    np.abs(
+                        timestamps.astype(np.int64)
+                        - raw_downsampled.astype(np.int64)
+                    )
+                )
+            ),
+        )
+        max_allowed_timestamp_rounding_residual_ns = max(
+            max_allowed_timestamp_rounding_residual_ns,
+            float(np.ceil(np.spacing(timestamps).max() / 2.0)),
         )
         max_first_delta = max(max_first_delta, float(np.max(np.abs(delta[0]))))
         for pose_offset, delta_offset in ((0, 0), (7, 6)):
@@ -216,7 +234,9 @@ def _delta_and_clock_audit(final_root: Path, raw_root: Path, episodes: list[int]
         and max_rotation_residual <= 1e-12
         and max_first_delta == 0.0
         and max_quaternion_norm_error <= 1e-12
-        and max_timestamp_downsample_residual_ns == 0.0
+        and stored_dtype_cast_exact
+        and max_timestamp_downsample_residual_ns
+        <= max_allowed_timestamp_rounding_residual_ns
         and min_step_seconds > 0.0
     )
     return {
@@ -229,6 +249,10 @@ def _delta_and_clock_audit(final_root: Path, raw_root: Path, episodes: list[int]
         "max_quaternion_norm_error": max_quaternion_norm_error,
         "max_raw_100hz_to_processed_20hz_timestamp_residual_ns": (
             max_timestamp_downsample_residual_ns
+        ),
+        "raw_stride5_matches_after_stored_dtype_cast": stored_dtype_cast_exact,
+        "max_allowed_half_ulp_timestamp_rounding_residual_ns": (
+            max_allowed_timestamp_rounding_residual_ns
         ),
         "processed_timestamp_step_seconds": {
             "min": min_step_seconds,

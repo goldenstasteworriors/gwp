@@ -561,6 +561,13 @@
       "current_20hz_active": "raw tracker validity at the exact processed indices [::5]",
       "future_target_supervision": "current_20hz_active at target frame f+offset for offsets 1..48; targets beyond the episode boundary are false",
       "raw_100hz_active": "source left/right_hand_active before temporal downsampling"
+    },
+    "timestamp_alignment": {
+      "max_allowed_half_ulp_rounding_residual_ns": 128,
+      "max_integer_rounding_residual_ns": 128,
+      "processed_storage_dtype": "float64",
+      "source_index_rule": "raw_100hz_indices_[::5]",
+      "stored_dtype_cast_exact": true
     }
   },
   "target_fps": 20.0
