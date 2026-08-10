@@ -30,13 +30,25 @@ Before any device-side probe, run the host discovery helper on the robot compute
 python -B scripts/discover_asymmetric25_hardware.py
 ```
 
-The helper only reads network-interface sysfs metadata, stable serial symlink
-metadata, and the checked-in manifest/capture templates. It does not open a
-serial, CAN, DDS, Modbus, or network endpoint, and cannot send a control command.
-Its JSON output lists candidate host interfaces and every unresolved template
-field, but is not a calibration capture and never authorizes training or
-deployment. An operator must still identify mounted devices from physical
-labels and official vendor documentation, then measure and review all values.
+The helper only accepts repository-contained regular non-symlink JSON files and
+the allowlisted `/sys/class/net` and `/dev/serial/by-id` metadata roots. Within
+those validated inputs it does not open a serial, CAN, DDS, Modbus, or network
+endpoint and cannot send a control command. Arbitrary filesystem roots and
+special/FIFO/socket/symlink JSON inputs are rejected before opening.
+
+Default JSON output hashes interface and stable serial identifiers, redacts the
+kernel, absolute paths and execution time, and reports both generic empty-value
+placeholders and bounded schema-structure issues. This audit is not a replacement
+for `validate_asymmetric_hardware_manifest.py`. Exact local identifiers may be
+shown only with `--include-sensitive-local-metadata`; that output is local-only,
+may contain device serials and host fingerprints, and must never be committed or
+attached to a public report.
+
+Empty candidate lists are only a statement about names visible to this host at
+that instant; they are not evidence that hardware is absent. The report is not a
+calibration capture and never authorizes training or deployment. An operator must
+still identify mounted devices from physical labels and official vendor
+documentation, then measure and review all values.
 
 ## Artifact and review gates
 
