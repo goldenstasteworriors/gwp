@@ -193,27 +193,48 @@ disabled bootstrap performs no collector-artifact access.
 
 The full preflight passes record-only runtime receipts (absolute path plus
 SHA-256 and device/inode/mode/size/mtime/ctime) to each rank. Metadata,
-parquet, and video files are opened with no-follow and pinned by FD. HF parquet
-materialization reads those pinned descriptors; its content-keyed Arrow cache
-is force-built on first use, fully attested on reuse, then pinned too. Cache
-FDs are stat-checked immediately before and after each training item read, so
-in-place cache mutation fails. Fork workers inherit already verified FDs and
-perform one stat verification; spawn workers serialize no live FD and safely
-rehash/reopen once. There is no 69-file fstat loop per sample. T5, reviewed
-NPZ sidecars, and norm JSON are loaded from the exact verified bytes via
-`BytesIO`/in-memory JSON, so pathname replacement after verification cannot
-change the consumed payload.
+parquet, and video files are opened with no-follow and pinned by dynamically
+allocated FDs. HF parquet materialization reads those pinned descriptors. Its
+builder identity is derived from source/config content and is independent of
+incidental FD numbers.
 
-The cost is explicit: each rank streams SHA-256 over the 4.32 GB LeRobot
-source during full preflight and again when the actual loader pins it, plus the
-content-keyed Arrow cache on first admission. A spawned worker must reverify
-once; fork workers do not rehash. T5/sidecar caches and all receipt trust are
-process-local. Pinned source descriptors use a deterministic range beginning
-at FD 16384 so the Hugging Face cache key cannot drift with incidental open-FD
-order; production therefore requires a per-process `RLIMIT_NOFILE` above the
-highest selected source FD (16452 for the audited 69-file source) and fails
-closed if that range is unavailable. Runtime stat records never enter the
-portable dataset ID or matched-control config hash.
+Verified production loading never accepts a shared HF cache or a colocated
+cache attestation. Before every actual reader process builds Arrow, it creates
+an unpredictable run-nonce/rank/PID/random leaf below the checked-in project's
+private-cache parent using exclusive `mkdirat`, pins both parent and leaf by
+directory FD, fixes the leaf to owner-only mode 0700, and gives HF the pinned
+`/proc/self/fd/<dirfd>` root. It always uses `FORCE_REDOWNLOAD`; existing cache
+bytes and self-authored manifests have no admission path. The generated Arrow
+files are opened through component-wise no-follow `openat`, hashed and pinned
+before Dataset creation. `datasets.Dataset.from_file` receives only the
+corresponding `/proc/self/fd/<arrow-fd>` paths, so its mmap inode is the exact
+inode checked at runtime rather than a later pathname reopen.
+
+Before and after each item, the loader checks both the actual Arrow mmap source
+FD and its no-follow directory entry, as well as the private parent/leaf
+binding. In-place mutation, file replacement, directory rename, or symlink
+replacement therefore fails closed. `WAMLeRobotDataset.__len__` reads only the
+verified metadata receipt, so it does not build a cache in the parent before
+DataLoader workers are created. A fork/spawn worker discards inherited mmap and
+cache descriptors without deleting its parent's directory, then creates and
+force-builds its own private cache. Pickled state contains no mmap or live FD.
+Only a process that still owns and verifies the leaf binding removes that leaf.
+T5, reviewed NPZ sidecars, and norm JSON remain exact verified
+`BytesIO`/in-memory payloads.
+
+The cost is explicit: full preflight hashes the 4.32 GB LeRobot source, and
+each actual reader process rebuilds its own private Arrow cache; spawn readers
+reopen and hash the source, while fork readers retain the already verified
+source FDs and recheck their stat identity. There is deliberately no
+persistent-cache speed path.
+Per-item checks scale with the Arrow shards actually mmaped (and the video file
+actually decoded), not all 69 training-source files. FD allocation is dynamic:
+low limits are accepted when sufficient for the files actually held, while
+real `EMFILE`/`ENFILE` exhaustion fails closed without a reserved-FD range.
+Runtime cache paths, nonce and stat records never enter the portable dataset ID
+or matched-control config hash. Mode 0700 isolates other UIDs; deployments that
+treat arbitrary code under the training UID as hostile still require an OS
+boundary such as a distinct UID or mount namespace.
 
 ## Current decision
 

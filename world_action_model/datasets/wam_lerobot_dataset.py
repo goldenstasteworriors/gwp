@@ -19,6 +19,7 @@ from world_action_model.verified_io import read_verified_bytes, strict_json_load
 _SUBTASK_MARKER_RE = re.compile(r"\bsubtask\s*:\s*", flags=re.IGNORECASE)
 _T5_LOAD_FROM_CHOICES = ("dir", "pkl", "path")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_TRAINING_NONCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}$")
 _VERIFIED_STAT_KEYS = {
     "device", "inode", "mode", "size_bytes", "mtime_ns", "ctime_ns"
 }
@@ -69,6 +70,8 @@ class WAMLeRobotDataset(BaseDataset):
         contact_sidecar_expected_episode_sha256: dict[str, str] | None = None,
         training_source_runtime_receipt: list[dict] | None = None,
         t5_runtime_source_receipt: list[dict] | None = None,
+        verified_private_cache_parent: str | None = None,
+        verified_training_run_nonce: str | None = None,
         matched_control_identity: bool = False,
         matched_control_dataset_id: str | None = None,
         meta_name: str | None = None,
@@ -100,6 +103,22 @@ class WAMLeRobotDataset(BaseDataset):
             training_source_runtime_receipt or []
         )
         self.t5_runtime_source_receipt = list(t5_runtime_source_receipt or [])
+        self.verified_private_cache_parent = (
+            None
+            if verified_private_cache_parent is None
+            else os.path.abspath(verified_private_cache_parent)
+        )
+        self.verified_training_run_nonce = verified_training_run_nonce
+        if self.training_source_runtime_receipt and (
+            self.verified_private_cache_parent is None
+            or not isinstance(self.verified_training_run_nonce, str)
+            or not _TRAINING_NONCE_RE.fullmatch(
+                self.verified_training_run_nonce
+            )
+        ):
+            raise ValueError(
+                "verified LeRobot source requires private-cache parent and run nonce"
+            )
         for entry in self.training_source_runtime_receipt:
             _validate_runtime_receipt_entry(
                 entry,
@@ -336,6 +355,8 @@ class WAMLeRobotDataset(BaseDataset):
                 root=self.data_path,
                 delta_timestamps=delta_timestamps,
                 verified_source_receipt=self.training_source_runtime_receipt or None,
+                verified_private_cache_parent=self.verified_private_cache_parent,
+                verified_training_run_nonce=self.verified_training_run_nonce,
                 **fast_kwargs,
             )
             if self.data_size is not None:
@@ -430,6 +451,71 @@ class WAMLeRobotDataset(BaseDataset):
         return None
 
     def _get_metadata_data_size(self):
+        if self.training_source_runtime_receipt:
+            receipt_by_logical = {
+                entry["logical_path"]: entry
+                for entry in self.training_source_runtime_receipt
+            }
+            info_receipt = receipt_by_logical.get("meta/info.json")
+            if info_receipt is None:
+                raise ValueError("verified LeRobot receipt lacks meta/info.json")
+            info_bytes, _, _ = read_verified_bytes(
+                info_receipt["path_record_only"],
+                expected_sha256=info_receipt["sha256"],
+                expected_stat=info_receipt["stat"],
+            )
+            info = strict_json_loads(info_bytes, name="LeRobot info")
+            episodes = self.kwargs.get("episodes")
+            if episodes is not None:
+                episodes_receipt = receipt_by_logical.get("meta/episodes.jsonl")
+                if episodes_receipt is None:
+                    raise ValueError(
+                        "verified LeRobot receipt lacks meta/episodes.jsonl"
+                    )
+                episode_bytes, _, _ = read_verified_bytes(
+                    episodes_receipt["path_record_only"],
+                    expected_sha256=episodes_receipt["sha256"],
+                    expected_stat=episodes_receipt["stat"],
+                )
+                lengths = {}
+                for line_number, line in enumerate(episode_bytes.splitlines(), 1):
+                    if not line.strip():
+                        continue
+                    row = strict_json_loads(
+                        line,
+                        name=f"LeRobot episodes line {line_number}",
+                    )
+                    episode_index = row.get("episode_index") if isinstance(row, dict) else None
+                    length = row.get("length") if isinstance(row, dict) else None
+                    if (
+                        isinstance(episode_index, bool)
+                        or not isinstance(episode_index, int)
+                        or episode_index < 0
+                        or isinstance(length, bool)
+                        or not isinstance(length, int)
+                        or length <= 0
+                        or episode_index in lengths
+                    ):
+                        raise ValueError("invalid verified LeRobot episode metadata")
+                    lengths[episode_index] = length
+                requested = []
+                for value in episodes:
+                    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                        raise ValueError("invalid verified LeRobot episode selection")
+                    requested.append(value)
+                missing = sorted(set(requested) - set(lengths))
+                if missing:
+                    raise IndexError(f"episodes missing from verified metadata: {missing}")
+                return sum(lengths[index] for index in requested)
+            total_frames = info.get("total_frames") if isinstance(info, dict) else None
+            if (
+                isinstance(total_frames, bool)
+                or not isinstance(total_frames, int)
+                or total_frames <= 0
+            ):
+                raise ValueError("invalid verified LeRobot total_frames")
+            return total_frames
+
         for name in ('info.json', 'info.yaml', 'info.yml'):
             path = os.path.join(self.data_path, 'meta', name)
             if os.path.isfile(path):
@@ -474,8 +560,6 @@ class WAMLeRobotDataset(BaseDataset):
         super().close()
 
     def __len__(self) -> int:
-        if self.training_source_runtime_receipt and self.dataset is None:
-            self.open()
         if self.data_size is None:
             self.data_size = self._get_metadata_data_size()
         if self.data_size is None:

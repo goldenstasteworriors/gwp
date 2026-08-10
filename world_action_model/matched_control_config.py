@@ -33,6 +33,8 @@ _RUNTIME_RECEIPT_CONFIG_KEYS = {
     "training_source_runtime_receipt",
     "t5_runtime_source_receipt",
     "runtime_stat_record_only",
+    "verified_private_cache_parent",
+    "verified_training_run_nonce",
 }
 
 
