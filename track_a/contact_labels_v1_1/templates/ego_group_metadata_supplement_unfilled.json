@@ -1,0 +1,673 @@
+{
+  "attestation": {
+    "attested_at_utc": null,
+    "attested_by": null,
+    "statement": "I attest that every non-null group value comes from the cited authoritative record or firsthand collection knowledge and is not inferred from appearance, file ownership, mtime, episode order, or temporal gaps."
+  },
+  "dataset_id": "ego_pour_liquid_between_beakers",
+  "episode_rows": [
+    {
+      "collection_batch_id": null,
+      "episode_id": 0,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 1,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 2,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 3,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 4,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 5,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 6,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 7,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 8,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 9,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 10,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 11,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 12,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 13,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 14,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 15,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 16,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 17,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 18,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 19,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 20,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 21,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 22,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 23,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 24,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 25,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 26,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 27,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 28,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 29,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 30,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 31,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 32,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 33,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 34,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 35,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 36,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 37,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 38,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 39,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 40,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 41,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 42,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 43,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 44,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 45,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 46,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 47,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 48,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 49,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 50,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 51,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 52,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 53,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 54,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 55,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 56,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 57,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 58,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 59,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 60,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 61,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 62,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 63,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 64,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    },
+    {
+      "collection_batch_id": null,
+      "episode_id": 65,
+      "liquid_id": null,
+      "operator_id": null,
+      "session_id": null,
+      "source_object_instance_id": null,
+      "subject_id": null,
+      "target_object_instance_id": null
+    }
+  ],
+  "provenance_records": [],
+  "schema_version": "ego-group-metadata-supplement/v1",
+  "source_evidence_sha256": "7d3b6ab81219a43c7e9bd457246370bd9dd7e6c77ea9ff769cc4326957310d4f"
+}
