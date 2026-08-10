@@ -84,9 +84,11 @@ and, in the next data version, palm-local functional-site trajectories.
 The source defines `action_delta_eef[i]` as the motion from pose `i-1` to `i`.
 `giga_world_policy_0_5_ego_contact_pretrain.py` therefore loads offsets `0..48`,
 uses offset zero only for the current grip state, and predicts offsets `1..48`.
-`compute_ego_wam_norm.py` uses the identical clamped future-window semantics.
-Padded action dimensions are emitted through `action_dim_mask` and contribute
-neither flow noise nor action loss.
+The production norm builder excludes clamped end-of-episode padding from its
+statistics and records the matching training time-mask contract. Padded action
+dimensions are emitted through `action_dim_mask` and contribute neither flow
+noise nor action loss. See `ego_discrete_contact_stage1.md`; the older config
+remains smoke-only and does not provide this artifact binding.
 
 ## Stage gate
 
