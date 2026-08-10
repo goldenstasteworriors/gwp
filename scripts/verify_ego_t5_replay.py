@@ -12,32 +12,111 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _bootstrap_secure_cli_imports() -> Path:
+    """Isolate project imports from timestamp-based bytecode caches."""
+
+    if not sys.dont_write_bytecode:
+        raise RuntimeError("secure Ego T5 replay requires python -B")
+    root_real = os.path.realpath(PROJECT_ROOT)
+    scripts_real = os.path.realpath(PROJECT_ROOT / "scripts")
+    retained_paths = []
+    for entry in sys.path:
+        candidate = os.path.abspath(entry or os.getcwd())
+        candidate_real = os.path.realpath(candidate)
+        if candidate_real in {root_real, scripts_real}:
+            continue
+        shadow_markers = (
+            Path(candidate) / "world_action_model" / "__init__.py",
+            Path(candidate) / "scripts" / "compute_t5_embedding.py",
+            Path(candidate) / "third_party" / "wan" / "__init__.py",
+        )
+        if any(marker.exists() or marker.is_symlink() for marker in shadow_markers):
+            raise RuntimeError(
+                f"another sys.path entry can resolve project modules: {candidate}"
+            )
+        retained_paths.append(entry)
+    sys.path[:] = [str(PROJECT_ROOT), *retained_paths]
+
+    import importlib.util
+
+    package_spec = importlib.util.find_spec("world_action_model")
+    expected_package = PROJECT_ROOT / "world_action_model" / "__init__.py"
+    if (
+        package_spec is None
+        or not isinstance(package_spec.origin, str)
+        or not os.path.samefile(package_spec.origin, expected_package)
+    ):
+        raise RuntimeError("world_action_model import origin is not this checkout")
+
+    def walk_error(exc: OSError) -> None:
+        raise RuntimeError("cannot audit project bytecode caches") from exc
+
+    for code_root in (
+        PROJECT_ROOT / "configs",
+        PROJECT_ROOT / "scripts",
+        PROJECT_ROOT / "world_action_model",
+        PROJECT_ROOT / "third_party" / "wan",
+    ):
+        for _, directory_names, file_names in os.walk(
+            code_root,
+            followlinks=False,
+            onerror=walk_error,
+        ):
+            if "__pycache__" in directory_names or any(
+                name.endswith(".pyc") for name in file_names
+            ):
+                raise RuntimeError(
+                    f"project code root contains forbidden bytecode cache: {code_root}"
+                )
+    if any(PROJECT_ROOT.glob(".gwp-secure-pycache-*")):
+        raise RuntimeError("stale secure pycache prefix exists in project root")
+    prefix = PROJECT_ROOT / (
+        f".gwp-secure-pycache-{os.getpid()}-{os.urandom(16).hex()}"
+    )
+    os.mkdir(prefix, mode=0o700)
+    if prefix.is_symlink() or not prefix.is_dir() or prefix.stat().st_mode & 0o077:
+        raise RuntimeError("secure pycache prefix is not a private real directory")
+    if any(prefix.iterdir()):
+        raise RuntimeError("secure pycache prefix was not created empty")
+    sys.pycache_prefix = str(prefix)
+
+    def cleanup() -> None:
+        if prefix.exists() and prefix.is_dir() and not prefix.is_symlink():
+            shutil.rmtree(prefix)
+
+    import atexit
+
+    atexit.register(cleanup)
+    return prefix
+
+
+_SECURE_CLI_PYCACHE = None
+if __name__ == "__main__":
+    try:
+        _SECURE_CLI_PYCACHE = _bootstrap_secure_cli_imports()
+    except (OSError, RuntimeError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.prepare_ego_t5_source import (
-    _create_tokenizer_snapshot,
-    _fsync_directory,
-    _rename_noreplace,
-    _require_current_wan_code_path,
-    _runtime_precheck,
-    _save_tensor,
-    _verify_tokenizer_snapshot,
-    _write_exclusive_file,
-    build_encoder_provenance,
-)
-from scripts.compute_t5_embedding import _encode_t5
+import world_action_model as _wam_package
+import world_action_model.ego_dataset_fingerprint as _fingerprint_module
+import world_action_model.ego_t5_replay_attestation as _attestation_module
+import world_action_model.ego_t5_source as _t5_source_module
+import world_action_model.verified_io as _verified_io_module
 from world_action_model.ego_dataset_fingerprint import (
     derive_ego_dataset_identity,
     derive_ego_t5_source_receipt,
 )
 from world_action_model.ego_t5_replay_attestation import (
-    EGO_T5_REPLAY_CODE_FILES,
     EGO_T5_REPLAY_COMPARISON_MODE,
     EGO_T5_REPLAY_ATTESTATION_VERSION,
     EGO_T5_REPLAY_VERIFIER_IDENTITY,
@@ -55,7 +134,11 @@ from world_action_model.ego_t5_source import (
     canonical_sha256,
     tensor_semantic_bytes,
 )
-from world_action_model.verified_io import read_verified_bytes
+from world_action_model.verified_io import (
+    assert_python_module_origin,
+    load_verified_head_python_module,
+    read_verified_bytes,
+)
 
 
 def _json(value: object) -> str:
@@ -67,40 +150,63 @@ def _real_parent(path: Path, name: str) -> None:
         raise EgoT5SourceError(f"{name} parent must be an existing real directory")
 
 
-def _assert_replay_code_clean() -> None:
-    tracked = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(PROJECT_ROOT),
-            "ls-files",
-            "--error-unmatch",
-            *EGO_T5_REPLAY_CODE_FILES,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    dirty = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(PROJECT_ROOT),
-            "diff",
-            "--quiet",
-            "HEAD",
-            "--",
-            *EGO_T5_REPLAY_CODE_FILES,
-        ],
-        check=False,
-    )
-    if tracked.returncode != 0 or dirty.returncode != 0:
+def _require_secure_cli_runtime() -> None:
+    prefix = _SECURE_CLI_PYCACHE
+    if (
+        prefix is None
+        or sys.pycache_prefix != str(prefix)
+        or prefix.is_symlink()
+        or not prefix.is_dir()
+        or any(prefix.iterdir())
+    ):
         raise EgoT5SourceError(
-            "independent replay verifier and encoder code must be tracked and clean"
+            "replay is allowed only through the python -B secure CLI launcher"
         )
 
 
+def _assert_replay_module_origins() -> None:
+    try:
+        for module, logical_path in (
+            (_wam_package, "world_action_model/__init__.py"),
+            (
+                _fingerprint_module,
+                "world_action_model/ego_dataset_fingerprint.py",
+            ),
+            (
+                _attestation_module,
+                "world_action_model/ego_t5_replay_attestation.py",
+            ),
+            (_t5_source_module, "world_action_model/ego_t5_source.py"),
+            (_verified_io_module, "world_action_model/verified_io.py"),
+        ):
+            assert_python_module_origin(module, PROJECT_ROOT / logical_path)
+    except ValueError as exc:
+        raise EgoT5SourceError("loaded replay module origin differs") from exc
+
+
+def _load_verified_prepare_module(*, git_commit: str, code_manifest: list[dict]):
+    logical_path = "scripts/prepare_ego_t5_source.py"
+    matches = [
+        row for row in code_manifest if row["logical_path"] == logical_path
+    ]
+    if len(matches) != 1:
+        raise EgoT5SourceError("replay code manifest lacks unique prepare helper")
+    try:
+        return load_verified_head_python_module(
+            PROJECT_ROOT,
+            logical_path,
+            f"_gwp_verified_prepare_{os.getpid()}_{os.urandom(8).hex()}",
+            expected_commit=git_commit,
+            expected_row=matches[0],
+        )
+    except ValueError as exc:
+        raise EgoT5SourceError(
+            "prepare helper source/origin differs from current HEAD"
+        ) from exc
+
+
 def replay(args: argparse.Namespace) -> dict:
+    _require_secure_cli_runtime()
     data_root = Path(os.path.abspath(os.path.expanduser(args.data_root)))
     source_dir = Path(os.path.abspath(os.path.expanduser(args.t5_embedding_dir)))
     replay_output = Path(os.path.abspath(os.path.expanduser(args.replay_output_dir)))
@@ -109,7 +215,6 @@ def replay(args: argparse.Namespace) -> dict:
     )
     model_root = Path(os.path.abspath(os.path.expanduser(args.model_root)))
     wan_code_path = Path(os.path.abspath(os.path.expanduser(args.wan_code_path)))
-    _require_current_wan_code_path(wan_code_path)
     if replay_output.exists() or replay_output.is_symlink():
         raise EgoT5SourceError("independent replay output must not already exist")
     if attestation_output.exists() or attestation_output.is_symlink():
@@ -132,10 +237,21 @@ def replay(args: argparse.Namespace) -> dict:
     else:
         raise EgoT5SourceError("device must be exactly cpu, cuda, or cuda:<index>")
 
-    runtime_versions = _runtime_precheck(device_type)
-    _assert_replay_code_clean()
     verifier_commit = current_git_commit()
-    verifier_code = current_replay_code_manifest()
+    verifier_code = current_replay_code_manifest(
+        expected_git_commit=verifier_commit
+    )
+    _assert_replay_module_origins()
+    prepare_module = _load_verified_prepare_module(
+        git_commit=verifier_commit,
+        code_manifest=verifier_code,
+    )
+    if current_replay_code_manifest(
+        expected_git_commit=verifier_commit
+    ) != verifier_code:
+        raise EgoT5SourceError("replay verifier code changed during prepare import")
+    prepare_module._require_current_wan_code_path(wan_code_path)
+    runtime_versions = prepare_module._runtime_precheck(device_type)
     identity = derive_ego_dataset_identity(data_root)
     t5_source = derive_ego_t5_source_receipt(
         source_dir,
@@ -144,7 +260,7 @@ def replay(args: argparse.Namespace) -> dict:
         data_root=data_root,
     )
     generation_manifest = t5_source["provenance_manifest"]
-    actual_encoder, runtime_receipts = build_encoder_provenance(
+    actual_encoder, runtime_receipts = prepare_module.build_encoder_provenance(
         model_root=model_root,
         wan_code_path=wan_code_path,
         model_revision=args.model_revision,
@@ -164,12 +280,24 @@ def replay(args: argparse.Namespace) -> dict:
     os.mkdir(staging, mode=0o700)
     tokenizer_snapshot = staging / ".tokenizer-snapshot"
     try:
-        from scripts.compute_t5_embedding import _init_wan_t5_encoder
-
-        before_code = current_replay_code_manifest()
+        before_code = current_replay_code_manifest(
+            expected_git_commit=verifier_commit
+        )
         if before_code != verifier_code:
             raise EgoT5SourceError("replay verifier code changed before encoder load")
-        snapshot_receipts = _create_tokenizer_snapshot(
+        compute_module = prepare_module._load_verified_compute_module(
+            {
+                "git_commit": verifier_commit,
+                "code_manifest": verifier_code,
+            }
+        )
+        _encode_t5 = compute_module._encode_t5
+        _init_wan_t5_encoder = compute_module._init_wan_t5_encoder
+        if current_replay_code_manifest(
+            expected_git_commit=verifier_commit
+        ) != verifier_code:
+            raise EgoT5SourceError("replay verifier code changed during compute import")
+        snapshot_receipts = prepare_module._create_tokenizer_snapshot(
             model_root=model_root,
             snapshot_dir=tokenizer_snapshot,
             tokenizer_manifest=actual_encoder["tokenizer_manifest"],
@@ -184,14 +312,20 @@ def replay(args: argparse.Namespace) -> dict:
             checkpoint_stat=runtime_receipts[EGO_T5_CHECKPOINT_LOGICAL_PATH],
             tokenizer_path_override=str(tokenizer_snapshot),
             tokenizer_local_files_only=True,
+            code_git_commit=verifier_commit,
+            code_manifest=verifier_code,
         )
-        _verify_tokenizer_snapshot(
+        if current_replay_code_manifest(
+            expected_git_commit=verifier_commit
+        ) != verifier_code:
+            raise EgoT5SourceError("replay verifier code changed during encoder load")
+        prepare_module._verify_tokenizer_snapshot(
             tokenizer_snapshot,
             actual_encoder["tokenizer_manifest"],
             snapshot_receipts,
         )
         shutil.rmtree(tokenizer_snapshot)
-        _fsync_directory(staging)
+        prepare_module._fsync_directory(staging)
 
         expected = expected_replay_results(generation_manifest)
         episode_by_index = {
@@ -199,15 +333,25 @@ def replay(args: argparse.Namespace) -> dict:
         }
         results = []
         for source_result in expected:
+            if current_replay_code_manifest(
+                expected_git_commit=verifier_commit
+            ) != verifier_code:
+                raise EgoT5SourceError("replay verifier code changed before encoding")
             replay_tensor = _encode_t5(
                 encoder,
                 source_result["prompt"],
                 device=args.device,
             )
+            if current_replay_code_manifest(
+                expected_git_commit=verifier_commit
+            ) != verifier_code:
+                raise EgoT5SourceError("replay verifier code changed during encoding")
             replay_path = staging / (
                 f"prompt_{source_result['prompt_sha256']}.pt"
             )
-            replay_file, replay_receipt = _save_tensor(replay_path, replay_tensor)
+            replay_file, replay_receipt = prepare_module._save_tensor(
+                replay_path, replay_tensor
+            )
             source_episode = episode_by_index[source_result["episode_indices"][0]]
             source_path = source_dir / source_episode["file"]["logical_path"]
             source_payload, _, _ = read_verified_bytes(
@@ -246,7 +390,9 @@ def replay(args: argparse.Namespace) -> dict:
             results.append(result)
         if len(results) != generation_manifest["unique_prompt_count"]:
             raise EgoT5SourceError("independent replay did not cover every unique prompt")
-        if current_replay_code_manifest() != verifier_code:
+        if current_replay_code_manifest(
+            expected_git_commit=verifier_commit
+        ) != verifier_code:
             raise EgoT5SourceError("replay verifier code changed during encoding")
 
         encoder_manifest = generation_manifest["encoder"]
@@ -322,9 +468,9 @@ def replay(args: argparse.Namespace) -> dict:
             t5_source=t5_source,
             verify_current_code=True,
         )
-        _fsync_directory(staging)
-        _rename_noreplace(staging, replay_output)
-        _fsync_directory(replay_output.parent)
+        prepare_module._fsync_directory(staging)
+        prepare_module._rename_noreplace(staging, replay_output)
+        prepare_module._fsync_directory(replay_output.parent)
 
         payload = canonical_attestation_bytes(attestation)
         attestation_staging = attestation_output.parent / (
@@ -332,9 +478,9 @@ def replay(args: argparse.Namespace) -> dict:
             f"{os.urandom(16).hex()}"
         )
         try:
-            _write_exclusive_file(attestation_staging, payload)
-            _rename_noreplace(attestation_staging, attestation_output)
-            _fsync_directory(attestation_output.parent)
+            prepare_module._write_exclusive_file(attestation_staging, payload)
+            prepare_module._rename_noreplace(attestation_staging, attestation_output)
+            prepare_module._fsync_directory(attestation_output.parent)
         finally:
             if attestation_staging.exists() and attestation_staging.is_file():
                 attestation_staging.unlink()

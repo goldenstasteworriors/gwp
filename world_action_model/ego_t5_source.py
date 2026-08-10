@@ -52,6 +52,7 @@ EGO_T5_GENERATION_CODE_FILES = (
     EGO_T5_GENERATOR_IDENTITY,
     "scripts/compute_t5_embedding.py",
     "scripts/verify_ego_t5_replay.py",
+    "world_action_model/__init__.py",
     "world_action_model/ego_dataset_fingerprint.py",
     "world_action_model/ego_t5_source.py",
     "world_action_model/verified_io.py",
@@ -445,7 +446,14 @@ def validate_ego_t5_source_manifest(
     for row, expected_path in zip(code_manifest, EGO_T5_GENERATION_CODE_FILES):
         row = _require_exact_keys(
             row,
-            {"logical_path", "git_blob_sha1", "sha256", "size_bytes"},
+            {
+                "logical_path",
+                "git_blob_sha1",
+                "head_blob_sha256",
+                "head_blob_size_bytes",
+                "runtime_sha256",
+                "runtime_size_bytes",
+            },
             "T5 generation code file",
         )
         if (
@@ -454,8 +462,19 @@ def validate_ego_t5_source_manifest(
             or not _GIT_COMMIT_RE.fullmatch(row["git_blob_sha1"])
         ):
             raise EgoT5SourceError("unexpected T5 generation code identity")
-        _require_sha256(row["sha256"], "T5 generation code")
-        _require_positive_int(row["size_bytes"], "T5 generation code size")
+        _require_sha256(row["head_blob_sha256"], "T5 generation HEAD code")
+        _require_sha256(row["runtime_sha256"], "T5 generation runtime code")
+        _require_positive_int(
+            row["head_blob_size_bytes"], "T5 generation HEAD code size"
+        )
+        _require_positive_int(
+            row["runtime_size_bytes"], "T5 generation runtime code size"
+        )
+        if (
+            row["head_blob_sha256"] != row["runtime_sha256"]
+            or row["head_blob_size_bytes"] != row["runtime_size_bytes"]
+        ):
+            raise EgoT5SourceError("T5 generation HEAD/runtime code differs")
         normalized_code_manifest.append(dict(row))
     if generator["code_manifest_sha256"] != canonical_sha256(
         normalized_code_manifest

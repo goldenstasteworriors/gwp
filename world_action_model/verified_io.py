@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import signal
+import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 import stat
@@ -60,6 +63,183 @@ def strict_json_loads(payload: bytes, *, name: str) -> Any:
         )
     except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
         raise VerifiedIOError(f"invalid strict JSON: {name}") from exc
+
+
+def verified_head_code_manifest(
+    repository_root: str | os.PathLike[str],
+    logical_paths: tuple[str, ...],
+    *,
+    expected_commit: str | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Compare runtime code bytes directly with bytes read from one pinned HEAD."""
+
+    root = _absolute_no_resolve(repository_root)
+    if root.is_symlink() or not root.is_dir():
+        raise VerifiedIOError("code repository root must be a real directory")
+    if not logical_paths or len(set(logical_paths)) != len(logical_paths):
+        raise VerifiedIOError("code manifest paths must be non-empty and unique")
+    for logical_path in logical_paths:
+        path = Path(logical_path)
+        if (
+            not isinstance(logical_path, str)
+            or not logical_path
+            or path.is_absolute()
+            or ".." in path.parts
+            or path.as_posix() != logical_path
+        ):
+            raise VerifiedIOError("code manifest contains an unsafe logical path")
+
+    def git_bytes(*arguments: str) -> bytes:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), *arguments],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise VerifiedIOError("cannot read current HEAD code blob bytes") from exc
+        return result.stdout
+
+    commit = git_bytes("rev-parse", "--verify", "HEAD^{commit}").decode(
+        "ascii"
+    ).strip()
+    if (
+        len(commit) != 40
+        or any(char not in "0123456789abcdef" for char in commit)
+        or (expected_commit is not None and commit != expected_commit)
+    ):
+        raise VerifiedIOError("current HEAD commit differs from expected code identity")
+
+    rows = []
+    for logical_path in logical_paths:
+        object_name = f"{commit}:{logical_path}"
+        blob_sha1 = git_bytes("rev-parse", "--verify", object_name).decode(
+            "ascii"
+        ).strip()
+        if len(blob_sha1) != 40 or any(
+            char not in "0123456789abcdef" for char in blob_sha1
+        ):
+            raise VerifiedIOError("invalid current-HEAD code blob identity")
+        head_payload = git_bytes("cat-file", "blob", object_name)
+        head_sha256 = hashlib.sha256(head_payload).hexdigest()
+        runtime_sha256, runtime_stat = hash_verified_regular_file(
+            root / logical_path
+        )
+        if (
+            head_sha256 != runtime_sha256
+            or len(head_payload) != runtime_stat["size_bytes"]
+        ):
+            raise VerifiedIOError(
+                f"runtime code bytes differ from current HEAD blob: {logical_path}"
+            )
+        rows.append(
+            {
+                "logical_path": logical_path,
+                "git_blob_sha1": blob_sha1,
+                "head_blob_sha256": head_sha256,
+                "head_blob_size_bytes": len(head_payload),
+                "runtime_sha256": runtime_sha256,
+                "runtime_size_bytes": runtime_stat["size_bytes"],
+            }
+        )
+
+    commit_after = git_bytes("rev-parse", "--verify", "HEAD^{commit}").decode(
+        "ascii"
+    ).strip()
+    if commit_after != commit:
+        raise VerifiedIOError("HEAD changed while reading code blob bytes")
+    return commit, rows
+
+
+def load_verified_head_python_module(
+    repository_root: str | os.PathLike[str],
+    logical_path: str,
+    module_name: str,
+    *,
+    expected_commit: str,
+    expected_row: Mapping[str, Any],
+):
+    """Compile and execute the exact verified source bytes for one HEAD file."""
+
+    if module_name in sys.modules:
+        raise VerifiedIOError(f"verified module name is already loaded: {module_name}")
+    commit, rows = verified_head_code_manifest(
+        repository_root,
+        (logical_path,),
+        expected_commit=expected_commit,
+    )
+    if commit != expected_commit or rows != [dict(expected_row)]:
+        raise VerifiedIOError("verified module differs from expected code manifest")
+    root = _absolute_no_resolve(repository_root)
+    source_path = root / logical_path
+    payload, digest, runtime_stat = read_verified_bytes(
+        source_path,
+        expected_sha256=expected_row["runtime_sha256"],
+    )
+    if (
+        digest != expected_row["runtime_sha256"]
+        or digest != expected_row["head_blob_sha256"]
+        or len(payload) != expected_row["runtime_size_bytes"]
+        or len(payload) != expected_row["head_blob_size_bytes"]
+        or runtime_stat["size_bytes"] != expected_row["runtime_size_bytes"]
+    ):
+        raise VerifiedIOError("verified module source bytes differ")
+    try:
+        code = compile(payload, str(source_path), "exec", dont_inherit=True)
+    except (SyntaxError, ValueError) as exc:
+        raise VerifiedIOError("cannot compile verified module source bytes") from exc
+    spec = importlib.util.spec_from_loader(
+        module_name,
+        loader=None,
+        origin=str(source_path),
+    )
+    if spec is None:
+        raise VerifiedIOError("cannot create verified module spec")
+    spec.has_location = True
+    module = importlib.util.module_from_spec(spec)
+    module.__file__ = str(source_path)
+    sys.modules[module_name] = module
+    try:
+        exec(code, module.__dict__)
+        origin = getattr(getattr(module, "__spec__", None), "origin", None)
+        if (
+            not isinstance(origin, str)
+            or not os.path.samefile(module.__file__, source_path)
+            or not os.path.samefile(origin, source_path)
+        ):
+            raise VerifiedIOError("verified module origin differs from manifest path")
+        _, after_rows = verified_head_code_manifest(
+            root,
+            (logical_path,),
+            expected_commit=expected_commit,
+        )
+        if after_rows != [dict(expected_row)]:
+            raise VerifiedIOError("verified module source changed during execution")
+        return module
+    except BaseException:
+        if sys.modules.get(module_name) is module:
+            del sys.modules[module_name]
+        raise
+
+
+def assert_python_module_origin(module: Any, expected_path: str | os.PathLike[str]) -> None:
+    """Require both module file and import spec origin to name one real file."""
+
+    expected = _absolute_no_resolve(expected_path)
+    module_file = getattr(module, "__file__", None)
+    spec_origin = getattr(getattr(module, "__spec__", None), "origin", None)
+    try:
+        matches = (
+            isinstance(module_file, str)
+            and isinstance(spec_origin, str)
+            and os.path.samefile(module_file, expected)
+            and os.path.samefile(spec_origin, expected)
+        )
+    except OSError as exc:
+        raise VerifiedIOError("cannot verify project module origin") from exc
+    if not matches:
+        raise VerifiedIOError(f"project module origin differs: {expected}")
 
 
 def stat_identity(value: os.stat_result) -> dict[str, int]:

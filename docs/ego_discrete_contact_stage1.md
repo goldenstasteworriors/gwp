@@ -157,9 +157,33 @@ from verified bytes into an owner-only, no-extra-file staging snapshot;
 `AutoTokenizer` uses only that snapshot with `local_files_only=True`, and every
 snapshot file is rehashed with its original identity after tokenizer loading.
 The hard-coded UMT5 model configuration is bound by the WAN encoder code hash.
-Generator/WAN code records current-HEAD blob IDs and installed byte hashes and
-is checked before and after encoding. Generation and replay reject a WAN code
-path that is not the current checkout's `third_party` directory.
+Generator/WAN code pins one HEAD commit, directly reads every `HEAD:path` blob,
+and requires its byte length and SHA-256 to equal the separately no-follow
+runtime file read. This equality is rechecked before and after importing the
+compute child, loading the encoder and every unique-prompt encoding; preflight
+performs the same direct-blob comparison. Generation and replay reject a WAN
+code path that is not the current checkout's `third_party` directory.
+
+Both generator and replay must be launched as their script file with
+`python -B`. Before importing any project or WAN module, the main script
+normalizes `sys.path` to one checkout root, rejects another path that could
+resolve the same project packages, rejects existing `__pycache__` directories
+or `.pyc` files below the code roots, creates a new empty owner-only pycache
+prefix on the project mount, and points `sys.pycache_prefix` at it. `-B` stops
+writes but is not treated as sufficient to prevent cache reads; the empty
+prefix provides that isolation. Namespace imports from `scripts` are forbidden:
+prepare/compute/WAN helpers are compiled and executed from the exact verified
+HEAD-equal source bytes, and their `__file__` plus `spec.origin` must identify
+the manifest path. The main script itself is executed from its source path;
+the selected Python interpreter, standard-library startup, `sitecustomize` and
+third-party site-packages remain environment-receipt boundaries. Arbitrary
+same-UID mutation of the running process or restoration races remains outside
+the boundary and requires UID or mount-namespace isolation.
+
+Run these commands from a clean, dedicated worktree with no project-code
+`__pycache__`, `.pyc`, or stale `.gwp-secure-pycache-*` entry. The tools only
+fail closed on pre-existing caches and never remove them; they clean up only
+the exact private prefix created by their own current process.
 
 A read-only 4x trace on the actual tokenizer directory used Transformers
 4.51.3 and Tokenizers 0.21.4 with all framework backends disabled. Linux
@@ -181,7 +205,7 @@ UID or mount namespace.
 Prompt planning is CPU-only and does not import or probe an accelerator:
 
 ```bash
-conda run -n gigaworld-policy python scripts/prepare_ego_t5_source.py plan \
+conda run -n gigaworld-policy python -B scripts/prepare_ego_t5_source.py plan \
   --data-root /home/ykj/project/EgoHumanoid/data_collection/human_data/data_collection/7_4_pour_liquid_between_beakers/vla_processed/lerobot/7_4_pour_liquid_between_beakers
 ```
 
@@ -196,7 +220,7 @@ First verify the project runtime without loading the 11.36 GB checkpoint or
 running an accelerator forward:
 
 ```bash
-python scripts/prepare_ego_t5_source.py runtime-check \
+python -B scripts/prepare_ego_t5_source.py runtime-check \
   --wan-code-path /workspace/WM/giga-world-policy-contact-transition/third_party \
   --device cuda:0
 ```
@@ -214,7 +238,7 @@ only through the vendor-supported project environment; do not change the
 device driver or system CUDA/runtime stack for this T5 task.
 
 ```bash
-python scripts/prepare_ego_t5_source.py generate \
+python -B scripts/prepare_ego_t5_source.py generate \
   --data-root /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers \
   --output-dir /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers/t5_embedding_verified_v1 \
   --model-root /workspace/WM/giga-world-policy/weights/Wan2.2-TI2V-5B-Diffusers \
@@ -239,7 +263,7 @@ tensor bytes, but it remains in the generator trust domain and cannot unlock
 the training gate:
 
 ```bash
-python scripts/prepare_ego_t5_source.py validate \
+python -B scripts/prepare_ego_t5_source.py validate \
   --data-root /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers \
   --t5-embedding-dir /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers/t5_embedding_verified_v1 \
   --model-root /workspace/WM/giga-world-policy/weights/Wan2.2-TI2V-5B-Diffusers \
@@ -252,7 +276,7 @@ nonexistent attestation path, replay every unique prompt and compare exact
 float32 contiguous tensor bytes:
 
 ```bash
-python scripts/verify_ego_t5_replay.py \
+python -B scripts/verify_ego_t5_replay.py \
   --data-root /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers \
   --t5-embedding-dir /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers/t5_embedding_verified_v1 \
   --replay-output-dir /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers/t5_embedding_replay_v1 \

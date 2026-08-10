@@ -21,7 +21,6 @@ rewritten.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -239,7 +238,57 @@ def _ensure_wan_code_on_path(wan_code_path: Optional[str]) -> None:
     )
 
 
-def _load_wan_t5_encoder_class(wan_code_path: Optional[str]):
+def _load_wan_t5_encoder_class(
+    wan_code_path: Optional[str],
+    *,
+    code_git_commit: Optional[str] = None,
+    code_manifest: Optional[List[Dict[str, Any]]] = None,
+):
+    if code_git_commit is not None or code_manifest is not None:
+        if not isinstance(code_git_commit, str) or not isinstance(code_manifest, list):
+            raise ValueError("secure WAN loading requires commit and code manifest")
+        from world_action_model.verified_io import load_verified_head_python_module
+
+        project_root = Path(__file__).resolve().parents[1]
+        expected_root = project_root / "third_party"
+        supplied_root = Path(str(wan_code_path)).expanduser().absolute()
+        if not os.path.samefile(supplied_root, expected_root):
+            raise ValueError("secure WAN code root differs from current checkout")
+        rows = {row.get("logical_path"): row for row in code_manifest}
+        logical_paths = {
+            "tokenizers": "third_party/wan/modules/tokenizers.py",
+            "t5": "third_party/wan/modules/t5.py",
+        }
+        if any(path not in rows for path in logical_paths.values()):
+            raise ValueError("secure WAN code manifest is incomplete")
+        package_name = f"_wam_verified_wan_{os.getpid()}_{os.urandom(8).hex()}"
+        modules_package_name = f"{package_name}.modules"
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(expected_root / "wan")]
+        modules_package = types.ModuleType(modules_package_name)
+        modules_package.__path__ = [str(expected_root / "wan" / "modules")]
+        sys.modules[package_name] = package
+        sys.modules[modules_package_name] = modules_package
+        try:
+            loaded = {}
+            for name in ("tokenizers", "t5"):
+                logical_path = logical_paths[name]
+                loaded[name] = load_verified_head_python_module(
+                    project_root,
+                    logical_path,
+                    f"{modules_package_name}.{name}",
+                    expected_commit=code_git_commit,
+                    expected_row=rows[logical_path],
+                )
+            return loaded["t5"].T5EncoderModel
+        except BaseException:
+            for module_name in tuple(sys.modules):
+                if module_name == package_name or module_name.startswith(
+                    f"{package_name}."
+                ):
+                    del sys.modules[module_name]
+            raise
+
     for path in _candidate_wan_code_paths(wan_code_path):
         if (path / "wan" / "modules" / "t5.py").is_file():
             modules_dir = path / "wan" / "modules"
@@ -251,6 +300,8 @@ def _load_wan_t5_encoder_class(wan_code_path: Optional[str]):
             sys.modules[modules_package_name] = modules_package
             for name in ("tokenizers", "t5"):
                 module_name = f"{modules_package_name}.{name}"
+                import importlib.util
+
                 spec = importlib.util.spec_from_file_location(module_name, modules_dir / f"{name}.py")
                 if spec is None or spec.loader is None:
                     raise ImportError(f"Failed to load WAN module {name} from {modules_dir}")
@@ -273,9 +324,15 @@ def _init_wan_t5_encoder(
     checkpoint_stat: Optional[Dict[str, int]] = None,
     tokenizer_path_override: Optional[str] = None,
     tokenizer_local_files_only: bool = False,
+    code_git_commit: Optional[str] = None,
+    code_manifest: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Any, Any]:
     torch = _import_torch()
-    T5EncoderModel = _load_wan_t5_encoder_class(wan_code_path)
+    T5EncoderModel = _load_wan_t5_encoder_class(
+        wan_code_path,
+        code_git_commit=code_git_commit,
+        code_manifest=code_manifest,
+    )
 
     ckpt = os.path.join(wan_path, "models_t5_umt5-xxl-enc-bf16.pth")
     tok = tokenizer_path_override or os.path.join(wan_path, "google/umt5-xxl")

@@ -13,7 +13,7 @@ from world_action_model.ego_t5_source import (
     EGO_T5_GENERATION_CODE_FILES,
     canonical_sha256,
 )
-from world_action_model.verified_io import hash_verified_regular_file
+from world_action_model.verified_io import verified_head_code_manifest
 
 
 EGO_T5_REPLAY_ATTESTATION_VERSION = (
@@ -71,39 +71,19 @@ def current_git_commit() -> str:
     return value
 
 
-def current_replay_code_manifest() -> list[dict]:
-    rows = []
-    for logical_path in EGO_T5_REPLAY_CODE_FILES:
-        path = PROJECT_ROOT / logical_path
-        digest, runtime_stat = hash_verified_regular_file(path)
-        try:
-            blob = subprocess.check_output(
-                [
-                    "git",
-                    "-C",
-                    str(PROJECT_ROOT),
-                    "rev-parse",
-                    f"HEAD:{logical_path}",
-                ],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            ).strip()
-        except (OSError, subprocess.CalledProcessError) as exc:
-            raise EgoT5ReplayAttestationError(
-                f"verifier code is absent from current HEAD: {logical_path}"
-            ) from exc
-        if not _GIT_SHA1_RE.fullmatch(blob):
-            raise EgoT5ReplayAttestationError(
-                f"invalid verifier code blob identity: {logical_path}"
-            )
-        rows.append(
-            {
-                "logical_path": logical_path,
-                "git_blob_sha1": blob,
-                "sha256": digest,
-                "size_bytes": runtime_stat["size_bytes"],
-            }
+def current_replay_code_manifest(
+    *, expected_git_commit: str | None = None
+) -> list[dict]:
+    try:
+        _, rows = verified_head_code_manifest(
+            PROJECT_ROOT,
+            EGO_T5_REPLAY_CODE_FILES,
+            expected_commit=expected_git_commit,
         )
+    except ValueError as exc:
+        raise EgoT5ReplayAttestationError(
+            "replay verifier code is not identical to HEAD blob bytes"
+        ) from exc
     return rows
 
 
@@ -114,7 +94,14 @@ def _validate_code_manifest(rows: object) -> list[dict]:
     for row, expected_path in zip(rows, EGO_T5_REPLAY_CODE_FILES):
         row = _exact(
             row,
-            {"logical_path", "git_blob_sha1", "sha256", "size_bytes"},
+            {
+                "logical_path",
+                "git_blob_sha1",
+                "head_blob_sha256",
+                "head_blob_size_bytes",
+                "runtime_sha256",
+                "runtime_size_bytes",
+            },
             "replay verifier code file",
         )
         if (
@@ -125,8 +112,21 @@ def _validate_code_manifest(rows: object) -> list[dict]:
             raise EgoT5ReplayAttestationError(
                 "unexpected replay verifier code identity"
             )
-        _sha256(row["sha256"], "replay verifier code")
-        _positive_int(row["size_bytes"], "replay verifier code size")
+        _sha256(row["head_blob_sha256"], "replay verifier HEAD code")
+        _sha256(row["runtime_sha256"], "replay verifier runtime code")
+        _positive_int(
+            row["head_blob_size_bytes"], "replay verifier HEAD code size"
+        )
+        _positive_int(
+            row["runtime_size_bytes"], "replay verifier runtime code size"
+        )
+        if (
+            row["head_blob_sha256"] != row["runtime_sha256"]
+            or row["head_blob_size_bytes"] != row["runtime_size_bytes"]
+        ):
+            raise EgoT5ReplayAttestationError(
+                "replay verifier HEAD/runtime code differs"
+            )
         normalized.append(dict(row))
     return normalized
 
@@ -306,7 +306,9 @@ def validate_ego_t5_replay_attestation(
     ):
         raise EgoT5ReplayAttestationError("invalid replay verifier identity")
     if verify_current_code:
-        current_manifest = current_replay_code_manifest()
+        current_manifest = current_replay_code_manifest(
+            expected_git_commit=verifier["git_commit"]
+        )
         if (
             verifier["git_commit"] != current_git_commit()
             or code_manifest != current_manifest

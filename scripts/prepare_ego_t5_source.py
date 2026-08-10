@@ -16,14 +16,107 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _bootstrap_secure_cli_imports() -> Path:
+    """Isolate project imports from timestamp-based bytecode caches."""
+
+    if not sys.dont_write_bytecode:
+        raise RuntimeError("secure Ego T5 CLI execution requires python -B")
+
+    root_real = os.path.realpath(PROJECT_ROOT)
+    scripts_real = os.path.realpath(PROJECT_ROOT / "scripts")
+    retained_paths = []
+    for entry in sys.path:
+        candidate = os.path.abspath(entry or os.getcwd())
+        candidate_real = os.path.realpath(candidate)
+        if candidate_real in {root_real, scripts_real}:
+            continue
+        shadow_markers = (
+            Path(candidate) / "world_action_model" / "__init__.py",
+            Path(candidate) / "scripts" / "compute_t5_embedding.py",
+            Path(candidate) / "third_party" / "wan" / "__init__.py",
+        )
+        if any(marker.exists() or marker.is_symlink() for marker in shadow_markers):
+            raise RuntimeError(
+                f"another sys.path entry can resolve project modules: {candidate}"
+            )
+        retained_paths.append(entry)
+    sys.path[:] = [str(PROJECT_ROOT), *retained_paths]
+
+    import importlib.util
+
+    package_spec = importlib.util.find_spec("world_action_model")
+    expected_package = PROJECT_ROOT / "world_action_model" / "__init__.py"
+    if (
+        package_spec is None
+        or not isinstance(package_spec.origin, str)
+        or not os.path.samefile(package_spec.origin, expected_package)
+    ):
+        raise RuntimeError("world_action_model import origin is not this checkout")
+
+    def walk_error(exc: OSError) -> None:
+        raise RuntimeError("cannot audit project bytecode caches") from exc
+
+    for code_root in (
+        PROJECT_ROOT / "configs",
+        PROJECT_ROOT / "scripts",
+        PROJECT_ROOT / "world_action_model",
+        PROJECT_ROOT / "third_party" / "wan",
+    ):
+        for _, directory_names, file_names in os.walk(
+            code_root,
+            followlinks=False,
+            onerror=walk_error,
+        ):
+            if "__pycache__" in directory_names or any(
+                name.endswith(".pyc") for name in file_names
+            ):
+                raise RuntimeError(
+                    f"project code root contains forbidden bytecode cache: {code_root}"
+                )
+    if any(PROJECT_ROOT.glob(".gwp-secure-pycache-*")):
+        raise RuntimeError("stale secure pycache prefix exists in project root")
+
+    prefix = PROJECT_ROOT / (
+        f".gwp-secure-pycache-{os.getpid()}-{os.urandom(16).hex()}"
+    )
+    os.mkdir(prefix, mode=0o700)
+    if prefix.is_symlink() or not prefix.is_dir() or prefix.stat().st_mode & 0o077:
+        raise RuntimeError("secure pycache prefix is not a private real directory")
+    if any(prefix.iterdir()):
+        raise RuntimeError("secure pycache prefix was not created empty")
+    sys.pycache_prefix = str(prefix)
+
+    def cleanup() -> None:
+        if prefix.exists() and prefix.is_dir() and not prefix.is_symlink():
+            shutil.rmtree(prefix)
+
+    import atexit
+
+    atexit.register(cleanup)
+    return prefix
+
+
+_SECURE_CLI_PYCACHE = None
+if __name__ == "__main__":
+    try:
+        _SECURE_CLI_PYCACHE = _bootstrap_secure_cli_imports()
+    except (OSError, RuntimeError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import world_action_model as _wam_package
+import world_action_model.ego_dataset_fingerprint as _fingerprint_module
+import world_action_model.ego_t5_source as _t5_source_module
+import world_action_model.verified_io as _verified_io_module
 from world_action_model.ego_dataset_fingerprint import derive_ego_dataset_identity
 from world_action_model.ego_t5_source import (
     EGO_T5_CHECKPOINT_LOGICAL_PATH,
@@ -49,14 +142,31 @@ from world_action_model.ego_t5_source import (
     validate_ego_t5_source_manifest,
 )
 from world_action_model.verified_io import (
+    assert_python_module_origin,
     hash_verified_regular_file,
+    load_verified_head_python_module,
     read_verified_bytes,
+    verified_head_code_manifest,
 )
 
 
 GENERATION_CODE_FILES = EGO_T5_GENERATION_CODE_FILES
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
+
+
+def _require_secure_cli_runtime() -> None:
+    prefix = _SECURE_CLI_PYCACHE
+    if (
+        prefix is None
+        or sys.pycache_prefix != str(prefix)
+        or prefix.is_symlink()
+        or not prefix.is_dir()
+        or any(prefix.iterdir())
+    ):
+        raise EgoT5SourceError(
+            "generation is allowed only through the python -B secure CLI launcher"
+        )
 
 
 def _json_dump(value: object) -> str:
@@ -118,38 +228,60 @@ def _rename_noreplace(source: Path, target: Path) -> None:
         raise OSError(error, os.strerror(error), str(target))
 
 
-def _git_blob_sha1(path: str) -> str:
+def _current_code_manifest(*, expected_git_commit: str | None = None) -> list[dict]:
     try:
-        value = subprocess.check_output(
-            ["git", "-C", str(PROJECT_ROOT), "rev-parse", f"HEAD:{path}"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise EgoT5SourceError(f"code file is not present in current HEAD: {path}") from exc
-    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
-        raise EgoT5SourceError(f"invalid current-HEAD blob identity: {path}")
-    return value
-
-
-def _current_code_manifest() -> list[dict]:
-    rows = []
-    for logical_path in GENERATION_CODE_FILES:
-        digest, runtime_stat = hash_verified_regular_file(PROJECT_ROOT / logical_path)
-        rows.append(
-            {
-                "logical_path": logical_path,
-                "git_blob_sha1": _git_blob_sha1(logical_path),
-                "sha256": digest,
-                "size_bytes": runtime_stat["size_bytes"],
-            }
+        _, rows = verified_head_code_manifest(
+            PROJECT_ROOT,
+            GENERATION_CODE_FILES,
+            expected_commit=expected_git_commit,
         )
+    except ValueError as exc:
+        raise EgoT5SourceError("generator/WAN code is not identical to HEAD bytes") from exc
     return rows
 
 
-def _assert_code_manifest(expected: list[dict]) -> None:
-    if _current_code_manifest() != expected:
+def _assert_code_manifest(expected: list[dict], *, expected_git_commit: str) -> None:
+    if _current_code_manifest(expected_git_commit=expected_git_commit) != expected:
         raise EgoT5SourceError("generator/WAN code changed during T5 encoding")
+
+
+def _assert_generation_module_origins() -> None:
+    try:
+        for module, logical_path in (
+            (_wam_package, "world_action_model/__init__.py"),
+            (
+                _fingerprint_module,
+                "world_action_model/ego_dataset_fingerprint.py",
+            ),
+            (_t5_source_module, "world_action_model/ego_t5_source.py"),
+            (_verified_io_module, "world_action_model/verified_io.py"),
+        ):
+            assert_python_module_origin(module, PROJECT_ROOT / logical_path)
+    except ValueError as exc:
+        raise EgoT5SourceError("loaded project module origin differs") from exc
+
+
+def _load_verified_compute_module(generator_receipt: dict):
+    logical_path = "scripts/compute_t5_embedding.py"
+    matches = [
+        row
+        for row in generator_receipt["code_manifest"]
+        if row["logical_path"] == logical_path
+    ]
+    if len(matches) != 1:
+        raise EgoT5SourceError("generation code manifest lacks unique compute child")
+    try:
+        return load_verified_head_python_module(
+            PROJECT_ROOT,
+            logical_path,
+            f"_gwp_verified_compute_{os.getpid()}_{os.urandom(8).hex()}",
+            expected_commit=generator_receipt["git_commit"],
+            expected_row=matches[0],
+        )
+    except ValueError as exc:
+        raise EgoT5SourceError(
+            "compute child source/origin differs from current HEAD"
+        ) from exc
 
 
 def _require_current_wan_code_path(wan_code_path: Path) -> None:
@@ -356,45 +488,14 @@ def _runtime_precheck(device_type: str) -> dict:
 
 def _git_generation_receipt(device_type: str, runtime_versions: dict) -> dict:
     try:
-        commit = subprocess.check_output(
-            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
-            text=True,
-        ).strip()
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise EgoT5SourceError("generator must run from a Git checkout") from exc
-    if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
-        raise EgoT5SourceError("generator Git commit is not full length")
-    tracked = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(PROJECT_ROOT),
-            "ls-files",
-            "--error-unmatch",
-            *GENERATION_CODE_FILES,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if tracked.returncode != 0:
-        raise EgoT5SourceError("generator/encoder implementation is not fully tracked")
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(PROJECT_ROOT),
-            "diff",
-            "--quiet",
-            "HEAD",
-            "--",
-            *GENERATION_CODE_FILES,
-        ],
-        check=False,
-    )
-    if result.returncode != 0:
-        raise EgoT5SourceError("generator/encoder implementation has uncommitted changes")
-    code_manifest = _current_code_manifest()
+        commit, code_manifest = verified_head_code_manifest(
+            PROJECT_ROOT,
+            GENERATION_CODE_FILES,
+        )
+    except ValueError as exc:
+        raise EgoT5SourceError(
+            "generator code must exactly match current HEAD blob bytes"
+        ) from exc
     return {
         "identity": EGO_T5_GENERATOR_IDENTITY,
         "git_commit": commit,
@@ -455,6 +556,7 @@ def _save_tensor(path: Path, tensor) -> tuple[dict, dict]:
 
 
 def generate(args: argparse.Namespace) -> dict:
+    _require_secure_cli_runtime()
     data_root = Path(os.path.abspath(os.path.expanduser(args.data_root)))
     output_dir = Path(os.path.abspath(os.path.expanduser(args.output_dir)))
     model_root = Path(os.path.abspath(os.path.expanduser(args.model_root)))
@@ -478,6 +580,7 @@ def generate(args: argparse.Namespace) -> dict:
 
     runtime_versions = _runtime_precheck(device_type)
     generator_receipt = _git_generation_receipt(device_type, runtime_versions)
+    _assert_generation_module_origins()
     identity = derive_ego_dataset_identity(data_root)
     prompts = load_episode_prompts(
         data_root, expected_episode_lengths=identity["episode_lengths"]
@@ -497,9 +600,17 @@ def generate(args: argparse.Namespace) -> dict:
     os.mkdir(staging, mode=0o700)
     tokenizer_snapshot = staging / ".tokenizer-snapshot"
     try:
-        from scripts.compute_t5_embedding import _encode_t5, _init_wan_t5_encoder
-
-        _assert_code_manifest(generator_receipt["code_manifest"])
+        _assert_code_manifest(
+            generator_receipt["code_manifest"],
+            expected_git_commit=generator_receipt["git_commit"],
+        )
+        compute_module = _load_verified_compute_module(generator_receipt)
+        _encode_t5 = compute_module._encode_t5
+        _init_wan_t5_encoder = compute_module._init_wan_t5_encoder
+        _assert_code_manifest(
+            generator_receipt["code_manifest"],
+            expected_git_commit=generator_receipt["git_commit"],
+        )
         snapshot_receipts = _create_tokenizer_snapshot(
             model_root=model_root,
             snapshot_dir=tokenizer_snapshot,
@@ -517,6 +628,12 @@ def generate(args: argparse.Namespace) -> dict:
             ],
             tokenizer_path_override=str(tokenizer_snapshot),
             tokenizer_local_files_only=True,
+            code_git_commit=generator_receipt["git_commit"],
+            code_manifest=generator_receipt["code_manifest"],
+        )
+        _assert_code_manifest(
+            generator_receipt["code_manifest"],
+            expected_git_commit=generator_receipt["git_commit"],
         )
         _verify_tokenizer_snapshot(
             tokenizer_snapshot,
@@ -532,7 +649,15 @@ def generate(args: argparse.Namespace) -> dict:
         for row in prompts:
             prompt = row["prompt"]
             if prompt not in encoded:
+                _assert_code_manifest(
+                    generator_receipt["code_manifest"],
+                    expected_git_commit=generator_receipt["git_commit"],
+                )
                 encoded[prompt] = _encode_t5(encoder, prompt, device=args.device)
+                _assert_code_manifest(
+                    generator_receipt["code_manifest"],
+                    expected_git_commit=generator_receipt["git_commit"],
+                )
             path = staging / f"episode_{row['episode_index']:06d}.pt"
             file_receipt, tensor_receipt = _save_tensor(path, encoded[prompt])
             semantic = tensor_receipt["semantic_sha256"]
@@ -551,7 +676,10 @@ def generate(args: argparse.Namespace) -> dict:
                     "tensor": tensor_receipt,
                 }
             )
-        _assert_code_manifest(generator_receipt["code_manifest"])
+        _assert_code_manifest(
+            generator_receipt["code_manifest"],
+            expected_git_commit=generator_receipt["git_commit"],
+        )
         prompt_manifest = [
             {
                 "episode_index": row["episode_index"],
@@ -633,6 +761,7 @@ def plan(args: argparse.Namespace) -> dict:
 
 
 def runtime_check(args: argparse.Namespace) -> dict:
+    _require_secure_cli_runtime()
     if args.device == "cpu":
         device_type = "cpu"
     elif args.device == "cuda" or (
@@ -642,9 +771,14 @@ def runtime_check(args: argparse.Namespace) -> dict:
     else:
         raise EgoT5SourceError("device must be exactly cpu, cuda, or cuda:<index>")
     versions = _runtime_precheck(device_type)
-    from scripts.compute_t5_embedding import _load_wan_t5_encoder_class
-
-    encoder_class = _load_wan_t5_encoder_class(args.wan_code_path)
+    receipt = _git_generation_receipt(device_type, versions)
+    _assert_generation_module_origins()
+    compute_module = _load_verified_compute_module(receipt)
+    encoder_class = compute_module._load_wan_t5_encoder_class(
+        args.wan_code_path,
+        code_git_commit=receipt["git_commit"],
+        code_manifest=receipt["code_manifest"],
+    )
     return {
         "status": "runtime_import_ready",
         "device_type": device_type,
