@@ -62,6 +62,7 @@ class WATransforms:
         image_cfg=None,
         num_views=1,
         default_prompt_embeds_path=None,
+        norm_payload=None,
     ):
         self.fps = fps
         self.is_train = is_train
@@ -81,8 +82,13 @@ class WATransforms:
             raise ValueError("WATransformsV2 requires `norm_path` to be set in the config " "(JSON file containing norm_stats for state/action).")
         json_path = norm_path
 
-        with open(json_path, "r", encoding="utf-8") as f:
-            self.stats_dict = json.load(f)
+        if norm_payload is not None:
+            if not isinstance(norm_payload, dict):
+                raise TypeError("norm_payload must be a preverified JSON object")
+            self.stats_dict = norm_payload
+        else:
+            with open(json_path, "r", encoding="utf-8") as f:
+                self.stats_dict = json.load(f)
         print("Loading stats dict from:", json_path)
         self.use_delta = True
         print("Using delta mode")

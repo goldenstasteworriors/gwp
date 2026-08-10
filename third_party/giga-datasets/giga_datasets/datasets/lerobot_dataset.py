@@ -1,6 +1,11 @@
 import json
+import contextvars
+import errno
+import fcntl
+import hashlib
 import logging
 import os
+import re
 import shutil
 import time
 import warnings
@@ -15,6 +20,7 @@ import lerobot.datasets.lerobot_dataset as _lerobot_dataset_module
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import torch
 import torchvision
@@ -32,12 +38,31 @@ from lerobot.datasets.video_utils import FrameTimestampError, decode_video_frame
 from PIL import Image
 from typing_extensions import override
 
+from world_action_model.verified_io import (
+    hash_verified_regular_file,
+    open_verified_regular_fd,
+    read_verified_bytes,
+    stat_identity,
+    strict_json_loads,
+)
+
 from .base_dataset import BaseDataset, _get_data_worker_context
 from .dataset import register_dataset
 
 
 TemporalOffsetSpec = int | list[int] | dict[str, int | list[int]]
 VideoKeySpec = str | Sequence[str]
+
+_VERIFIED_METADATA_CONTEXT = contextvars.ContextVar(
+    "gwp_verified_lerobot_metadata", default=None
+)
+_VERIFIED_CACHE_ATTESTATION_VERSION = "gwp-verified-hf-parquet-cache/v1"
+_VERIFIED_CACHE_ATTESTATION_NAME = "gwp_cache_attestation.json"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_VERIFIED_STAT_KEYS = {
+    "device", "inode", "mode", "size_bytes", "mtime_ns", "ctime_ns"
+}
+_VERIFIED_SOURCE_FD_BASE = 16384
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -282,6 +307,137 @@ def _get_lerobot_episode_lengths_no_hf_cache(root: Path, episodes: Sequence[int]
     return sum(episode_lengths[int(episode_idx)] for episode_idx in episodes)
 
 
+def _read_pinned_verified_bytes(entry: Mapping[str, object]) -> bytes:
+    fd = int(entry["fd"])
+    expected_stat = entry["stat"]
+    before = os.fstat(fd)
+    if stat_identity(before) != expected_stat:
+        raise ValueError(f"pinned source stat changed: {entry['logical_path']}")
+    os.lseek(fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    chunks = []
+    while True:
+        block = os.read(fd, 1024 * 1024)
+        if not block:
+            break
+        digest.update(block)
+        chunks.append(block)
+    after = os.fstat(fd)
+    if stat_identity(after) != expected_stat or digest.hexdigest() != entry["sha256"]:
+        raise ValueError(f"pinned source changed while reading: {entry['logical_path']}")
+    os.lseek(fd, 0, os.SEEK_SET)
+    return b"".join(chunks)
+
+
+def _strict_pinned_json(entry: Mapping[str, object]) -> dict:
+    payload = strict_json_loads(
+        _read_pinned_verified_bytes(entry),
+        name=str(entry["logical_path"]),
+    )
+    if not isinstance(payload, dict):
+        raise ValueError(f"verified metadata is not an object: {entry['logical_path']}")
+    return payload
+
+
+def _verified_cache_file_manifest(builder_cache_dir: Path) -> list[dict[str, object]]:
+    if builder_cache_dir.is_symlink() or not builder_cache_dir.is_dir():
+        raise ValueError("verified HF builder cache must be a real directory")
+    manifest = []
+    for path in sorted(builder_cache_dir.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"verified HF cache contains a symlink: {path}")
+        if path.is_dir():
+            continue
+        digest, runtime_stat = hash_verified_regular_file(path)
+        manifest.append(
+            {
+                "path": path.relative_to(builder_cache_dir).as_posix(),
+                "size_bytes": runtime_stat["size_bytes"],
+                "sha256": digest,
+            }
+        )
+    if not manifest:
+        raise ValueError("verified HF builder cache is empty")
+    return manifest
+
+
+def _write_verified_cache_attestation(
+    path: Path, *, source_tag: str, builder_cache_dir: Path
+) -> None:
+    if os.path.lexists(path):
+        raise ValueError("refusing to overwrite an existing HF cache attestation")
+    payload = {
+        "attestation_version": _VERIFIED_CACHE_ATTESTATION_VERSION,
+        "source_manifest_content_sha256": source_tag,
+        "cache_files": _verified_cache_file_manifest(builder_cache_dir),
+    }
+    encoded = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        + "\n"
+    ).encode("utf-8")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.new")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(temporary, flags, 0o600)
+        try:
+            written = 0
+            while written < len(encoded):
+                written += os.write(fd, encoded[written:])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _validate_verified_cache_attestation(
+    path: Path, *, source_tag: str, builder_cache_dir: Path
+) -> dict[str, object]:
+    payload_bytes, _, _ = read_verified_bytes(path)
+    payload = strict_json_loads(payload_bytes, name="verified HF cache attestation")
+    cache_files = payload.get("cache_files") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        != {
+            "attestation_version",
+            "source_manifest_content_sha256",
+            "cache_files",
+        }
+        or payload.get("attestation_version")
+        != _VERIFIED_CACHE_ATTESTATION_VERSION
+        or payload.get("source_manifest_content_sha256") != source_tag
+        or not isinstance(cache_files, list)
+        or not cache_files
+        or any(
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "size_bytes", "sha256"}
+            or not isinstance(entry["path"], str)
+            or not entry["path"]
+            or Path(entry["path"]).is_absolute()
+            or ".." in Path(entry["path"]).parts
+            or Path(entry["path"]).as_posix() != entry["path"]
+            or isinstance(entry["size_bytes"], bool)
+            or not isinstance(entry["size_bytes"], int)
+            or entry["size_bytes"] < 0
+            or not isinstance(entry["sha256"], str)
+            or not _SHA256_RE.fullmatch(entry["sha256"])
+            for entry in cache_files
+        )
+        or len({entry["path"] for entry in cache_files}) != len(cache_files)
+        or cache_files != _verified_cache_file_manifest(builder_cache_dir)
+    ):
+        raise ValueError("verified HF cache attestation/content differs")
+    return payload
+
+
 class _LeRobotDatasetMetadata(_OriginalLeRobotDatasetMetadata):
     def load_metadata(self):
         from lerobot.datasets.utils import (
@@ -292,16 +448,31 @@ class _LeRobotDatasetMetadata(_OriginalLeRobotDatasetMetadata):
             load_tasks,
         )
 
-        self.info = load_info(self.root)
+        verified = _VERIFIED_METADATA_CONTEXT.get()
+        if verified is None:
+            self.info = load_info(self.root)
+        else:
+            self.info = _strict_pinned_json(verified["meta/info.json"])
+            for feature in self.info["features"].values():
+                feature["shape"] = tuple(feature["shape"])
         if str(self.info.get('codebase_version', '')).lower() == 'v2.1':
             tasks_path = self.root / 'meta' / 'tasks.jsonl'
             episode_path = self.root / 'meta' / 'episodes.jsonl'
             task_rows = []
-            with tasks_path.open('r', encoding='utf-8') as file:
-                for line in file:
-                    line = line.strip()
-                    if line:
-                        task_rows.append(json.loads(line))
+            if verified is None:
+                task_lines = tasks_path.read_bytes().splitlines()
+            else:
+                task_lines = _read_pinned_verified_bytes(
+                    verified["meta/tasks.jsonl"]
+                ).splitlines()
+            for line_number, line in enumerate(task_lines, 1):
+                if line.strip():
+                    task_rows.append(
+                        strict_json_loads(
+                            line,
+                            name=f"meta/tasks.jsonl:{line_number}",
+                        )
+                    )
             task_rows.sort(key=lambda row: int(row['task_index']))
             self.tasks = pd.DataFrame(
                 {'task_index': [int(row['task_index']) for row in task_rows]},
@@ -311,11 +482,20 @@ class _LeRobotDatasetMetadata(_OriginalLeRobotDatasetMetadata):
 
             episode_rows = []
             dataset_from_index = 0
-            with episode_path.open('r', encoding='utf-8') as file:
-                for line in file:
-                    line = line.strip()
-                    if line:
-                        episode_rows.append(json.loads(line))
+            if verified is None:
+                episode_lines = episode_path.read_bytes().splitlines()
+            else:
+                episode_lines = _read_pinned_verified_bytes(
+                    verified["meta/episodes.jsonl"]
+                ).splitlines()
+            for line_number, line in enumerate(episode_lines, 1):
+                if line.strip():
+                    episode_rows.append(
+                        strict_json_loads(
+                            line,
+                            name=f"meta/episodes.jsonl:{line_number}",
+                        )
+                    )
             episode_rows.sort(key=lambda row: int(row['episode_index']))
             expected_indices = list(range(len(episode_rows)))
             actual_indices = [int(row['episode_index']) for row in episode_rows]
@@ -344,7 +524,16 @@ class _LeRobotDatasetMetadata(_OriginalLeRobotDatasetMetadata):
             self.tasks = load_tasks(self.root)
             self.subtasks = load_subtasks(self.root)
             self.episodes = _load_lerobot_episodes_no_hf_cache(self.root)
-        self.stats = load_stats(self.root)
+        if verified is not None and "meta/stats.json" in verified:
+            from lerobot.datasets.utils import cast_stats_to_numpy
+
+            self.stats = cast_stats_to_numpy(
+                _strict_pinned_json(verified["meta/stats.json"])
+            )
+        elif verified is not None:
+            self.stats = None
+        else:
+            self.stats = load_stats(self.root)
 
 
 _lerobot_dataset_module.LeRobotDatasetMetadata = _LeRobotDatasetMetadata
@@ -700,19 +889,46 @@ class FastLeRobotDataset(_LeRobotDataset):
         skip_video_decoding: bool = False,
         repack_transform: dict | None = None,
         decode_video_keys: VideoKeySpec | None = None,
+        verified_source_receipt: list[dict] | None = None,
     ):
-        super().__init__(
-            repo_id=repo_id,
-            root=root,
-            episodes=episodes,
-            image_transforms=image_transforms,
-            delta_timestamps=delta_timestamps,
-            tolerance_s=tolerance_s,
-            revision=revision,
-            force_cache_sync=force_cache_sync,
-            download_videos=download_videos,
-            video_backend=video_backend,
-        )
+        self._verified_source_entries: dict[str, dict] = {}
+        self._verified_source_fds: list[int] = []
+        self._verified_parquet_paths: list[Path] | None = None
+        self._verified_video_entries: dict[tuple[int, str], dict] = {}
+        self._verified_cache_tag: str | None = None
+        self._verified_pid = os.getpid()
+        self._verified_cache_entries: dict[str, dict] = {}
+        self._verified_cache_fds: list[int] = []
+        self._verified_cache_pid = os.getpid()
+        token = None
+        try:
+            if verified_source_receipt is not None:
+                self._prepare_verified_sources(root, verified_source_receipt)
+                metadata_entries = {
+                    logical: entry
+                    for logical, entry in self._verified_source_entries.items()
+                    if entry["logical_role"] == "metadata"
+                }
+                token = _VERIFIED_METADATA_CONTEXT.set(metadata_entries)
+            super().__init__(
+                repo_id=repo_id,
+                root=root,
+                episodes=episodes,
+                image_transforms=image_transforms,
+                delta_timestamps=delta_timestamps,
+                tolerance_s=tolerance_s,
+                revision=revision,
+                force_cache_sync=force_cache_sync,
+                download_videos=download_videos,
+                video_backend=video_backend,
+            )
+            self._assert_verified_sources_unchanged()
+        except Exception:
+            self.close_verified_sources()
+            raise
+        finally:
+            if token is not None:
+                _VERIFIED_METADATA_CONTEXT.reset(token)
         self.skip_video_decoding = skip_video_decoding
         self.repack_transform = repack_transform
         self.decode_video_keys = _normalize_video_key_spec(decode_video_keys, arg_name='decode_video_keys')
@@ -735,6 +951,363 @@ class FastLeRobotDataset(_LeRobotDataset):
                 self._repack_mode = 'flat'
                 self._repack_pairs = self._build_repack_pairs(repack_transform)
 
+    def _prepare_verified_sources(
+        self, root: str | Path | None, receipt: list[dict]
+    ) -> None:
+        if root is None or not isinstance(receipt, list) or not receipt:
+            raise ValueError("verified LeRobot source receipt is empty")
+        source_root = Path(root).expanduser().absolute()
+        if source_root.is_symlink() or not source_root.is_dir():
+            raise ValueError("verified LeRobot root must be a real directory")
+        for raw_entry in receipt:
+            if not isinstance(raw_entry, Mapping) or set(raw_entry) != {
+                "logical_path", "logical_role", "path_record_only", "sha256", "stat"
+            }:
+                raise ValueError("invalid verified LeRobot source receipt entry")
+            entry = dict(raw_entry)
+            logical = entry["logical_path"]
+            role = entry["logical_role"]
+            receipt_stat = entry["stat"]
+            if (
+                not isinstance(logical, str)
+                or not logical
+                or Path(logical).is_absolute()
+                or ".." in Path(logical).parts
+                or Path(logical).as_posix() != logical
+                or logical in self._verified_source_entries
+                or role not in {"metadata", "parquet", "video"}
+                or not isinstance(entry["path_record_only"], str)
+                or not Path(entry["path_record_only"]).is_absolute()
+                or not isinstance(entry["sha256"], str)
+                or not _SHA256_RE.fullmatch(entry["sha256"])
+                or not isinstance(receipt_stat, Mapping)
+                or set(receipt_stat) != _VERIFIED_STAT_KEYS
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    for value in receipt_stat.values()
+                )
+            ):
+                raise ValueError("invalid/duplicate verified LeRobot logical source")
+            actual_path = Path(entry["path_record_only"]).expanduser().absolute()
+            if role in {"metadata", "parquet"}:
+                expected_path = (source_root / logical).absolute()
+                if actual_path != expected_path:
+                    raise ValueError(f"verified source path differs for {logical}")
+            fd, digest, runtime_stat = open_verified_regular_fd(
+                actual_path,
+                expected_sha256=entry["sha256"],
+                expected_stat=entry["stat"],
+            )
+            entry.update(
+                fd=fd,
+                sha256=digest,
+                stat=runtime_stat,
+                pinned_path=Path(f"/proc/self/fd/{fd}"),
+            )
+            self._verified_source_fds.append(fd)
+            self._verified_source_entries[logical] = entry
+        required_metadata = {
+            "meta/info.json", "meta/tasks.jsonl", "meta/episodes.jsonl"
+        }
+        receipt_metadata = {
+            entry["logical_path"]
+            for entry in self._verified_source_entries.values()
+            if entry["logical_role"] == "metadata"
+        }
+        if receipt_metadata not in (
+            required_metadata,
+            required_metadata | {"meta/stats.json"},
+        ):
+            raise ValueError("verified LeRobot metadata receipt is incomplete")
+        actual_parquet = {
+            path.absolute() for path in (source_root / "data").glob("*/*.parquet")
+        }
+        receipt_parquet = {
+            Path(entry["path_record_only"]).absolute()
+            for entry in self._verified_source_entries.values()
+            if entry["logical_role"] == "parquet"
+        }
+        if not receipt_parquet or receipt_parquet != actual_parquet:
+            raise ValueError("verified LeRobot parquet set is missing or has extras")
+        parquet_entries = sorted(
+            (
+                entry
+                for entry in self._verified_source_entries.values()
+                if entry["logical_role"] == "parquet"
+            ),
+            key=lambda entry: entry["logical_path"],
+        )
+        self._verified_parquet_paths = [entry["pinned_path"] for entry in parquet_entries]
+        for entry in self._verified_source_entries.values():
+            if entry["logical_role"] != "video":
+                continue
+            match = re.fullmatch(r"videos/(.+)/episode_([0-9]{6})\.mp4", entry["logical_path"])
+            if match is None:
+                raise ValueError("invalid verified video logical path")
+            key = (int(match.group(2)), match.group(1))
+            if key in self._verified_video_entries:
+                raise ValueError("duplicate verified video source")
+            self._verified_video_entries[key] = entry
+        tag_payload = [
+            (entry["logical_path"], entry["logical_role"], entry["sha256"])
+            for entry in sorted(
+                self._verified_source_entries.values(),
+                key=lambda value: value["logical_path"],
+            )
+        ]
+        self._verified_cache_tag = hashlib.sha256(
+            json.dumps(tag_payload, separators=(",", ":"), ensure_ascii=True).encode()
+        ).hexdigest()
+        self._adopt_stable_source_fds(
+            [(entry, entry["fd"]) for entry in self._verified_source_entries.values()]
+        )
+
+    def _adopt_stable_source_fds(self, raw_entries: list[tuple[dict, int]]) -> None:
+        ordered = sorted(raw_entries, key=lambda item: item[0]["logical_path"])
+        stable_entries = []
+        try:
+            for index, (entry, raw_fd) in enumerate(ordered):
+                target_fd = _VERIFIED_SOURCE_FD_BASE + index
+                try:
+                    os.fstat(target_fd)
+                except OSError as exc:
+                    if exc.errno != errno.EBADF:
+                        raise
+                else:
+                    raise ValueError(
+                        f"reserved verified-source fd is occupied: {target_fd}"
+                    )
+                command = getattr(fcntl, "F_DUPFD_CLOEXEC", fcntl.F_DUPFD)
+                stable_fd = fcntl.fcntl(raw_fd, command, target_fd)
+                if stable_fd != target_fd:
+                    os.close(stable_fd)
+                    raise ValueError("cannot allocate deterministic verified-source fd")
+                os.set_inheritable(stable_fd, False)
+                stable_entries.append((entry, stable_fd))
+        except Exception:
+            for _, stable_fd in stable_entries:
+                os.close(stable_fd)
+            raise
+        for _, raw_fd in raw_entries:
+            os.close(raw_fd)
+        for entry, stable_fd in stable_entries:
+            entry["fd"] = stable_fd
+            entry["pinned_path"] = Path(f"/proc/self/fd/{stable_fd}")
+        self._verified_source_fds = [fd for _, fd in stable_entries]
+        self._verified_parquet_paths = [
+            entry["pinned_path"]
+            for entry in sorted(
+                (
+                    value
+                    for value in self._verified_source_entries.values()
+                    if value["logical_role"] == "parquet"
+                ),
+                key=lambda value: value["logical_path"],
+            )
+        ]
+
+    def _assert_verified_sources_unchanged(self) -> None:
+        if self._verified_source_entries and self._verified_pid != os.getpid():
+            inherited_fds_valid = True
+            for entry in self._verified_source_entries.values():
+                try:
+                    inherited_fds_valid = (
+                        stat_identity(os.fstat(entry["fd"])) == entry["stat"]
+                    )
+                except (OSError, TypeError):
+                    inherited_fds_valid = False
+                if not inherited_fds_valid:
+                    break
+            if inherited_fds_valid:
+                # fork() preserves the already-hashed open file descriptions;
+                # no pathname reopen or multi-GB rehash is needed.
+                self._verified_pid = os.getpid()
+            else:
+                # A spawn/pickle worker has no inherited descriptors. Never
+                # close the serialized integer values: the child may have
+                # independently reused those numbers for unrelated resources.
+                reopened_fds = []
+                reopened_entries = []
+                try:
+                    for entry in self._verified_source_entries.values():
+                        new_fd, _, _ = open_verified_regular_fd(
+                            entry["path_record_only"],
+                            expected_sha256=entry["sha256"],
+                            expected_stat=entry["stat"],
+                        )
+                        reopened_fds.append(new_fd)
+                        reopened_entries.append((entry, new_fd))
+                    self._adopt_stable_source_fds(reopened_entries)
+                except Exception:
+                    for fd in reopened_fds:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                    raise
+                self._verified_pid = os.getpid()
+        for entry in self._verified_source_entries.values():
+            if stat_identity(os.fstat(entry["fd"])) != entry["stat"]:
+                raise ValueError(
+                    f"verified LeRobot source changed during loader open: {entry['logical_path']}"
+                )
+
+    def _ensure_verified_process(self) -> None:
+        if self._verified_source_entries and self._verified_pid != os.getpid():
+            self._assert_verified_sources_unchanged()
+        if self._verified_cache_entries and self._verified_cache_pid != os.getpid():
+            self._reopen_verified_cache_for_process()
+
+    @staticmethod
+    def _assert_verified_entry_unchanged(entry: Mapping[str, object]) -> None:
+        if stat_identity(os.fstat(entry["fd"])) != entry["stat"]:
+            raise ValueError(
+                f"verified LeRobot source changed: {entry['logical_path']}"
+            )
+
+    def _validate_verified_embedded_images(self, dataset: datasets.Dataset) -> None:
+        image_keys = [
+            key
+            for key, feature in self.features.items()
+            if feature.get("dtype") == "image"
+        ]
+        for key in image_keys:
+            column = dataset.data.column(key)
+            for chunk in column.chunks:
+                if not pa.types.is_struct(chunk.type) or "bytes" not in (
+                    field.name for field in chunk.type
+                ):
+                    raise ValueError(
+                        f"verified image column is not an embedded bytes struct: {key}"
+                    )
+                embedded = chunk.field("bytes")
+                if embedded.null_count or bool(
+                    pc.any(pc.equal(pc.binary_length(embedded), 0)).as_py()
+                ):
+                    raise ValueError(
+                        f"verified image column contains path-only/empty images: {key}"
+                    )
+
+    def _pin_verified_cache_files(
+        self, attestation_path: Path, builder_cache_dir: Path
+    ) -> None:
+        payload = _validate_verified_cache_attestation(
+            attestation_path,
+            source_tag=self._verified_cache_tag,
+            builder_cache_dir=builder_cache_dir,
+        )
+        entries = {}
+        fds = []
+        try:
+            for receipt in payload["cache_files"]:
+                cache_path = builder_cache_dir / receipt["path"]
+                fd, digest, runtime_stat = open_verified_regular_fd(
+                    cache_path,
+                    expected_sha256=receipt["sha256"],
+                )
+                if runtime_stat["size_bytes"] != receipt["size_bytes"]:
+                    os.close(fd)
+                    raise ValueError("verified HF cache size differs from attestation")
+                fds.append(fd)
+                entries[receipt["path"]] = {
+                    "path": str(cache_path.absolute()),
+                    "sha256": digest,
+                    "stat": runtime_stat,
+                    "fd": fd,
+                }
+        except Exception:
+            for fd in fds:
+                os.close(fd)
+            raise
+        self.close_verified_cache_sources()
+        self._verified_cache_entries = entries
+        self._verified_cache_fds = fds
+        self._verified_cache_pid = os.getpid()
+
+    def _reopen_verified_cache_for_process(self) -> None:
+        inherited_fds_valid = True
+        for entry in self._verified_cache_entries.values():
+            try:
+                inherited_fds_valid = (
+                    stat_identity(os.fstat(entry["fd"])) == entry["stat"]
+                )
+            except (OSError, TypeError):
+                inherited_fds_valid = False
+            if not inherited_fds_valid:
+                break
+        if inherited_fds_valid:
+            self._verified_cache_pid = os.getpid()
+            return
+        reopened_fds = []
+        reopened_entries = []
+        try:
+            for entry in self._verified_cache_entries.values():
+                fd, _, _ = open_verified_regular_fd(
+                    entry["path"],
+                    expected_sha256=entry["sha256"],
+                    expected_stat=entry["stat"],
+                )
+                reopened_fds.append(fd)
+                reopened_entries.append((entry, fd))
+        except Exception:
+            for fd in reopened_fds:
+                os.close(fd)
+            raise
+        for entry, fd in reopened_entries:
+            entry["fd"] = fd
+        self._verified_cache_fds = reopened_fds
+        self._verified_cache_pid = os.getpid()
+
+    def _assert_verified_cache_unchanged(self) -> None:
+        for entry in self._verified_cache_entries.values():
+            if stat_identity(os.fstat(entry["fd"])) != entry["stat"]:
+                raise ValueError("verified HF cache changed during training read")
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        source_entries = {
+            logical: {**entry, "fd": None, "pinned_path": None}
+            for logical, entry in self._verified_source_entries.items()
+        }
+        state["_verified_source_entries"] = source_entries
+        state["_verified_source_fds"] = []
+        state["_verified_parquet_paths"] = None
+        state["_verified_video_entries"] = {
+            key: source_entries[entry["logical_path"]]
+            for key, entry in self._verified_video_entries.items()
+        }
+        state["_verified_pid"] = None
+        state["_verified_cache_entries"] = {
+            logical: {**entry, "fd": None}
+            for logical, entry in self._verified_cache_entries.items()
+        }
+        state["_verified_cache_fds"] = []
+        state["_verified_cache_pid"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
+    def close_verified_sources(self) -> None:
+        for fd in getattr(self, "_verified_source_fds", []):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._verified_source_fds = []
+        self.close_verified_cache_sources()
+
+    def close_verified_cache_sources(self) -> None:
+        for fd in getattr(self, "_verified_cache_fds", []):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._verified_cache_fds = []
+
+    def __del__(self):
+        self.close_verified_sources()
+
     @override
     def load_hf_dataset(self) -> datasets.Dataset:
         """Load parquet data using the metadata-declared columns only.
@@ -750,17 +1323,25 @@ class FastLeRobotDataset(_LeRobotDataset):
         from pyarrow import dataset as pa_ds
 
         features = get_hf_features_from_features(self.features)
-        paths = sorted((self.root / 'data').glob('*/*.parquet'))
+        paths = self._verified_parquet_paths or sorted(
+            (self.root / 'data').glob('*/*.parquet')
+        )
         if len(paths) == 0:
             raise FileNotFoundError(f'Provided directory does not contain any parquet file: {self.root / "data"}')
 
         filters = pa_ds.field('episode_index').isin(self.episodes) if self.episodes is not None else None
         cache_dir = os.environ.get('HF_DATASETS_CACHE') or os.path.expanduser('~/.cache/huggingface/datasets')
+        if self._verified_cache_tag is not None:
+            cache_dir = os.path.join(
+                cache_dir, 'gwp_verified_parquet', self._verified_cache_tag
+            )
+        verified_attestation_path = Path(cache_dir) / _VERIFIED_CACHE_ATTESTATION_NAME
         parquet_paths = [str(path) for path in paths]
         builder_cache_dir: str | None = None
 
         def load_from_parquet() -> datasets.Dataset:
             nonlocal builder_cache_dir
+            self._assert_verified_sources_unchanged()
             reader = ParquetDatasetReader(
                 parquet_paths,
                 filters=filters,
@@ -769,7 +1350,45 @@ class FastLeRobotDataset(_LeRobotDataset):
                 cache_dir=cache_dir,
             )
             builder_cache_dir = reader.builder.cache_dir
-            return reader.read()
+            if self._verified_cache_tag is None:
+                result = reader.read()
+            else:
+                builder_path = Path(builder_cache_dir)
+                if os.path.lexists(verified_attestation_path):
+                    _validate_verified_cache_attestation(
+                        verified_attestation_path,
+                        source_tag=self._verified_cache_tag,
+                        builder_cache_dir=builder_path,
+                    )
+                    result = reader.read()
+                    self._pin_verified_cache_files(
+                        verified_attestation_path,
+                        builder_path,
+                    )
+                else:
+                    # A content-keyed namespace is not trusted merely because it
+                    # exists. Its first admitted use is a forced source rebuild;
+                    # subsequent ranks verify every cache byte before and after
+                    # the Arrow dataset opens it.
+                    reader.builder.download_and_prepare(
+                        download_mode=datasets.DownloadMode.FORCE_REDOWNLOAD,
+                    )
+                    result = reader.builder.as_dataset(
+                        split=reader.split,
+                        verification_mode=None,
+                        in_memory=reader.keep_in_memory,
+                    )
+                    _write_verified_cache_attestation(
+                        verified_attestation_path,
+                        source_tag=self._verified_cache_tag,
+                        builder_cache_dir=builder_path,
+                    )
+                    self._pin_verified_cache_files(
+                        verified_attestation_path,
+                        builder_path,
+                    )
+            self._assert_verified_sources_unchanged()
+            return result
 
         def load_from_parquet_with_retry() -> datasets.Dataset:
             attempts = max(1, _get_env_int('GIGA_LEROBOT_HF_CACHE_LOAD_ATTEMPTS', 10))
@@ -777,7 +1396,10 @@ class FastLeRobotDataset(_LeRobotDataset):
                 try:
                     return load_from_parquet()
                 except Exception as error:
-                    is_recoverable_cache_error = _is_hf_parquet_cache_read_error(error)
+                    is_recoverable_cache_error = (
+                        self._verified_cache_tag is None
+                        and _is_hf_parquet_cache_read_error(error)
+                    )
                     if not is_recoverable_cache_error:
                         raise
                     if attempt + 1 == attempts:
@@ -797,15 +1419,19 @@ class FastLeRobotDataset(_LeRobotDataset):
                     time.sleep(delay_s)
             raise RuntimeError('Unreachable HF parquet cache retry state.')
 
-        if _get_env_bool('GIGA_LEROBOT_LOCK_HF_CACHE', True):
+        if self._verified_cache_tag is not None or _get_env_bool('GIGA_LEROBOT_LOCK_HF_CACHE', True):
             cache_path = Path(cache_dir)
             cache_path.mkdir(parents=True, exist_ok=True)
+            if cache_path.is_symlink() or not cache_path.is_dir():
+                raise ValueError("verified HF cache namespace must be a real directory")
             lock_path = cache_path / 'giga_lerobot_from_parquet.lock'
             with FileLock(str(lock_path)):
                 hf_dataset = load_from_parquet_with_retry()
         else:
             hf_dataset = load_from_parquet_with_retry()
 
+        if self._verified_source_entries:
+            self._validate_verified_embedded_images(hf_dataset)
         hf_dataset.set_transform(hf_transform_to_torch)
         return hf_dataset
 
@@ -937,18 +1563,33 @@ class FastLeRobotDataset(_LeRobotDataset):
         for vid_key, query_ts in query_timestamps.items():
             from_timestamp = ep[f'videos/{vid_key}/from_timestamp']
             shifted_query_ts = [from_timestamp + ts for ts in query_ts]
-            video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
+            verified_video = self._verified_video_entries.get((ep_idx, vid_key))
+            if self._verified_source_entries and verified_video is None:
+                raise ValueError(
+                    f"missing verified video receipt for episode={ep_idx}, key={vid_key}"
+                )
+            video_path = (
+                verified_video["pinned_path"]
+                if verified_video is not None
+                else self.root / self.meta.get_video_file_path(ep_idx, vid_key)
+            )
+            if verified_video is not None:
+                self._assert_verified_entry_unchanged(verified_video)
             if video_backend == 'pyav':
                 frames = _decode_video_frames_pyav_streaming(video_path, shifted_query_ts, self.tolerance_s)
             else:
                 frames = decode_video_frames(video_path, shifted_query_ts, self.tolerance_s, video_backend)
+            if verified_video is not None:
+                self._assert_verified_entry_unchanged(verified_video)
             item[vid_key] = frames.squeeze(0)
 
         return item
 
     @override
     def __getitem__(self, idx: int) -> dict:
+        self._ensure_verified_process()
         self._ensure_hf_dataset_loaded()
+        self._assert_verified_cache_unchanged()
         item = self.hf_dataset[idx]
         ep_idx = item['episode_index'].item()
         abs_idx = item['index'].item()
@@ -969,6 +1610,8 @@ class FastLeRobotDataset(_LeRobotDataset):
             try:
                 video_frames = self._query_videos(query_timestamps, ep_idx)
             except Exception as e:
+                if self._verified_source_entries:
+                    raise
                 logging.warning(
                     f'Failed to decode video frames for episode {ep_idx} in timestamps: {query_timestamps}. Error: {e}. Falling back to zeros.'
                 )
@@ -1010,6 +1653,7 @@ class FastLeRobotDataset(_LeRobotDataset):
         item['task'] = self.meta.tasks.iloc[task_idx].name
         if self._repack_mode != 'none':
             item = self._apply_repack_transform(item)
+        self._assert_verified_cache_unchanged()
         return item
 
     def _filter_query_timestamps(self, query_timestamps: dict[str, list[float]]) -> dict[str, list[float]]:

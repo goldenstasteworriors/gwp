@@ -50,9 +50,11 @@ from:
 
 Canonical JSON uses sorted keys and compact separators, then SHA-256. Absolute
 mount paths and mtimes do not enter the ID. Other loader-selected metadata
-bytes and every parquet/video byte do enter it. Both JSONL and v3.1-style
-parquet episode metadata are supported. The preflight recomputes the receipt
-rather than trusting a self-reported manifest.
+bytes and every parquet/video byte do enter it. Production deliberately accepts
+only the audited LeRobot v2.1 layout (`info.json`, `tasks.jsonl`,
+`episodes.jsonl`, optional `stats.json`); other metadata layouts fail closed.
+The preflight recomputes the receipt rather than trusting a self-reported
+manifest.
 
 The actual call chain is
 `WAMLeRobotDataset.open` -> `_LeRobotDatasetMetadata` ->
@@ -62,8 +64,18 @@ loader reads the three v2.1 metadata files above; `load_hf_dataset` ignores
 MP4 only when `meta.video_keys` is non-empty. Here the only visual feature,
 `observation.images.left`, has dtype `image`, and the parquet Arrow schema is
 `struct<bytes: binary, path: string>` (the first audited row contains 144553
-embedded bytes), so no raw MP4 is read. `meta/episodes_stats.jsonl` is not on
-this loader path and is intentionally excluded.
+embedded bytes). At dataset initialization the verified loader scans every
+selected image chunk and rejects null/empty `bytes`, so a path-only image can
+never become an unreceipted external read. No raw MP4 is read.
+`meta/episodes_stats.jsonl` is not on this loader path and is intentionally
+excluded.
+
+The full 66-parquet audit covers all 20,013 image rows: 20,013 have non-empty
+embedded bytes, 0 are path-only, 0 are empty, and the embedded image payloads
+sum to 4,317,147,474 bytes. The adjacent raw collection root contains 67 MP4
+files / 310,738,262 bytes, but none is referenced by the v2.1 loader schema;
+they are therefore neither training inputs nor silently counted as the 66-file
+norm HDF5 bundle.
 
 The resulting real-source receipt covers exactly 69 files and
 4,321,599,931 bytes: 3 metadata files / 9,084 bytes, 66 parquet files /
@@ -133,6 +145,14 @@ requires artifact-bound A/B agreement, Ego action/grip evidence, matched-control
 collector evidence, and separate `allow_server_training` and
 `allow_5b_training` decisions. No true gate example is provided.
 
+Gate v3 additionally requires a reviewer-authored
+`evidence_valid_until_utc` and a 16-128 character `training_run_nonce` that
+must exactly equal `GWP_EGO_TRAINING_RUN_NONCE`. Expiry is a launch-admission
+deadline: it does not terminate an already admitted run. This is bounded
+freshness plus explicit launch binding, not a one-time-consumption ledger;
+reuse inside the deadline is allowed only when Git/data/config, the external
+gate, and the explicit nonce are all unchanged.
+
 The matched-control report must expose exactly one `dataset_id`. Both its
 scalar `dataset_id` and singleton `dataset_ids` list must equal the portable ID
 derived by the Stage1 preflight. The production gate must independently state
@@ -146,6 +166,14 @@ and hash schema. Every trace is reopened and hashed. Missing, replayed, or
 tampered artifacts fail. Null, partial, stale, or self-described expectations
 fail.
 
+The full preflight performs the current-HEAD and installed collector-source
+checks regardless of whether in-process collection is enabled. Every trusted
+JSON/JSONL is strict JSON (NaN, Infinity, `1e999`, strings and booleans cannot
+stand in for agreement numbers), and agreement values are checked for both
+physical range and threshold. Gate/report JSON, evidence CSVs, sidecar CSVs,
+build config, split and provenance are each parsed from the same no-follow
+bytes whose digest is checked.
+
 Optional in-process capture receives the portable dataset identity and that
 same expectation receipt from the preflight. On the enabled path it recomputes
 the effective hard-ST config hash, current Git commit and collector source hash,
@@ -156,6 +184,36 @@ before any config mutation or path creation. With
 `GWP_MATCHED_CONTROL_OUTPUT_DIR` unset, collector wiring returns before reading
 other collector variables, hashing files, resolving Git, mutating config,
 creating paths, or consuming RNG.
+
+When collection is enabled, a stdlib-only topology bootstrap runs before the
+full preflight and before importing the legacy config. It reads only the
+explicit gate JSON plus canonical ASCII-decimal `RANK`/`WORLD_SIZE`; a mismatch
+therefore fails before dataset/T5/norm/report hashing or config mutation. The
+disabled bootstrap performs no collector-artifact access.
+
+The full preflight passes record-only runtime receipts (absolute path plus
+SHA-256 and device/inode/mode/size/mtime/ctime) to each rank. Metadata,
+parquet, and video files are opened with no-follow and pinned by FD. HF parquet
+materialization reads those pinned descriptors; its content-keyed Arrow cache
+is force-built on first use, fully attested on reuse, then pinned too. Cache
+FDs are stat-checked immediately before and after each training item read, so
+in-place cache mutation fails. Fork workers inherit already verified FDs and
+perform one stat verification; spawn workers serialize no live FD and safely
+rehash/reopen once. There is no 69-file fstat loop per sample. T5, reviewed
+NPZ sidecars, and norm JSON are loaded from the exact verified bytes via
+`BytesIO`/in-memory JSON, so pathname replacement after verification cannot
+change the consumed payload.
+
+The cost is explicit: each rank streams SHA-256 over the 4.32 GB LeRobot
+source during full preflight and again when the actual loader pins it, plus the
+content-keyed Arrow cache on first admission. A spawned worker must reverify
+once; fork workers do not rehash. T5/sidecar caches and all receipt trust are
+process-local. Pinned source descriptors use a deterministic range beginning
+at FD 16384 so the Hugging Face cache key cannot drift with incidental open-FD
+order; production therefore requires a per-process `RLIMIT_NOFILE` above the
+highest selected source FD (16452 for the audited 69-file source) and fails
+closed if that range is unavailable. Runtime stat records never enter the
+portable dataset ID or matched-control config hash.
 
 ## Current decision
 

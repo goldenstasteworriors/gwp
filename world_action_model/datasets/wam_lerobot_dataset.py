@@ -1,5 +1,5 @@
+import io
 import json
-import hashlib
 import os
 import pickle
 import re
@@ -14,9 +14,36 @@ from world_action_model.contact_transition_schema import (
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
 )
+from world_action_model.verified_io import read_verified_bytes, strict_json_loads
 
 _SUBTASK_MARKER_RE = re.compile(r"\bsubtask\s*:\s*", flags=re.IGNORECASE)
 _T5_LOAD_FROM_CHOICES = ("dir", "pkl", "path")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_VERIFIED_STAT_KEYS = {
+    "device", "inode", "mode", "size_bytes", "mtime_ns", "ctime_ns"
+}
+
+
+def _validate_runtime_receipt_entry(
+    entry: object, *, expected_keys: set[str], name: str
+) -> dict:
+    if not isinstance(entry, dict) or set(entry) != expected_keys:
+        raise ValueError(f"invalid {name} receipt schema")
+    runtime_stat = entry.get("stat")
+    if (
+        not isinstance(entry.get("path_record_only"), str)
+        or not os.path.isabs(entry["path_record_only"])
+        or not isinstance(entry.get("sha256"), str)
+        or not _SHA256_RE.fullmatch(entry["sha256"])
+        or not isinstance(runtime_stat, dict)
+        or set(runtime_stat) != _VERIFIED_STAT_KEYS
+        or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in runtime_stat.values()
+        )
+    ):
+        raise ValueError(f"invalid {name} content/stat receipt")
+    return entry
 
 
 @register_dataset
@@ -40,6 +67,8 @@ class WAMLeRobotDataset(BaseDataset):
         contact_sidecar_require_reviewed_v1_1: bool = False,
         contact_sidecar_expected_meta_sha256: str | None = None,
         contact_sidecar_expected_episode_sha256: dict[str, str] | None = None,
+        training_source_runtime_receipt: list[dict] | None = None,
+        t5_runtime_source_receipt: list[dict] | None = None,
         matched_control_identity: bool = False,
         matched_control_dataset_id: str | None = None,
         meta_name: str | None = None,
@@ -67,6 +96,50 @@ class WAMLeRobotDataset(BaseDataset):
         self.t5_cache_size = int(t5_cache_size) if t5_cache_size is not None else 0
         self._t5_cache = {}
         self._t5_cache_order = []
+        self.training_source_runtime_receipt = list(
+            training_source_runtime_receipt or []
+        )
+        self.t5_runtime_source_receipt = list(t5_runtime_source_receipt or [])
+        for entry in self.training_source_runtime_receipt:
+            _validate_runtime_receipt_entry(
+                entry,
+                expected_keys={
+                    "logical_path", "logical_role", "path_record_only", "sha256", "stat"
+                },
+                name="LeRobot source",
+            )
+        seen_t5_paths = set()
+        for entry in self.t5_runtime_source_receipt:
+            entry = _validate_runtime_receipt_entry(
+                entry,
+                expected_keys={
+                    "logical_path", "logical_role", "episode_index",
+                    "path_record_only", "sha256", "stat",
+                },
+                name="T5 source",
+            )
+            episode_index = entry.get("episode_index")
+            filename = f"episode_{episode_index:06d}.pt" if (
+                not isinstance(episode_index, bool) and isinstance(episode_index, int)
+                and episode_index >= 0
+            ) else None
+            expected_path = (
+                None if filename is None or self.t5_load_from != "dir"
+                else os.path.abspath(os.path.join(self.t5_embedding_dir, filename))
+            )
+            if (
+                filename is None
+                or entry.get("logical_role") != "t5_episode_condition"
+                or entry.get("logical_path") != f"t5_embedding/{filename}"
+                or expected_path != os.path.abspath(entry["path_record_only"])
+                or expected_path in seen_t5_paths
+            ):
+                raise ValueError("invalid/duplicate T5 runtime source receipt")
+            seen_t5_paths.add(expected_path)
+        self._t5_receipt_by_path = {
+            os.path.abspath(str(entry.get("path_record_only"))): entry
+            for entry in self.t5_runtime_source_receipt
+        }
         self.contact_sidecar_dir = (
             None if contact_sidecar_dir is None else str(contact_sidecar_dir)
         )
@@ -94,12 +167,26 @@ class WAMLeRobotDataset(BaseDataset):
             self.matched_control_dataset_id = None
         if self.matched_control_identity:
             info_path = os.path.join(self.data_path, "meta", "info.json")
-            if not os.path.isfile(info_path):
-                raise FileNotFoundError(
-                    f"matched-control identity requires dataset metadata: {info_path}"
+            info_receipt = next(
+                (
+                    entry
+                    for entry in self.training_source_runtime_receipt
+                    if entry.get("logical_path") == "meta/info.json"
+                ),
+                None,
+            )
+            try:
+                info_bytes, _, _ = read_verified_bytes(
+                    info_path,
+                    expected_sha256=(info_receipt or {}).get("sha256"),
+                    expected_stat=(info_receipt or {}).get("stat"),
                 )
-            with open(info_path, "r", encoding="utf-8") as handle:
-                metadata_value = json.load(handle).get("dataset_id")
+                info_payload = strict_json_loads(info_bytes, name="LeRobot info")
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    "matched-control identity cannot verify dataset metadata"
+                ) from exc
+            metadata_value = info_payload.get("dataset_id")
             metadata_dataset_id = (
                 metadata_value.strip() if isinstance(metadata_value, str) else ""
             )
@@ -123,15 +210,27 @@ class WAMLeRobotDataset(BaseDataset):
                 raise ValueError(
                     "reviewed contact_segment_v1_1 requires a strict sidecar directory"
                 )
+            if (
+                not isinstance(self.contact_sidecar_expected_meta_sha256, str)
+                or not _SHA256_RE.fullmatch(self.contact_sidecar_expected_meta_sha256)
+                or not self.contact_sidecar_expected_episode_sha256
+                or any(
+                    not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
+                    for value in self.contact_sidecar_expected_episode_sha256.values()
+                )
+            ):
+                raise ValueError("reviewed sidecar requires exact preflight SHA receipts")
             meta_path = os.path.join(self.contact_sidecar_dir, "meta.json")
-            if not os.path.isfile(meta_path):
-                raise FileNotFoundError(f"missing reviewed contact sidecar meta: {meta_path}")
-            with open(meta_path, "rb") as handle:
-                meta_bytes = handle.read()
-            meta_digest = hashlib.sha256(meta_bytes).hexdigest()
-            if meta_digest != self.contact_sidecar_expected_meta_sha256:
-                raise ValueError("contact sidecar meta fingerprint differs from preflight")
-            meta = json.loads(meta_bytes.decode("utf-8"))
+            try:
+                meta_bytes, _, _ = read_verified_bytes(
+                    meta_path,
+                    expected_sha256=self.contact_sidecar_expected_meta_sha256,
+                )
+                meta = strict_json_loads(meta_bytes, name="reviewed sidecar meta")
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    "contact sidecar meta fingerprint differs from preflight"
+                ) from exc
             if (
                 meta.get("schema_version") != SEGMENT_SCHEMA_VERSION
                 or meta.get("target_dim") != SEGMENT_TARGET_DIM
@@ -200,14 +299,29 @@ class WAMLeRobotDataset(BaseDataset):
     def open(self) -> None:
         if self.dataset is None:
             repo_id = os.path.basename(self.data_path)
-            dataset_meta = _LeRobotDatasetMetadata(repo_id, root=self.data_path)
+            if self.training_source_runtime_receipt:
+                info_receipt = next(
+                    entry
+                    for entry in self.training_source_runtime_receipt
+                    if entry.get("logical_path") == "meta/info.json"
+                )
+                info_bytes, _, _ = read_verified_bytes(
+                    info_receipt["path_record_only"],
+                    expected_sha256=info_receipt["sha256"],
+                    expected_stat=info_receipt["stat"],
+                )
+                info_payload = strict_json_loads(info_bytes, name="LeRobot info")
+                dataset_fps = float(info_payload["fps"])
+            else:
+                dataset_meta = _LeRobotDatasetMetadata(repo_id, root=self.data_path)
+                dataset_fps = dataset_meta.fps
             delta_timestamps = {}
             if self.delta_info is not None:
                 for delta_name, delta_size in self.delta_info.items():
-                    delta_timestamps[delta_name] = [i / dataset_meta.fps for i in range(int(delta_size))]
+                    delta_timestamps[delta_name] = [i / dataset_fps for i in range(int(delta_size))]
             if self.delta_frames is not None:
                 for delta_name, frames in dict(self.delta_frames).items():
-                    delta_timestamps[delta_name] = [float(i) / dataset_meta.fps for i in frames]
+                    delta_timestamps[delta_name] = [float(i) / dataset_fps for i in frames]
             if self.delta_timestamps is not None:
                 for delta_name, stamps in dict(self.delta_timestamps).items():
                     delta_timestamps[delta_name] = [float(t) for t in stamps]
@@ -221,6 +335,7 @@ class WAMLeRobotDataset(BaseDataset):
                 repo_id,
                 root=self.data_path,
                 delta_timestamps=delta_timestamps,
+                verified_source_receipt=self.training_source_runtime_receipt or None,
                 **fast_kwargs,
             )
             if self.data_size is not None:
@@ -261,9 +376,22 @@ class WAMLeRobotDataset(BaseDataset):
     def _load_t5_from_path(self, path: str):
         if path in self._t5_cache:
             return self._t5_cache[path]
-        if not os.path.isfile(path):
+        receipt = self._t5_receipt_by_path.get(os.path.abspath(path))
+        if self.t5_runtime_source_receipt and receipt is None:
+            raise ValueError(f"missing preflight T5 receipt for {path}")
+        try:
+            payload, _, _ = read_verified_bytes(
+                path,
+                expected_sha256=(receipt or {}).get("sha256"),
+                expected_stat=(receipt or {}).get("stat"),
+            )
+        except (OSError, ValueError):
+            if self.t5_runtime_source_receipt:
+                raise
             return None
-        emb = self._extract_t5_embedding(torch.load(path, map_location="cpu"))
+        emb = self._extract_t5_embedding(
+            torch.load(io.BytesIO(payload), map_location="cpu")
+        )
         if self.t5_cache_size > 0:
             self._t5_cache[path] = emb
             self._t5_cache_order.append(path)
@@ -283,13 +411,18 @@ class WAMLeRobotDataset(BaseDataset):
         return self._load_t5_from_path(str(entry.get("t5_embedding_path", "") or ""))
 
     def _load_robotype(self):
-        for name in ('info.json', 'info.yaml', 'info.yml'):
-            path = os.path.join(self.data_path, 'meta', name)
-            if os.path.isfile(path):
-                info = utils.load_file(path)
-                break
+        if self.training_source_runtime_receipt and self.dataset is not None:
+            info = self.dataset.meta.info
+            if not isinstance(info, dict):
+                raise ValueError("verified LeRobot metadata is not an object")
         else:
-            raise FileNotFoundError(f"missing meta/info.(json|yaml|yml) under {self.data_path}")
+            for name in ('info.json', 'info.yaml', 'info.yml'):
+                path = os.path.join(self.data_path, 'meta', name)
+                if os.path.isfile(path):
+                    info = utils.load_file(path)
+                    break
+            else:
+                raise FileNotFoundError(f"missing meta/info.(json|yaml|yml) under {self.data_path}")
         for key in ('robotype', 'robot_type', 'robot', 'robot_name', 'robot_model'):
             if key in info:
                 robotype = info[key]
@@ -328,6 +461,9 @@ class WAMLeRobotDataset(BaseDataset):
 
     def close(self) -> None:
         if self.dataset is not None:
+            close_verified = getattr(self.dataset, "close_verified_sources", None)
+            if close_verified is not None:
+                close_verified()
             self.dataset = None
         self._prompt_t5_lookup = None
         self._fixed_t5_embedding = None
@@ -338,6 +474,8 @@ class WAMLeRobotDataset(BaseDataset):
         super().close()
 
     def __len__(self) -> int:
+        if self.training_source_runtime_receipt and self.dataset is None:
+            self.open()
         if self.data_size is None:
             self.data_size = self._get_metadata_data_size()
         if self.data_size is None:
@@ -384,13 +522,16 @@ class WAMLeRobotDataset(BaseDataset):
             )
             if expected_digest is None:
                 raise ValueError(f"missing preflight NPZ fingerprint for {path}")
-            digest = hashlib.sha256()
-            with open(path, "rb") as handle:
-                for block in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(block)
-            if digest.hexdigest() != expected_digest:
-                raise ValueError(f"contact sidecar NPZ changed after preflight: {path}")
-        with np.load(path, allow_pickle=False) as archive:
+        else:
+            expected_digest = None
+        try:
+            payload, _, _ = read_verified_bytes(
+                path,
+                expected_sha256=expected_digest,
+            )
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"contact sidecar NPZ changed after preflight: {path}") from exc
+        with np.load(io.BytesIO(payload), allow_pickle=False) as archive:
             sidecar = {key: archive[key] for key in archive.files}
         required = {
             "contact_target",

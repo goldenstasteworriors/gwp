@@ -29,12 +29,39 @@ CONFIG_HASH_SCOPE = {
     ),
 }
 
+_RUNTIME_RECEIPT_CONFIG_KEYS = {
+    "training_source_runtime_receipt",
+    "t5_runtime_source_receipt",
+    "runtime_stat_record_only",
+}
+
+
+def _portable_config_hash_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _portable_config_hash_value(item)
+            for key, item in value.items()
+            if key not in _RUNTIME_RECEIPT_CONFIG_KEYS
+        }
+    if isinstance(value, list):
+        return [_portable_config_hash_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_portable_config_hash_value(item) for item in value)
+    return value
+
 
 def _required_environment(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
         raise ValueError(f"{name} is required when matched-control capture is enabled")
     return value
+
+
+def _required_ascii_decimal_environment(name: str) -> int:
+    value = _required_environment(name)
+    if not re.fullmatch(r"[0-9]+", value, flags=re.ASCII):
+        raise ValueError(f"{name} must be a canonical non-negative base-10 integer")
+    return int(value)
 
 
 def _file_sha256(path: str | os.PathLike[str]) -> str:
@@ -224,11 +251,8 @@ def _runtime_topology_from_environment(
 ) -> dict[str, int]:
     """Read/compare launcher identity before config or filesystem inspection."""
 
-    try:
-        rank = int(_required_environment("RANK"))
-        world_size = int(_required_environment("WORLD_SIZE"))
-    except ValueError as exc:
-        raise ValueError("RANK and WORLD_SIZE must be base-10 integers") from exc
+    rank = _required_ascii_decimal_environment("RANK")
+    world_size = _required_ascii_decimal_environment("WORLD_SIZE")
     if world_size <= 0 or rank < 0 or rank >= world_size:
         raise ValueError(f"invalid runtime topology rank={rank}, world_size={world_size}")
     if expected_world_size is not None or expected_rank_set is not None:
@@ -330,7 +354,7 @@ def configure_matched_control_from_environment(
         raise ValueError(
             "GWP_MATCHED_CONTROL_VARIANT_ID differs from the effective config variant"
         )
-    seed = int(_required_environment("GWP_MATCHED_CONTROL_SEED"))
+    seed = _required_ascii_decimal_environment("GWP_MATCHED_CONTROL_SEED")
     if seed not in ALLOWED_SEEDS:
         raise ValueError(f"GWP_MATCHED_CONTROL_SEED must be one of {ALLOWED_SEEDS}")
 
@@ -358,8 +382,8 @@ def configure_matched_control_from_environment(
             "sampler": config["dataloaders"]["train"].get("sampler"),
             "batch_sampler": config["dataloaders"]["train"].get("batch_sampler"),
         },
-        "dataset_configs": dataset_configs,
-        "transform": transform,
+        "dataset_configs": _portable_config_hash_value(dataset_configs),
+        "transform": _portable_config_hash_value(transform),
         "norm_files": norm_fingerprints,
         "train_controls": {
             "gradient_accumulation_steps": config["train"].get(

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-import csv
+from datetime import datetime, timezone
 import hashlib
+import io
 import json
+import math
 import os
 from pathlib import Path
 import re
+import subprocess
 
 import numpy as np
 
@@ -39,15 +42,21 @@ from world_action_model.ego_dataset_fingerprint import (
     derive_ego_dataset_identity,
     derive_ego_t5_source_receipt,
 )
+import world_action_model.matched_control_hashes as matched_control_hashes
 from world_action_model.matched_control_hashes import (
     COLLECTOR_VERSION,
     HASH_SCHEMA,
     IMPLEMENTED_RUNNER_VARIANTS,
     canonical_sha256,
 )
+from world_action_model.verified_io import (
+    hash_verified_regular_file,
+    read_verified_bytes,
+    strict_json_loads,
+)
 
 
-EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v2"
+EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v3"
 REQUIRED_GATE_FLAGS = (
     "human_adjudicated_sidecar_passed",
     "dual_annotation_agreement_passed",
@@ -69,9 +78,14 @@ REQUIRED_ENV_PATHS = (
     "GWP_CONTACT_BUILD_CONFIG",
     "GWP_CONTACT_SPLIT_MANIFEST",
     "GWP_EGO_STAGE1_TRAINING_GATE",
+    "GWP_EGO_TRAINING_RUN_NONCE",
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_NONCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}$")
+_UTC_DEADLINE_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
+)
 REVIEWED_BUILDER_ID = "scripts/contact_labels/build_contact_segment_sidecars_v1_1.py"
 REQUIRED_SIDECAR_KEYS = (
     "contact_target", "contact_loss_mask", "contact_confidence", "contact_condition_mask"
@@ -82,12 +96,17 @@ class ContactEgoStage1PreflightError(ValueError):
     pass
 
 
+def _is_finite_json_number(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and (not isinstance(value, float) or math.isfinite(value))
+    )
+
+
 def sha256_file(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).resolve().open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    digest, _ = hash_verified_regular_file(path)
+    return digest
 
 
 def validate_contact_sidecar_arrays(arrays: Mapping[str, np.ndarray], *, frame_count: int | None = None) -> None:
@@ -137,13 +156,37 @@ def validate_contact_sidecar_arrays(arrays: Mapping[str, np.ndarray], *, frame_c
 
 
 def _load_json(path: str | Path, name: str) -> dict:
-    resolved = Path(path).resolve()
-    if not resolved.is_file():
-        raise ContactEgoStage1PreflightError(f"missing {name}: {resolved}")
-    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    try:
+        payload_bytes, _, _ = read_verified_bytes(path)
+        payload = strict_json_loads(payload_bytes, name=name)
+    except (OSError, ValueError) as exc:
+        raise ContactEgoStage1PreflightError(f"invalid or unsafe {name}: {path}") from exc
     if not isinstance(payload, dict):
         raise ContactEgoStage1PreflightError(f"{name} must be a JSON object")
     return payload
+
+
+def _load_json_with_digest(path: str | Path, name: str) -> tuple[dict, str]:
+    try:
+        payload_bytes, digest, _ = read_verified_bytes(path)
+        payload = strict_json_loads(payload_bytes, name=name)
+    except (OSError, ValueError) as exc:
+        raise ContactEgoStage1PreflightError(f"invalid or unsafe {name}: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ContactEgoStage1PreflightError(f"{name} must be a JSON object")
+    return payload, digest
+
+
+def _read_verified_csv(
+    path: str | Path, fields: tuple[str, ...] | list[str], name: str
+) -> tuple[list[dict[str, str]], str]:
+    path = Path(path)
+    try:
+        payload, digest, _ = read_verified_bytes(path)
+        rows = read_csv_exact(path, fields, payload=payload)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ContactEgoStage1PreflightError(f"invalid or unsafe {name}: {path}") from exc
+    return rows, digest
 
 
 def _validate_reviewed_meta(meta: Mapping) -> None:
@@ -170,17 +213,20 @@ def _validate_reviewed_meta(meta: Mapping) -> None:
         "automatic_or_proposal_ground_truth": False,
     }:
         raise ContactEgoStage1PreflightError("sidecar is not human-adjudicated reviewed GT")
-    if int(meta.get("reviewed_coverage_rows", 0)) <= 0:
+    reviewed_rows = meta.get("reviewed_coverage_rows")
+    if isinstance(reviewed_rows, bool) or not isinstance(reviewed_rows, int) or reviewed_rows <= 0:
         raise ContactEgoStage1PreflightError("sidecar has no reviewed coverage")
-    if int(meta.get("unique_physical_segments", 0)) <= 0:
+    segment_count = meta.get("unique_physical_segments")
+    if isinstance(segment_count, bool) or not isinstance(segment_count, int) or segment_count <= 0:
         raise ContactEgoStage1PreflightError("sidecar has no physical segments")
     expected_slices = {key: [value.start, value.stop] for key, value in SEGMENT_FIELD_SLICES.items()}
     if meta.get("field_slices") != expected_slices:
         raise ContactEgoStage1PreflightError("sidecar field_slices differ from v1.1")
 
 
-def _validate_group_metadata(inventory_path: Path) -> dict[int, dict[str, str]]:
-    rows = read_csv_exact(inventory_path, INVENTORY_FIELDS)
+def _validate_group_metadata(
+    rows: list[dict[str, str]],
+) -> dict[int, dict[str, str]]:
     required = (
         "subject_id",
         "session_id",
@@ -202,7 +248,7 @@ def _validate_group_metadata(inventory_path: Path) -> dict[int, dict[str, str]]:
 
 
 def _validate_split_manifest(
-    path: Path,
+    rows: list[dict[str, str]],
     inventory: Mapping[int, object],
     inventory_rows: Mapping[int, Mapping[str, str]],
     split_policy: Mapping,
@@ -212,11 +258,8 @@ def _validate_split_manifest(
         "seed_8888_split", "split_unit", "split_purpose", "ood_eligible",
         "strategy_claim_allowed", "metadata_status",
     ]
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames != expected_header:
-            raise ContactEgoStage1PreflightError("split manifest header mismatch")
-        rows = list(reader)
+    if any(set(row) != set(expected_header) for row in rows):
+        raise ContactEgoStage1PreflightError("split manifest header mismatch")
     fields_by_seed = split_policy.get("group_fields_by_seed")
     allowed = {
         "subject_id", "session_id", "operator_id", "source_object_instance_id",
@@ -264,18 +307,31 @@ def validate_ego_reviewed_sidecar_bundle(
     *, sidecar_dir: str | Path, coverage_csv: str | Path, segments_csv: str | Path,
     inventory_csv: str | Path, build_config_path: str | Path, split_manifest: str | Path,
 ) -> dict:
-    sidecar_dir = Path(sidecar_dir).resolve()
+    sidecar_dir = Path(sidecar_dir).absolute()
     coverage_csv, segments_csv, inventory_csv = map(
-        lambda value: Path(value).resolve(), (coverage_csv, segments_csv, inventory_csv)
+        lambda value: Path(value).absolute(), (coverage_csv, segments_csv, inventory_csv)
     )
-    build_config_path, split_manifest = Path(build_config_path).resolve(), Path(split_manifest).resolve()
+    build_config_path = Path(build_config_path).absolute()
+    split_manifest = Path(split_manifest).absolute()
+    if sidecar_dir.is_symlink() or not sidecar_dir.is_dir():
+        raise ContactEgoStage1PreflightError(
+            "reviewed sidecar directory must be a real directory"
+        )
     for path in (sidecar_dir, coverage_csv, segments_csv, inventory_csv, build_config_path, split_manifest):
         if not path.exists():
             raise ContactEgoStage1PreflightError(f"missing sidecar artifact: {path}")
     meta_path = sidecar_dir / "meta.json"
-    meta = _load_json(meta_path, "sidecar meta")
+    try:
+        meta_bytes, meta_digest, _ = read_verified_bytes(meta_path)
+        meta = strict_json_loads(meta_bytes, name="sidecar meta")
+    except (OSError, ValueError) as exc:
+        raise ContactEgoStage1PreflightError("invalid or unsafe sidecar meta") from exc
+    if not isinstance(meta, dict):
+        raise ContactEgoStage1PreflightError("sidecar meta must be a JSON object")
     _validate_reviewed_meta(meta)
-    config = _load_json(build_config_path, "sidecar build config")
+    config, config_digest = _load_json_with_digest(
+        build_config_path, "sidecar build config"
+    )
     expected_config = {
         "sidecar_schema_version": SEGMENT_SCHEMA_VERSION,
         "accepted_annotation_role": "adjudicated",
@@ -295,20 +351,49 @@ def validate_ego_reviewed_sidecar_bundle(
     split_policy = config.get("split_policy")
     if not isinstance(split_policy, Mapping) or split_policy.get("strategy_claim_allowed") is not True:
         raise ContactEgoStage1PreflightError("sidecar build config is diagnostic/strategy=false")
-    inventory = load_inventory(inventory_csv)
-    inventory_rows = _validate_group_metadata(inventory_csv)
-    _validate_split_manifest(split_manifest, inventory, inventory_rows, split_policy)
-    coverages = load_coverages(coverage_csv, inventory, config)
-    segments = load_segments(segments_csv, inventory, coverages, config)
+    inventory_csv_rows, inventory_digest = _read_verified_csv(
+        inventory_csv, INVENTORY_FIELDS, "inventory CSV"
+    )
+    coverage_csv_rows, coverage_digest = _read_verified_csv(
+        coverage_csv, COVERAGE_FIELDS, "coverage CSV"
+    )
+    segments_csv_rows, segments_digest = _read_verified_csv(
+        segments_csv, SEGMENT_FIELDS, "segments CSV"
+    )
+    split_fields = (
+        "episode_id", "length_frames", "seed_6666_split", "seed_7777_split",
+        "seed_8888_split", "split_unit", "split_purpose", "ood_eligible",
+        "strategy_claim_allowed", "metadata_status",
+    )
+    split_rows, split_digest = _read_verified_csv(
+        split_manifest, split_fields, "split manifest"
+    )
+    inventory = load_inventory(inventory_csv, rows=inventory_csv_rows)
+    inventory_rows = _validate_group_metadata(inventory_csv_rows)
+    _validate_split_manifest(split_rows, inventory, inventory_rows, split_policy)
+    coverages = load_coverages(
+        coverage_csv, inventory, config, rows=coverage_csv_rows
+    )
+    segments = load_segments(
+        segments_csv, inventory, coverages, config, rows=segments_csv_rows
+    )
     if len(segments) != int(meta["unique_physical_segments"]):
         raise ContactEgoStage1PreflightError("segment count differs from meta")
-    source_paths = {
-        "coverage_csv": coverage_csv, "segments_csv": segments_csv,
-        "inventory_csv": inventory_csv, "config": build_config_path,
-        "split_manifest": split_manifest,
+    source_digests = {
+        "coverage_csv": coverage_digest,
+        "segments_csv": segments_digest,
+        "inventory_csv": inventory_digest,
+        "config": config_digest,
+        "split_manifest": split_digest,
     }
     hashes = meta.get("input_sha256")
-    if not isinstance(hashes, Mapping) or any(hashes.get(k) != sha256_file(v) for k, v in source_paths.items()):
+    if (
+        not isinstance(hashes, Mapping)
+        or set(hashes) != set(source_digests)
+        or any(
+        hashes.get(key) != digest for key, digest in source_digests.items()
+        )
+    ):
         raise ContactEgoStage1PreflightError("sidecar source CSV/config/split fingerprint differs")
     by_coverage = {episode: [] for episode in inventory}
     by_segment = {episode: [] for episode in inventory}
@@ -319,9 +404,17 @@ def validate_ego_reviewed_sidecar_bundle(
     expected_files = {f"episode_{episode:06d}.npz" for episode in inventory}
     if {path.name for path in sidecar_dir.glob("episode_*.npz")} != expected_files:
         raise ContactEgoStage1PreflightError("sidecar episode file set differs")
-    episode_hashes = {name: sha256_file(sidecar_dir / name) for name in sorted(expected_files)}
-    if meta.get("episode_npz_sha256") != episode_hashes:
+    declared_episode_hashes = meta.get("episode_npz_sha256")
+    if (
+        not isinstance(declared_episode_hashes, Mapping)
+        or set(declared_episode_hashes) != expected_files
+        or any(
+            not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
+            for value in declared_episode_hashes.values()
+        )
+    ):
         raise ContactEgoStage1PreflightError("sidecar NPZ hash differs")
+    episode_hashes = {}
     provenance = []
     for episode, item in sorted(inventory.items()):
         expected_arrays, rows = encode_episode(
@@ -329,21 +422,33 @@ def validate_ego_reviewed_sidecar_bundle(
             horizon_frames=48, num_queries=12,
             negative_confidence=float(config["negative_confidence"]),
         )
-        with np.load(sidecar_dir / f"episode_{episode:06d}.npz", allow_pickle=False) as archive:
+        name = f"episode_{episode:06d}.npz"
+        try:
+            payload, digest, _ = read_verified_bytes(
+                sidecar_dir / name,
+                expected_sha256=declared_episode_hashes[name],
+            )
+        except (OSError, ValueError) as exc:
+            raise ContactEgoStage1PreflightError(
+                f"sidecar NPZ hash differs: {name}"
+            ) from exc
+        episode_hashes[name] = digest
+        with np.load(io.BytesIO(payload), allow_pickle=False) as archive:
             actual = {key: archive[key] for key in archive.files}
         validate_contact_sidecar_arrays(actual, frame_count=item.length_frames)
         if any(not np.array_equal(actual[key], expected_arrays[key]) for key in REQUIRED_SIDECAR_KEYS):
             raise ContactEgoStage1PreflightError("sidecar differs from full reviewed re-encoding")
         provenance.extend({"episode_id": str(episode), **{k: str(v) for k, v in row.items()}} for row in rows)
     provenance_path = sidecar_dir / "window_segment_provenance.csv"
-    with provenance_path.open(encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames != ["episode_id", "frame_index", "query_index", "segment_id", "onset_event_id", "release_event_id"]:
-            raise ContactEgoStage1PreflightError("provenance header mismatch")
-        actual_provenance = list(reader)
+    provenance_fields = (
+        "episode_id", "frame_index", "query_index", "segment_id",
+        "onset_event_id", "release_event_id",
+    )
+    actual_provenance, provenance_digest = _read_verified_csv(
+        provenance_path, provenance_fields, "window provenance CSV"
+    )
     if actual_provenance != provenance:
         raise ContactEgoStage1PreflightError("window provenance differs from physical segment assignment")
-    provenance_digest = sha256_file(provenance_path)
     if meta.get("window_segment_provenance_sha256") != provenance_digest:
         raise ContactEgoStage1PreflightError("provenance hash differs")
     bundle_digest = hashlib.sha256(json.dumps({
@@ -355,8 +460,9 @@ def validate_ego_reviewed_sidecar_bundle(
     return {
         "dataset_id": config["dataset_id"], "episode_lengths": {k: int(v.length_frames) for k, v in inventory.items()},
         "episode_count": len(inventory), "independent_segment_count": len(segments),
-        "episode_npz_sha256": episode_hashes, "meta_sha256": sha256_file(meta_path),
-        "bundle_sha256": bundle_digest, "split_sha256": sha256_file(split_manifest), "meta": meta,
+        "episode_npz_sha256": episode_hashes, "meta_sha256": meta_digest,
+        "bundle_sha256": bundle_digest, "split_sha256": split_digest, "meta": meta,
+        "source_sha256": source_digests,
     }
 
 
@@ -416,6 +522,12 @@ def _validate_norm(payload: Mapping, identity: Mapping, hdf5_dir: Path) -> str:
     weights = metadata.get("action_loss_weight")
     if (
         not isinstance(weights, Mapping)
+        or set(weights) != {
+            "dimensions_0_17",
+            "grip_proxy_dimensions_18_19",
+            "padding_dimensions_20_31",
+        }
+        or any(not _is_finite_json_number(value) for value in weights.values())
         or weights.get("dimensions_0_17") != 1.0
         or weights.get("grip_proxy_dimensions_18_19") != 0.25
         or weights.get("padding_dimensions_20_31") != 0.0
@@ -431,9 +543,13 @@ def _validate_norm(payload: Mapping, identity: Mapping, hdf5_dir: Path) -> str:
             raise ContactEgoStage1PreflightError("invalid norm feature")
         for name in ("mean", "std", "min", "max", "q01", "q99"):
             values = feature.get(name)
-            if not isinstance(values, list) or len(values) != 32 or not np.isfinite(values).all():
+            if (
+                not isinstance(values, list)
+                or len(values) != 32
+                or any(not _is_finite_json_number(value) for value in values)
+            ):
                 raise ContactEgoStage1PreflightError("norm arrays must be finite 32-D")
-            if any(float(value) != 0.0 for value in values[20:]):
+            if any(value != 0 for value in values[20:]):
                 raise ContactEgoStage1PreflightError("norm padded dimensions must be exact zero")
     expected_files = {f"episode_{episode}.hdf5" for episode in identity["episode_lengths"]}
     actual_files = {path.name for path in hdf5_dir.glob("episode_*.hdf5")}
@@ -451,16 +567,176 @@ def _validate_norm(payload: Mapping, identity: Mapping, hdf5_dir: Path) -> str:
 
 
 def _resolve_report(gate_path: Path, entry: Mapping, name: str) -> tuple[Path, dict, str]:
-    if not isinstance(entry, Mapping) or not isinstance(entry.get("path"), str) or not entry["path"]:
+    if (
+        not isinstance(entry, Mapping)
+        or set(entry) != {"path", "sha256"}
+        or not isinstance(entry.get("path"), str)
+        or not entry["path"]
+        or not isinstance(entry.get("sha256"), str)
+        or not _SHA256_RE.fullmatch(entry["sha256"])
+    ):
         raise ContactEgoStage1PreflightError(f"missing evidence report: {name}")
     path = Path(entry["path"])
     if not path.is_absolute():
         path = gate_path.parent / path
-    path = path.resolve()
-    digest = sha256_file(path)
-    if entry.get("sha256") != digest:
-        raise ContactEgoStage1PreflightError(f"evidence report hash differs: {name}")
-    return path, _load_json(path, name), digest
+    path = Path(os.path.abspath(path))
+    try:
+        payload_bytes, digest, _ = read_verified_bytes(
+            path,
+            expected_sha256=entry.get("sha256"),
+        )
+        payload = strict_json_loads(payload_bytes, name=name)
+    except (OSError, ValueError) as exc:
+        raise ContactEgoStage1PreflightError(
+            f"evidence report hash/JSON differs: {name}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ContactEgoStage1PreflightError(f"{name} must be a JSON object")
+    return path, payload, digest
+
+
+def _current_git_commit(start: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ContactEgoStage1PreflightError(
+            "cannot resolve current Git commit for Stage1 evidence binding"
+        ) from exc
+    commit = result.stdout.strip()
+    if not _GIT_COMMIT_RE.fullmatch(commit):
+        raise ContactEgoStage1PreflightError("current Git commit is not a full SHA-1")
+    return commit
+
+
+def _head_blob_sha256(source_path: Path) -> str:
+    try:
+        root_result = subprocess.run(
+            ["git", "-C", str(source_path.parent), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        repo_root = Path(root_result.stdout.strip())
+        relative = source_path.relative_to(repo_root).as_posix()
+        blob = subprocess.run(
+            ["git", "-C", str(repo_root), "show", f"HEAD:{relative}"],
+            check=True,
+            capture_output=True,
+        ).stdout
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        raise ContactEgoStage1PreflightError(
+            "cannot bind installed collector bytes to the current HEAD tree"
+        ) from exc
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _validate_gate_freshness_and_training_nonce(
+    gate: Mapping, *, training_run_nonce: str
+) -> None:
+    gate_nonce = gate.get("training_run_nonce")
+    if not isinstance(training_run_nonce, str) or not _NONCE_RE.fullmatch(
+        training_run_nonce
+    ):
+        raise ContactEgoStage1PreflightError(
+            "GWP_EGO_TRAINING_RUN_NONCE must be an explicit audit nonce"
+        )
+    if gate_nonce != training_run_nonce or not isinstance(gate_nonce, str) or not _NONCE_RE.fullmatch(
+        gate_nonce
+    ):
+        raise ContactEgoStage1PreflightError(
+            "runtime training nonce differs from the reviewer-authored gate"
+        )
+    valid_until = gate.get("evidence_valid_until_utc")
+    if not isinstance(valid_until, str) or not _UTC_DEADLINE_RE.fullmatch(valid_until):
+        raise ContactEgoStage1PreflightError("gate evidence expiry must be UTC with Z suffix")
+    try:
+        expiry = datetime.fromisoformat(valid_until[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ContactEgoStage1PreflightError("invalid gate evidence expiry") from exc
+    if expiry.tzinfo is None or expiry.utcoffset() != timezone.utc.utcoffset(None):
+        raise ContactEgoStage1PreflightError("gate evidence expiry is not UTC")
+    if expiry <= _utc_now():
+        raise ContactEgoStage1PreflightError("training gate evidence has expired")
+
+
+def _validate_agreement_metrics(metrics: object) -> bool:
+    thresholds = {
+        "coverage_kappa": ("min", 0.70, -1.0, 1.0),
+        "event_f1": ("min", 0.80, 0.0, 1.0),
+        "median_temporal_iou": ("min", 0.70, 0.0, 1.0),
+        "boundary_mae_frames": ("max", 2.0, 0.0, math.inf),
+        "categorical_kappa": ("min", 0.60, -1.0, 1.0),
+    }
+    if not isinstance(metrics, Mapping) or set(metrics) != set(thresholds):
+        return False
+    for name, (direction, threshold, lower, upper) in thresholds.items():
+        value = metrics[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))
+        ):
+            return False
+        if value < lower or value > upper:
+            return False
+        if (direction == "min" and value < threshold) or (
+            direction == "max" and value > threshold
+        ):
+            return False
+    return True
+
+
+def _validate_loaded_gate_runtime_topology(gate: Mapping) -> None:
+    expectations = gate.get("matched_control_expectations")
+    if not isinstance(expectations, Mapping):
+        raise ContactEgoStage1PreflightError(
+            "training gate lacks matched-control topology"
+        )
+    expected_world_size = expectations.get("expected_world_size")
+    expected_rank_set = expectations.get("expected_rank_set")
+    if (
+        isinstance(expected_world_size, bool)
+        or not isinstance(expected_world_size, int)
+        or expected_world_size <= 0
+        or not isinstance(expected_rank_set, list)
+        or any(
+            isinstance(rank, bool) or not isinstance(rank, int)
+            for rank in expected_rank_set
+        )
+        or expected_rank_set != list(range(expected_world_size))
+    ):
+        raise ContactEgoStage1PreflightError(
+            "training gate matched-control topology is invalid"
+        )
+    rank_text = os.environ.get("RANK", "").strip()
+    world_text = os.environ.get("WORLD_SIZE", "").strip()
+    if not re.fullmatch(r"[0-9]+", rank_text, flags=re.ASCII) or not re.fullmatch(
+        r"[0-9]+", world_text, flags=re.ASCII
+    ):
+        raise ContactEgoStage1PreflightError(
+            "RANK/WORLD_SIZE must be canonical ASCII-decimal integers"
+        )
+    rank = int(rank_text)
+    world_size = int(world_text)
+    if (
+        world_size <= 0
+        or rank < 0
+        or rank >= world_size
+        or world_size != expected_world_size
+        or rank not in expected_rank_set
+    ):
+        raise ContactEgoStage1PreflightError(
+            "runtime topology differs from the loaded training gate"
+        )
 
 
 def _validate_matched_control_expectations(gate: Mapping) -> dict:
@@ -592,6 +868,25 @@ def _validate_matched_control_expectations(gate: Mapping) -> dict:
         or not _SHA256_RE.fullmatch(collector_source_sha256)
     ):
         raise ContactEgoStage1PreflightError("invalid expected collector source hash")
+    installed_source = Path(matched_control_hashes.__file__).absolute()
+    try:
+        installed_source_sha256, _ = hash_verified_regular_file(installed_source)
+    except (OSError, ValueError) as exc:
+        raise ContactEgoStage1PreflightError(
+            "cannot verify installed matched-control collector source"
+        ) from exc
+    if installed_source_sha256 != collector_source_sha256:
+        raise ContactEgoStage1PreflightError(
+            "expected collector source differs from installed source bytes"
+        )
+    if _head_blob_sha256(installed_source) != installed_source_sha256:
+        raise ContactEgoStage1PreflightError(
+            "installed collector source has uncommitted bytes outside current HEAD"
+        )
+    if _current_git_commit(installed_source.parent) != git_commit:
+        raise ContactEgoStage1PreflightError(
+            "expected matched-control Git commit differs from current HEAD"
+        )
     return {
         "expected_git_commit": git_commit,
         "expected_run_id": run_id,
@@ -610,16 +905,36 @@ def _validate_matched_control_expectations(gate: Mapping) -> dict:
     }
 
 
-def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id: str) -> dict:
+def _validate_gate(
+    gate: Mapping,
+    expected: Mapping,
+    gate_path: Path,
+    dataset_id: str,
+    *,
+    training_run_nonce: str,
+) -> dict:
     if gate.get("gate_version") != EGO_STAGE1_GATE_VERSION:
         raise ContactEgoStage1PreflightError("training gate version differs")
+    _validate_gate_freshness_and_training_nonce(
+        gate,
+        training_run_nonce=training_run_nonce,
+    )
     failed = [name for name in REQUIRED_GATE_FLAGS if gate.get(name) is not True]
     if failed:
         raise ContactEgoStage1PreflightError(f"training gates not explicitly true: {failed}")
-    if gate.get("independent_segment_count") != expected["independent_segment_count"]:
+    gate_segment_count = gate.get("independent_segment_count")
+    if (
+        isinstance(gate_segment_count, bool)
+        or not isinstance(gate_segment_count, int)
+        or gate_segment_count != expected["independent_segment_count"]
+    ):
         raise ContactEgoStage1PreflightError("gate segment count differs")
     fingerprints = gate.get("artifact_fingerprints")
-    if not isinstance(fingerprints, Mapping):
+    expected_fingerprint_keys = set(expected) - {"independent_segment_count"}
+    if (
+        not isinstance(fingerprints, Mapping)
+        or set(fingerprints) != expected_fingerprint_keys
+    ):
         raise ContactEgoStage1PreflightError("gate lacks artifact fingerprints")
     for key, value in expected.items():
         if key == "independent_segment_count":
@@ -654,36 +969,50 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
         or annotation.get("independent_annotation") is not True
         or annotation.get("adjudication_completed") is not True
         or annotation.get("dual_annotation_agreement_passed") is not True
+        or isinstance(annotation.get("independent_segment_count"), bool)
+        or not isinstance(annotation.get("independent_segment_count"), int)
         or annotation.get("independent_segment_count") != expected["independent_segment_count"]
-        or not isinstance(metrics, Mapping)
-        or float(metrics.get("coverage_kappa", -1)) < .70
-        or float(metrics.get("event_f1", -1)) < .80
-        or float(metrics.get("median_temporal_iou", -1)) < .70
-        or float(metrics.get("boundary_mae_frames", 1e9)) > 2
-        or float(metrics.get("categorical_kappa", -1)) < .60
+        or not _validate_agreement_metrics(metrics)
     ):
         raise ContactEgoStage1PreflightError("A/B agreement evidence failed")
     sources = annotation.get("source_files")
     required_sources = {f"{kind}_{role}" for kind in ("coverage", "segments") for role in ("annotator_a", "annotator_b", "adjudicated")}
     if not isinstance(sources, Mapping) or set(sources) != required_sources:
         raise ContactEgoStage1PreflightError("annotation evidence sources incomplete")
-    source_paths, source_hashes = {}, {}
+    source_hashes, source_rows = {}, {}
     for name, entry in sources.items():
-        if not isinstance(entry, Mapping) or not isinstance(entry.get("path"), str):
+        if (
+            not isinstance(entry, Mapping)
+            or set(entry) != {"path", "sha256"}
+            or not isinstance(entry.get("path"), str)
+            or not entry["path"]
+            or not isinstance(entry.get("sha256"), str)
+            or not _SHA256_RE.fullmatch(entry["sha256"])
+        ):
             raise ContactEgoStage1PreflightError("invalid annotation evidence source")
         path = Path(entry["path"])
         if not path.is_absolute(): path = annotation_path.parent / path
-        path = path.resolve(); digest = sha256_file(path)
-        if entry.get("sha256") != digest: raise ContactEgoStage1PreflightError("annotation source hash differs")
-        source_paths[name], source_hashes[name] = path, digest
+        path = Path(os.path.abspath(path))
+        fields = COVERAGE_FIELDS if name.startswith("coverage_") else SEGMENT_FIELDS
+        try:
+            payload, digest, _ = read_verified_bytes(
+                path, expected_sha256=entry["sha256"]
+            )
+            rows = read_csv_exact(path, fields, payload=payload)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ContactEgoStage1PreflightError(
+                "annotation source hash/content differs"
+            ) from exc
+        source_hashes[name] = digest
+        source_rows[name] = rows
     if source_hashes["coverage_adjudicated"] != expected["coverage_csv_sha256"] or source_hashes["segments_adjudicated"] != expected["segments_csv_sha256"]:
         raise ContactEgoStage1PreflightError("agreement report binds different adjudicated CSVs")
     if len(set(source_hashes.values())) != len(source_hashes):
         raise ContactEgoStage1PreflightError("A/B/adjudicated source files are not independent")
     annotators = {}
     for suffix, role in (("annotator_a", "independent_a"), ("annotator_b", "independent_b")):
-        coverage_rows = read_csv_exact(source_paths[f"coverage_{suffix}"], COVERAGE_FIELDS)
-        rows = coverage_rows + read_csv_exact(source_paths[f"segments_{suffix}"], SEGMENT_FIELDS)
+        coverage_rows = source_rows[f"coverage_{suffix}"]
+        rows = coverage_rows + source_rows[f"segments_{suffix}"]
         if not rows or any(
             row["annotation_role"] != role or row["label_origin"] != "human_independent"
             or row["review_status"] != "submitted" or row["schema_version"] != "contact_segment_annotation_v1_1"
@@ -695,16 +1024,26 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
         raise ContactEgoStage1PreflightError("A/B annotator identities overlap")
     _, grip, grip_digest = reports["ego_action_grip"]
     source_evidence = grip.get("source_evidence")
-    source_evidence_valid = isinstance(source_evidence, Mapping) and isinstance(
-        source_evidence.get("path"), str
-    ) and bool(source_evidence.get("path"))
+    source_evidence_valid = (
+        isinstance(source_evidence, Mapping)
+        and set(source_evidence) == {"path", "sha256"}
+        and isinstance(source_evidence.get("path"), str)
+        and bool(source_evidence.get("path"))
+        and isinstance(source_evidence.get("sha256"), str)
+        and bool(_SHA256_RE.fullmatch(source_evidence["sha256"]))
+    )
     if source_evidence_valid:
         evidence_path = Path(source_evidence["path"])
         if not evidence_path.is_absolute():
             evidence_path = reports["ego_action_grip"][0].parent / evidence_path
-        source_evidence_valid = source_evidence.get("sha256") == sha256_file(
-            evidence_path.resolve()
-        )
+        try:
+            _, evidence_digest, _ = read_verified_bytes(
+                Path(os.path.abspath(evidence_path)),
+                expected_sha256=source_evidence["sha256"],
+            )
+            source_evidence_valid = evidence_digest == source_evidence["sha256"]
+        except (OSError, ValueError):
+            source_evidence_valid = False
     if (
         grip.get("report_version") != "ego-action-grip-evidence/v1"
         or grip.get("status") != "passed" or grip.get("source_verified") is not True
@@ -738,7 +1077,8 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
                 code.get("version") == matched_control_expected["expected_collector_version"]
                 and code.get("sha256")
                 == matched_control_expected["expected_collector_source_sha256"]
-                and code.get("sha256") == sha256_file(path.resolve())
+                and code.get("sha256")
+                == sha256_file(Path(os.path.abspath(path)))
             )
         except OSError:
             valid_code = False
@@ -753,8 +1093,8 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
             trace_path = Path(entry["path"])
             if not trace_path.is_absolute():
                 trace_path = collector_path.parent / trace_path
-            trace_path = trace_path.resolve()
-            if not trace_path.is_file() or sha256_file(trace_path) != entry["sha256"]:
+            trace_path = Path(os.path.abspath(trace_path))
+            if sha256_file(trace_path) != entry["sha256"]:
                 raise ContactEgoStage1PreflightError(
                     f"matched-control trace is missing or changed: {trace_path}"
                 )
@@ -763,6 +1103,27 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
         "rank_set": matched_control_expected["expected_rank_set"],
     }
     global_hashes = collector.get("global_hashes")
+    report_world_size = collector.get("world_size")
+    report_rank_set = collector.get("rank_set")
+    report_topology = collector.get("topology")
+    valid_report_topology = (
+        not isinstance(report_world_size, bool)
+        and isinstance(report_world_size, int)
+        and isinstance(report_rank_set, list)
+        and all(
+            not isinstance(rank, bool) and isinstance(rank, int)
+            for rank in report_rank_set
+        )
+        and isinstance(report_topology, Mapping)
+        and set(report_topology) == {"world_size", "rank_set"}
+        and not isinstance(report_topology.get("world_size"), bool)
+        and isinstance(report_topology.get("world_size"), int)
+        and isinstance(report_topology.get("rank_set"), list)
+        and all(
+            not isinstance(rank, bool) and isinstance(rank, int)
+            for rank in report_topology.get("rank_set", [])
+        )
+    )
     valid_global_hashes = isinstance(global_hashes, Mapping) and bool(global_hashes)
     if valid_global_hashes:
         for logical_name, variants in global_hashes.items():
@@ -806,6 +1167,7 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
         != matched_control_expected["expected_control_config_sha256"]
         or collector.get("variant_config_sha256") != expected_variants
         or collector.get("variants") != sorted(IMPLEMENTED_RUNNER_VARIANTS)
+        or not valid_report_topology
         or collector.get("world_size")
         != matched_control_expected["expected_world_size"]
         or collector.get("rank_set")
@@ -838,17 +1200,34 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
 def validate_ego_stage1_training_preflight(
     *, data_root: str | Path, norm_stats_path: str | Path, hdf5_dir: str | Path,
     t5_embedding_dir: str | Path,
+    training_run_nonce: str,
     sidecar_dir: str | Path,
     coverage_csv: str | Path, segments_csv: str | Path, inventory_csv: str | Path,
     build_config_path: str | Path, split_manifest: str | Path, training_gate_path: str | Path,
 ) -> dict:
+    gate_path = Path(os.path.abspath(os.path.expanduser(str(training_gate_path))))
+    gate = _load_json(gate_path, "Ego Stage1 training gate")
+    if gate.get("gate_version") != EGO_STAGE1_GATE_VERSION:
+        raise ContactEgoStage1PreflightError("training gate version differs")
+    _validate_gate_freshness_and_training_nonce(
+        gate, training_run_nonce=training_run_nonce
+    )
+    if os.environ.get("GWP_MATCHED_CONTROL_OUTPUT_DIR", "").strip():
+        _validate_loaded_gate_runtime_topology(gate)
+
     identity = derive_ego_dataset_identity(data_root)
     t5_source = derive_ego_t5_source_receipt(
         t5_embedding_dir,
         episode_indices=list(identity["episode_lengths"]),
     )
-    norm_path = Path(norm_stats_path).resolve()
-    norm = _load_json(norm_path, "Ego Stage1 norm")
+    norm_path = Path(os.path.abspath(os.path.expanduser(str(norm_stats_path))))
+    try:
+        norm_bytes, norm_digest, norm_runtime_stat = read_verified_bytes(norm_path)
+        norm = strict_json_loads(norm_bytes, name="Ego Stage1 norm")
+    except (OSError, ValueError) as exc:
+        raise ContactEgoStage1PreflightError("invalid or unsafe Ego Stage1 norm") from exc
+    if not isinstance(norm, dict):
+        raise ContactEgoStage1PreflightError("Ego Stage1 norm must be a JSON object")
     hdf5_bundle_sha256 = _validate_norm(norm, identity, Path(hdf5_dir).resolve())
     sidecar = validate_ego_reviewed_sidecar_bundle(
         sidecar_dir=sidecar_dir, coverage_csv=coverage_csv, segments_csv=segments_csv,
@@ -869,18 +1248,23 @@ def validate_ego_stage1_training_preflight(
         "source_receipt_sha256": identity["source_receipt_sha256"],
         "t5_source_manifest_sha256": t5_source["source_manifest_sha256"],
         "t5_source_receipt_sha256": t5_source["source_receipt_sha256"],
-        "norm_stats_sha256": sha256_file(norm_path),
+        "norm_stats_sha256": norm_digest,
         "hdf5_bundle_sha256": hdf5_bundle_sha256,
         "sidecar_meta_sha256": sidecar["meta_sha256"],
         "sidecar_bundle_sha256": sidecar["bundle_sha256"],
         "split_manifest_sha256": sidecar["split_sha256"],
-        "coverage_csv_sha256": sha256_file(coverage_csv),
-        "segments_csv_sha256": sha256_file(segments_csv),
-        "inventory_csv_sha256": sha256_file(inventory_csv),
-        "build_config_sha256": sha256_file(build_config_path),
+        "coverage_csv_sha256": sidecar["source_sha256"]["coverage_csv"],
+        "segments_csv_sha256": sidecar["source_sha256"]["segments_csv"],
+        "inventory_csv_sha256": sidecar["source_sha256"]["inventory_csv"],
+        "build_config_sha256": sidecar["source_sha256"]["config"],
     }
-    gate_path = Path(training_gate_path).resolve()
-    evidence = _validate_gate(_load_json(gate_path, "Ego Stage1 training gate"), expected, gate_path, identity["dataset_id"])
+    evidence = _validate_gate(
+        gate,
+        expected,
+        gate_path,
+        identity["dataset_id"],
+        training_run_nonce=training_run_nonce,
+    )
     return {
         "status": "artifact_consistency_passed_with_explicit_external_gates",
         "scientific_gate_claimed": False,
@@ -889,8 +1273,18 @@ def validate_ego_stage1_training_preflight(
         "contact_schema_version": SEGMENT_SCHEMA_VERSION,
         "contact_target_dim": SEGMENT_TARGET_DIM, "num_contact_tokens": 12,
         "transport_mode": "hard_st", "time_bins": 16,
+        "training_run_nonce": training_run_nonce,
+        "evidence_valid_until_utc": gate["evidence_valid_until_utc"],
         "data_root": identity["data_root"], "norm_stats_path": str(norm_path),
+        "norm_runtime_stat_record_only": norm_runtime_stat,
         "t5_embedding_dir": t5_source["source_dir_record_only"],
+        "training_source_runtime_receipt_record_only": identity[
+            "runtime_source_receipt_record_only"
+        ],
+        "t5_source_manifest": t5_source["source_manifest"],
+        "t5_runtime_source_receipt_record_only": t5_source[
+            "runtime_source_receipt_record_only"
+        ],
         "sidecar_dir": str(Path(sidecar_dir).resolve()),
         "dataset_id": identity["dataset_id"], "episode_npz_sha256": sidecar["episode_npz_sha256"],
         "evidence_report_sha256": {
@@ -908,6 +1302,7 @@ def preflight_from_environment() -> dict:
     return validate_ego_stage1_training_preflight(
         data_root=os.environ["GWP_EGO_DATA_PATH"], norm_stats_path=os.environ["GWP_EGO_NORM_STATS_PATH"],
         hdf5_dir=os.environ["GWP_EGO_FINAL_HDF5_DIR"],
+        training_run_nonce=os.environ.get("GWP_EGO_TRAINING_RUN_NONCE", ""),
         t5_embedding_dir=os.environ.get(
             "GWP_T5_EMBEDDING_DIR",
             str(Path(os.environ["GWP_EGO_DATA_PATH"]) / "t5_embedding"),

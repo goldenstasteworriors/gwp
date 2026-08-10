@@ -1,4 +1,3 @@
-import json
 import os
 import random
 
@@ -28,6 +27,7 @@ from world_action_model.matched_control_hashes import (
     canonical_sha256,
     normalize_path,
 )
+from world_action_model.verified_io import read_verified_bytes, strict_json_loads
 
 
 @TRANSFORMS.register
@@ -69,12 +69,22 @@ class WALeRobotTransformsPretrain(WATransforms):
             raise ValueError("norm_path list is none")
 
         if isinstance(norm_path, (str, os.PathLike)):
-            norm_specs = [{"path": str(norm_path), "data_paths": None}]
+            norm_specs = [{
+                "path": str(norm_path),
+                "data_paths": None,
+                "sha256": None,
+                "runtime_stat_record_only": None,
+            }]
         else:
             norm_specs = []
             for item in norm_path:
                 if isinstance(item, (str, os.PathLike)):
-                    norm_specs.append({"path": str(item), "data_paths": None})
+                    norm_specs.append({
+                        "path": str(item),
+                        "data_paths": None,
+                        "sha256": None,
+                        "runtime_stat_record_only": None,
+                    })
                 elif isinstance(item, dict):
                     path = item.get("path")
                     if path is None:
@@ -82,12 +92,30 @@ class WALeRobotTransformsPretrain(WATransforms):
                     data_paths = item.get("data_paths", None)
                     if data_paths is not None:
                         data_paths = {os.path.normpath(str(p)) for p in data_paths}
-                    norm_specs.append({"path": str(path), "data_paths": data_paths})
+                    norm_specs.append({
+                        "path": str(path),
+                        "data_paths": data_paths,
+                        "sha256": item.get("sha256"),
+                        "runtime_stat_record_only": item.get(
+                            "runtime_stat_record_only"
+                        ),
+                    })
                 else:
                     raise TypeError(f"Unsupported norm_path entry type: {type(item).__name__}")
             if len(norm_specs) == 0:
                 raise ValueError("norm_path list is empty")
         norm_paths = [spec["path"] for spec in norm_specs]
+        loaded_stats_dicts = []
+        for spec in norm_specs:
+            payload, _, _ = read_verified_bytes(
+                spec["path"],
+                expected_sha256=spec["sha256"],
+                expected_stat=spec["runtime_stat_record_only"],
+            )
+            stats_dict = strict_json_loads(payload, name=f"norm stats {spec['path']}")
+            if not isinstance(stats_dict, dict):
+                raise ValueError(f"normalization stats must be an object: {spec['path']}")
+            loaded_stats_dicts.append(stats_dict)
 
         super().__init__(
             is_train=is_train,
@@ -95,6 +123,7 @@ class WALeRobotTransformsPretrain(WATransforms):
             num_frames=num_frames,
             fps=fps,
             norm_path=norm_paths[0],
+            norm_payload=loaded_stats_dicts[0],
             image_cfg=image_cfg,
             num_views=num_views,
         )
@@ -117,10 +146,8 @@ class WALeRobotTransformsPretrain(WATransforms):
 
         self.norm_paths = norm_paths
         self.norm_specs = norm_specs
-        self.stats_dicts = []
+        self.stats_dicts = loaded_stats_dicts
         for json_path in self.norm_paths:
-            with open(json_path, "r", encoding="utf-8") as f:
-                self.stats_dicts.append(json.load(f))
             print("Loading stats dict from:", json_path)
 
         if view_keys is None:

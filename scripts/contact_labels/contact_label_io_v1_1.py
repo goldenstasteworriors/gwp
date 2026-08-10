@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import re
 import sys
@@ -103,8 +104,17 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def read_csv_exact(path: Path, required_fields: Iterable[str]) -> list[dict[str, str]]:
-    with path.open(encoding="utf-8-sig", newline="") as handle:
+def read_csv_exact(
+    path: Path,
+    required_fields: Iterable[str],
+    *,
+    payload: bytes | None = None,
+) -> list[dict[str, str]]:
+    if payload is None:
+        context = path.open(encoding="utf-8-sig", newline="")
+    else:
+        context = io.StringIO(payload.decode("utf-8-sig"), newline="")
+    with context as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
             raise ValueError(f"{path}: missing CSV header")
@@ -131,8 +141,11 @@ def _unknown_to_none(value: str) -> str | None:
     return None if value.lower() in UNKNOWN_TOKENS else value
 
 
-def load_inventory(path: Path) -> dict[int, InventoryEpisode]:
-    rows = read_csv_exact(path, INVENTORY_FIELDS)
+def load_inventory(
+    path: Path, *, rows: list[dict[str, str]] | None = None
+) -> dict[int, InventoryEpisode]:
+    if rows is None:
+        rows = read_csv_exact(path, INVENTORY_FIELDS)
     result: dict[int, InventoryEpisode] = {}
     for row_number, row in enumerate(rows, 2):
         episode = _parse_int(row["episode_id"], "episode_id", row_number)
@@ -147,8 +160,15 @@ def load_inventory(path: Path) -> dict[int, InventoryEpisode]:
     return result
 
 
-def load_coverages(path: Path, inventory: dict[int, InventoryEpisode], config: dict) -> list[Coverage]:
-    rows = read_csv_exact(path, COVERAGE_FIELDS)
+def load_coverages(
+    path: Path,
+    inventory: dict[int, InventoryEpisode],
+    config: dict,
+    *,
+    rows: list[dict[str, str]] | None = None,
+) -> list[Coverage]:
+    if rows is None:
+        rows = read_csv_exact(path, COVERAGE_FIELDS)
     result: list[Coverage] = []
     seen: set[str] = set()
     accepted_role = config.get("accepted_annotation_role", "adjudicated")
@@ -193,8 +213,11 @@ def load_segments(
     inventory: dict[int, InventoryEpisode],
     coverages: list[Coverage],
     config: dict,
+    *,
+    rows: list[dict[str, str]] | None = None,
 ) -> list[ReviewedSegment]:
-    rows = read_csv_exact(path, SEGMENT_FIELDS)
+    if rows is None:
+        rows = read_csv_exact(path, SEGMENT_FIELDS)
     coverage_by_id = {coverage.coverage_id: coverage for coverage in coverages}
     result: list[ReviewedSegment] = []
     segment_ids: set[str] = set()

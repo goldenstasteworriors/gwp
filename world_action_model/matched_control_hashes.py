@@ -20,6 +20,8 @@ from typing import Any
 import numpy as np
 import torch
 
+from world_action_model.verified_io import read_verified_bytes, strict_json_loads
+
 
 COLLECTOR_VERSION = "matched-control-hash-collector/v2"
 TRACE_VERSION = "wam-matched-control-sample-trace/v1"
@@ -251,10 +253,18 @@ class MatchedControlCollector:
         trainer_seed: int,
         project_dir: str | os.PathLike[str],
     ) -> None:
-        if not bool(config.get("enabled", False)):
+        if config.get("enabled") is not True:
             raise MatchedControlError("do not construct a disabled collector")
-        self.seed = int(config.get("seed", trainer_seed))
-        if self.seed != int(trainer_seed):
+        configured_seed = config.get("seed", trainer_seed)
+        if (
+            isinstance(configured_seed, bool)
+            or not isinstance(configured_seed, int)
+            or isinstance(trainer_seed, bool)
+            or not isinstance(trainer_seed, int)
+        ):
+            raise MatchedControlError("collector and trainer seeds must be native integers")
+        self.seed = configured_seed
+        if self.seed != trainer_seed:
             raise MatchedControlError(
                 f"collector seed {self.seed} differs from trainer seed {trainer_seed}"
             )
@@ -262,8 +272,15 @@ class MatchedControlCollector:
             raise MatchedControlError(
                 f"collector seed must be one of {ALLOWED_SEEDS}, got {self.seed}"
             )
-        self.rank = int(rank)
-        self.world_size = int(world_size)
+        if (
+            isinstance(rank, bool)
+            or not isinstance(rank, int)
+            or isinstance(world_size, bool)
+            or not isinstance(world_size, int)
+        ):
+            raise MatchedControlError("rank and world_size must be native integers")
+        self.rank = rank
+        self.world_size = world_size
         if self.world_size <= 0 or not 0 <= self.rank < self.world_size:
             raise MatchedControlError(
                 f"invalid distributed identity rank={self.rank}, world_size={self.world_size}"
@@ -311,12 +328,25 @@ class MatchedControlCollector:
                 "collector version differs from the production expectation"
             )
         expected_world_size = config.get("expected_world_size")
+        if expected_world_size is not None and (
+            isinstance(expected_world_size, bool)
+            or not isinstance(expected_world_size, int)
+        ):
+            raise MatchedControlError("expected_world_size must be a native integer")
         if expected_world_size is not None and self.world_size != expected_world_size:
             raise MatchedControlError(
                 "runtime world_size differs from the production expectation"
             )
         configured_runtime_world = config.get("runtime_world_size")
         configured_runtime_rank = config.get("runtime_rank")
+        for name, value in (
+            ("runtime_world_size", configured_runtime_world),
+            ("runtime_rank", configured_runtime_rank),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise MatchedControlError(f"{name} must be a native integer")
         if (
             configured_runtime_world is not None
             and self.world_size != configured_runtime_world
@@ -329,6 +359,10 @@ class MatchedControlCollector:
         expected_rank_set = config.get("expected_rank_set")
         if expected_rank_set is not None and (
             not isinstance(expected_rank_set, list)
+            or any(
+                isinstance(expected_rank, bool) or not isinstance(expected_rank, int)
+                for expected_rank in expected_rank_set
+            )
             or expected_rank_set != list(range(self.world_size))
             or self.rank not in expected_rank_set
         ):
@@ -407,9 +441,15 @@ class MatchedControlCollector:
         if any(not _HEX64_RE.fullmatch(value) for value in raw_hashes):
             raise MatchedControlError("raw input trace contains a non-SHA256 value")
         try:
-            batch_ids = [json.loads(value) for value in identity_json]
-            augmentation = [json.loads(value) for value in augmentation_json]
-        except json.JSONDecodeError as exc:
+            batch_ids = [
+                strict_json_loads(value.encode("utf-8"), name="sample identity")
+                for value in identity_json
+            ]
+            augmentation = [
+                strict_json_loads(value.encode("utf-8"), name="augmentation trace")
+                for value in augmentation_json
+            ]
+        except ValueError as exc:
             raise MatchedControlError("invalid canonical JSON in sample trace") from exc
         for item in augmentation:
             if item.get("trace_version") != TRACE_VERSION:
@@ -448,7 +488,14 @@ class MatchedControlCollector:
             "hashes": hashes,
         }
         with self.output_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
+            handle.write(
+                json.dumps(
+                    record,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            )
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -469,9 +516,9 @@ def _read_variant_records(
     records: list[dict[str, Any]] = []
     file_digests: list[dict[str, str]] = []
     for path in paths:
-        payload = path.read_bytes()
+        payload, trace_digest, _ = read_verified_bytes(path)
         file_digests.append(
-            {"path": str(path), "sha256": hashlib.sha256(payload).hexdigest()}
+            {"path": str(path), "sha256": trace_digest}
         )
         try:
             text = payload.decode("utf-8")
@@ -481,8 +528,11 @@ def _read_variant_records(
             if not line.strip():
                 continue
             try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
+                record = strict_json_loads(
+                    line.encode("utf-8"),
+                    name=f"matched-control trace {path}:{line_number}",
+                )
+            except ValueError as exc:
                 raise MatchedControlError(f"invalid JSONL {path}:{line_number}") from exc
             if record.get("record_version") != COLLECTOR_VERSION:
                 raise MatchedControlError(f"unexpected record version in {path}:{line_number}")
@@ -809,7 +859,10 @@ def compare_variant_traces(
             trace_files=trace_files,
             variant_config_sha256=variant_hashes,
             control_config_sha256=next(iter(control_hashes)),
-            config_hash_scope=json.loads(next(iter(hash_scopes))),
+            config_hash_scope=strict_json_loads(
+                next(iter(hash_scopes)).encode("utf-8"),
+                name="matched-control config hash scope",
+            ),
             git_commit=next(iter(git_commits)),
             world_size=report_world_size,
             rank_set=report_rank_set,
@@ -825,5 +878,8 @@ def compare_variant_traces(
     except (KeyError, TypeError, ValueError, OSError) as exc:
         report["errors"] = [str(exc)]
 
-    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    report_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
     return report
