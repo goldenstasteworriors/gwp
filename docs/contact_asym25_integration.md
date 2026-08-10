@@ -22,6 +22,22 @@ Action-only inference caches the transported hard semantic prefix. Inference
 still returns canonical25D only: this repository has no OmniPicker driver,
 reverse calibration mapper, or physical executor, so deployment is No-Go.
 
+## Metadata-only hardware discovery
+
+Before any device-side probe, run the host discovery helper on the robot computer:
+
+```bash
+python -B scripts/discover_asymmetric25_hardware.py
+```
+
+The helper only reads network-interface sysfs metadata, stable serial symlink
+metadata, and the checked-in manifest/capture templates. It does not open a
+serial, CAN, DDS, Modbus, or network endpoint, and cannot send a control command.
+Its JSON output lists candidate host interfaces and every unresolved template
+field, but is not a calibration capture and never authorizes training or
+deployment. An operator must still identify mounted devices from physical
+labels and official vendor documentation, then measure and review all values.
+
 ## Artifact and review gates
 
 The preflight requires explicit paths for the asymmetric25 dataset, norm file,
