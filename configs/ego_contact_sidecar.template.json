@@ -1,0 +1,25 @@
+{
+  "config_version": "contact_label_build_config_v1_1",
+  "dataset_id": null,
+  "annotation_schema_version": "contact_segment_annotation_v1_1",
+  "sidecar_schema_version": "contact_segment_v1_1",
+  "frame_clock": "processed_action_20hz",
+  "target_fps": 20.0,
+  "horizon_frames": 48,
+  "num_queries": 12,
+  "negative_confidence": 0.1,
+  "accepted_annotation_role": "adjudicated",
+  "overflow_policy": "hard_error_no_drop",
+  "window_assignment": {
+    "sort_key": ["start_frame", "end_frame", "side_or_empty", "site_or_empty", "segment_id"],
+    "query_index": "zero_based_rank_after_sort",
+    "global_identity": "segment_id"
+  },
+  "split_policy": {
+    "seeds": [6666, 7777, 8888],
+    "current_split_kind": null,
+    "group_fields_by_seed": null,
+    "ood_eligible": false,
+    "strategy_claim_allowed": false
+  }
+}

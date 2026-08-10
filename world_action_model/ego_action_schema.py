@@ -15,6 +15,7 @@ import numpy as np
 
 
 EGO_WAM_ACTION_DIM = 20
+EGO_CANONICAL_ACTION_SCHEMA_ID = "ego_dual_eef20_canonical_open_v1"
 EGO_HAND_STATUS_SEMANTICS = "closure_fraction_0_open_1_closed"
 CANONICAL_OPEN_FRACTION_SEMANTICS = "open_fraction_0_closed_1_open"
 SUPPORTED_HAND_STATUS_SEMANTICS = frozenset(
