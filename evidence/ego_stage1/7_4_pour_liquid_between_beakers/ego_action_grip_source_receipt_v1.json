@@ -1,0 +1,156 @@
+{
+  "limitations": [
+    "the HDF5 files do not record the exact historical generator Git commit",
+    "source-code evidence establishes the checked-out semantic contract, not physical contact",
+    "per-file worktree_matches_head records any upstream checkout drift; both HEAD and audited worktree semantic fragments and hashes were checked"
+  ],
+  "receipt_version": "ego-action-grip-source-receipt/v1",
+  "upstream": {
+    "files": [
+      {
+        "audited_worktree_sha256": "2bb8fadfd0e82f974dc5895ff2671f179b28ecf0520a49e476ee53bf28028413",
+        "git_blob_sha1": "cca2bc409f39b3893d3c7e22b83dba5e03fd4ea2",
+        "head_blob_sha256": "3b3e3cd33310e544983b443a29c85fad30ae4f332812e5ce695da70612708148",
+        "logical_path": "data_alignment/human_data_process/add_hand_status.py",
+        "required_semantic_fragments_sha256": "1995d4f9986ea25c09f2e3e5f7a0605a1931b49a5e93547b633adb1dc46521fc",
+        "worktree_matches_head": false
+      },
+      {
+        "audited_worktree_sha256": "2352527e2f6a6b3be2df47547c57de123cab2bfd52db8a95269b4876b52c9047",
+        "git_blob_sha1": "54a01473ee9a530d4f1f2797c0d8565adcfc1e51",
+        "head_blob_sha256": "2352527e2f6a6b3be2df47547c57de123cab2bfd52db8a95269b4876b52c9047",
+        "logical_path": "data_alignment/human_data_process/process_human_eef_pipeline.py",
+        "required_semantic_fragments_sha256": "1b14e9744579bd8f8eef1aa8061b526e0338e8b43bd70dbee06a21deaa45327e",
+        "worktree_matches_head": true
+      },
+      {
+        "audited_worktree_sha256": "2ce8fcdc1deca7a2a6e37b514b5c5c0e0f01e9a5a23ebf5031cc403a1cfc4eaf",
+        "git_blob_sha1": "58f65645f72697c9761ce5deaad2af2388d2de97",
+        "head_blob_sha256": "2ce8fcdc1deca7a2a6e37b514b5c5c0e0f01e9a5a23ebf5031cc403a1cfc4eaf",
+        "logical_path": "data_alignment/convert_to_lerobot.py",
+        "required_semantic_fragments_sha256": "f3b5fd395598e00db9859f2a2ee01ba525c2450f7f9be1eb738286479f1cea61",
+        "worktree_matches_head": true
+      },
+      {
+        "audited_worktree_sha256": "c4493aa6514660cc917520cc21f23d5bcede24d4cf3c993e144a50ef5819ea7d",
+        "git_blob_sha1": "2a2b109b915a5b170ba0740d44022d018a064006",
+        "head_blob_sha256": "c4493aa6514660cc917520cc21f23d5bcede24d4cf3c993e144a50ef5819ea7d",
+        "logical_path": "scripts/deploy.py",
+        "required_semantic_fragments_sha256": "8ff6b3f41f46507cff24c0b6fd093ea3b88405c4462580c97ea3aaa7b713f3de",
+        "worktree_matches_head": true
+      }
+    ],
+    "git_commit": "cb0c0dc06f4e1e90e125dfb7931827e4d8d125de",
+    "historical_dataset_generator_commit_recorded_in_hdf5": false,
+    "repository_path_record_only": "/home/ykj/project/EgoHumanoid"
+  },
+  "verified_claims": {
+    "conversion": "target=1-source",
+    "grip_action_dimensions": [
+      18,
+      19
+    ],
+    "grip_proxy_loss_weight_when_active": 0.25,
+    "source_hand_field_order": [
+      "left",
+      "right"
+    ],
+    "source_hand_status_semantics": "closure_fraction_0_open_1_closed",
+    "source_wrist_field_order": "left_then_right",
+    "target_hand_status_semantics": "open_fraction_0_closed_1_open"
+  },
+  "wam": {
+    "files": [
+      {
+        "git_blob_sha1": "3e1224357f4d315fe9736b46115df53e9e8cf1ab",
+        "head_blob_sha256": "16b7a89d63f3d92fc8c7d502cc4a8fa0a238c29a86e98a6a17a63b584d9b5b8f",
+        "head_blob_size_bytes": 7256,
+        "logical_path": "world_action_model/ego_action_schema.py",
+        "runtime_sha256": "16b7a89d63f3d92fc8c7d502cc4a8fa0a238c29a86e98a6a17a63b584d9b5b8f",
+        "runtime_size_bytes": 7256
+      },
+      {
+        "git_blob_sha1": "f5c120f1e35d3f65eb2c3311010b98483649169e",
+        "head_blob_sha256": "9d93916ba48542223b739376af1ec32029d508ae7132bb19fde2387ff7f77dfc",
+        "head_blob_size_bytes": 23951,
+        "logical_path": "world_action_model/ego_hand_active_sidecar.py",
+        "runtime_sha256": "9d93916ba48542223b739376af1ec32029d508ae7132bb19fde2387ff7f77dfc",
+        "runtime_size_bytes": 23951
+      },
+      {
+        "git_blob_sha1": "e40b348e25ef05e1f987e3f36561d8fd57aef1ec",
+        "head_blob_sha256": "c6bdfdcf8d2794aa11943d8c8ef79803930909aee1befd3ab48f86fafc5e7667",
+        "head_blob_size_bytes": 39112,
+        "logical_path": "world_action_model/datasets/wam_lerobot_dataset.py",
+        "runtime_sha256": "c6bdfdcf8d2794aa11943d8c8ef79803930909aee1befd3ab48f86fafc5e7667",
+        "runtime_size_bytes": 39112
+      },
+      {
+        "git_blob_sha1": "0ad2098a5bbc2483843475f1eb9a74fd1b91afff",
+        "head_blob_sha256": "67693cc90bf992c671c224ecb74bbddfb8296ed23f351a851e44b7a672ef68a3",
+        "head_blob_size_bytes": 42404,
+        "logical_path": "world_action_model/transforms/wa_transforms_lerobot_pretrain.py",
+        "runtime_sha256": "67693cc90bf992c671c224ecb74bbddfb8296ed23f351a851e44b7a672ef68a3",
+        "runtime_size_bytes": 42404
+      },
+      {
+        "git_blob_sha1": "ae6111aa137bad719b5f3c66f82dd9b9f27133c2",
+        "head_blob_sha256": "851f13dfb4e9b750884e797f9573fd665d6986bb10075bfa0e0760661dd4048d",
+        "head_blob_size_bytes": 25932,
+        "logical_path": "world_action_model/trainer/wa_casual_trainer_mot.py",
+        "runtime_sha256": "851f13dfb4e9b750884e797f9573fd665d6986bb10075bfa0e0760661dd4048d",
+        "runtime_size_bytes": 25932
+      },
+      {
+        "git_blob_sha1": "07a42d22ae06390f9f216c3ba6c1136579d704e6",
+        "head_blob_sha256": "c13b9bce34ff9adfa29274cca6172727eeb8fb3a5daf86c947438a7d45f6840f",
+        "head_blob_size_bytes": 79084,
+        "logical_path": "world_action_model/contact_ego_stage1_preflight.py",
+        "runtime_sha256": "c13b9bce34ff9adfa29274cca6172727eeb8fb3a5daf86c947438a7d45f6840f",
+        "runtime_size_bytes": 79084
+      },
+      {
+        "git_blob_sha1": "5b583df378104eb54db8bd68e9fda69007c53242",
+        "head_blob_sha256": "3badfcaf1cf0708cc4e671a0cf501509c92b93a292429412b2089a5a1a3e0e12",
+        "head_blob_size_bytes": 8890,
+        "logical_path": "world_action_model/ego_stage1_gate_bootstrap.py",
+        "runtime_sha256": "3badfcaf1cf0708cc4e671a0cf501509c92b93a292429412b2089a5a1a3e0e12",
+        "runtime_size_bytes": 8890
+      },
+      {
+        "git_blob_sha1": "c3efc25bc2044533cbd61a4d50456211be700bb3",
+        "head_blob_sha256": "74c2721954783ef46fafd2dc231d84e65c9772536692b359c76ac69070a32ed4",
+        "head_blob_size_bytes": 7277,
+        "logical_path": "scripts/build_ego_hand_active_sidecars.py",
+        "runtime_sha256": "74c2721954783ef46fafd2dc231d84e65c9772536692b359c76ac69070a32ed4",
+        "runtime_size_bytes": 7277
+      },
+      {
+        "git_blob_sha1": "f2e2f5d49c60d1ffd3f5410ae06f0b958293fab6",
+        "head_blob_sha256": "2b3e0604e0dada087d0b334fa87f56a51c0baf12acf302a02898723a33d6de9f",
+        "head_blob_size_bytes": 13961,
+        "logical_path": "scripts/compute_ego_wam_norm.py",
+        "runtime_sha256": "2b3e0604e0dada087d0b334fa87f56a51c0baf12acf302a02898723a33d6de9f",
+        "runtime_size_bytes": 13961
+      },
+      {
+        "git_blob_sha1": "9a4769e8a766637d118c6de5067fc6b94d544eae",
+        "head_blob_sha256": "ed36e1d4d1bf8ff9ca6d31d00025b00134e056c0951d76ec6f556236fce45ecc",
+        "head_blob_size_bytes": 17982,
+        "logical_path": "scripts/audit_ego_action_grip_evidence.py",
+        "runtime_sha256": "ed36e1d4d1bf8ff9ca6d31d00025b00134e056c0951d76ec6f556236fce45ecc",
+        "runtime_size_bytes": 17982
+      },
+      {
+        "git_blob_sha1": "1264f278285e494731a2115120c59da7d1c28119",
+        "head_blob_sha256": "8d4d74e5ab70386d137505cd1da600e73deb92e87e6f000784f5b409bda54e0b",
+        "head_blob_size_bytes": 7851,
+        "logical_path": "configs/giga_world_policy_0_5_ego_discrete_contact_pretrain.py",
+        "runtime_sha256": "8d4d74e5ab70386d137505cd1da600e73deb92e87e6f000784f5b409bda54e0b",
+        "runtime_size_bytes": 7851
+      }
+    ],
+    "git_commit": "10cae35212b28f6986e02a20c900b0990a22f80c",
+    "repository_path_record_only": "/home/ykj/project/WM/gwp-agent-op28-grip-evidence"
+  }
+}
