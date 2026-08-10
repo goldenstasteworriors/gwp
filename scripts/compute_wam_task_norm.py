@@ -30,11 +30,21 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from pathlib import Path
 from typing import Iterator
 
 import numpy as np
 import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from world_action_model.asymmetric_action_schema import (
+    ASYMMETRIC_ACTION_DIM,
+    ASYMMETRIC_SCHEMA_ID,
+)
 
 try:
     from tqdm import tqdm
@@ -66,12 +76,35 @@ def parse_args() -> argparse.Namespace:
                    help="Raise instead of warning when action/state are misaligned on delta-mask dims.")
     p.add_argument("--include-metadata", action="store_true")
     p.add_argument(
+        "--action-schema-id",
+        default=None,
+        help="Require every data root to declare this action_schema_id and record it in output metadata.",
+    )
+    p.add_argument(
         "--delta-mask",
         default=None,
         help="Comma-separated booleans (true/false or 1/0). "
              "Use 'none' when every action dimension is already relative.",
     )
     return p.parse_args()
+
+
+def validate_dataset_schema(root: Path, action_schema_id: str) -> None:
+    info_path = root / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    actual = info.get("action_schema_id")
+    if actual != action_schema_id:
+        raise ValueError(
+            f"{root} action_schema_id={actual!r}; expected {action_schema_id!r}"
+        )
+    if action_schema_id == ASYMMETRIC_SCHEMA_ID:
+        for key in ("observation.state", "action"):
+            shape = info.get("features", {}).get(key, {}).get("shape")
+            if shape != [ASYMMETRIC_ACTION_DIM]:
+                raise ValueError(
+                    f"{root} features[{key!r}].shape={shape!r}; expected "
+                    f"[{ASYMMETRIC_ACTION_DIM}]. Legacy 30-D data cannot be used here."
+                )
 
 
 class OnlineMoments:
@@ -402,6 +435,8 @@ def main() -> None:
     n_episodes = 0
     roots_meta = []
     for root in roots:
+        if args.action_schema_id is not None:
+            validate_dataset_schema(root, args.action_schema_id)
         check_delta_alignment(root, mask, strict=args.strict_align)
         eps, r_states, r_actions = process_root(
             root, dim=dim, offsets=offsets, mask=mask, dtype=dtype,
@@ -426,7 +461,7 @@ def main() -> None:
             "action": feature_stats(a_mom, a_q),
         }
     }
-    if args.include_metadata:
+    if args.include_metadata or args.action_schema_id is not None:
         result["metadata"] = {
             "task_name": args.task_name,
             "data_roots": [str(r) for r in roots],
@@ -441,6 +476,8 @@ def main() -> None:
             "quantile_sample_limit": int(args.quantile_sample_limit),
             "roots": roots_meta,
         }
+        if args.action_schema_id is not None:
+            result["metadata"]["action_schema_id"] = args.action_schema_id
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -39,6 +39,9 @@ class WALeRobotTransformsPretrain(WATransforms):
         state_key="observation.state",
         action_key="action",
         ego_dual_eef_cfg=None,
+        require_exact_effective_dim=False,
+        expected_action_schema_id=None,
+        ego_grip_proxy_weight=0.25,
         task_key="task",
         emit_action_denorm_scale=False,
         max_prompt_len=64,
@@ -115,13 +118,29 @@ class WALeRobotTransformsPretrain(WATransforms):
         self.ego_dual_eef_cfg = (
             None if ego_dual_eef_cfg is None else dict(ego_dual_eef_cfg)
         )
+        self.require_exact_effective_dim = bool(require_exact_effective_dim)
+        self.expected_action_schema_id = (
+            None if expected_action_schema_id is None else str(expected_action_schema_id)
+        )
+        self.ego_grip_proxy_weight = float(ego_grip_proxy_weight)
+        if not 0.0 <= self.ego_grip_proxy_weight <= 1.0:
+            raise ValueError("ego_grip_proxy_weight must be in [0, 1]")
+        if self.expected_action_schema_id is not None:
+            for json_path, stats_dict in zip(self.norm_paths, self.stats_dicts):
+                metadata = stats_dict.get("metadata")
+                schema_id = metadata.get("action_schema_id") if isinstance(metadata, dict) else None
+                if schema_id != self.expected_action_schema_id:
+                    raise ValueError(
+                        f"normalization stats {json_path} action_schema_id={schema_id!r}; "
+                        f"expected {self.expected_action_schema_id!r}"
+                    )
         self.task_key = task_key
         self.emit_action_denorm_scale = bool(emit_action_denorm_scale)
         self.max_prompt_len = int(max_prompt_len)
         self.subtask_prob = float(subtask_prob)
         self.image_augmentation = dict(image_augmentation or {})
         self._warned_unknown_robotype = False
-    
+
     def _parse_robotype(self, robotype):
         if robotype is None:
             return None
@@ -392,20 +411,88 @@ class WALeRobotTransformsPretrain(WATransforms):
         if state.dim() == 2 and state.shape[0] > 1:
             state = state[:1]
 
+        source_time_mask = data_dict.get("action_time_mask", data_dict.get("action_loss_mask"))
+        if source_time_mask is None:
+            is_pad = data_dict.get(f"{self.action_key}_is_pad", data_dict.get("action_is_pad"))
+            if is_pad is not None:
+                source_time_mask = ~torch.as_tensor(is_pad, dtype=torch.bool)
+        if source_time_mask is None:
+            action_time_mask = torch.ones(action.shape[0], dtype=torch.bool, device=action.device)
+        else:
+            action_time_mask = torch.as_tensor(
+                source_time_mask,
+                dtype=torch.bool,
+                device=action.device,
+            ).flatten()
+            if action_time_mask.numel() != action.shape[0]:
+                raise ValueError(
+                    f"action_time_mask length {action_time_mask.numel()} does not match "
+                    f"action chunk length {action.shape[0]}"
+                )
+
+        source_action_weight = data_dict.get("action_loss_weight")
+        if source_action_weight is None:
+            action_loss_weight = torch.ones_like(action)
+        else:
+            action_loss_weight = torch.as_tensor(
+                source_action_weight,
+                dtype=torch.float32,
+                device=action.device,
+            )
+            if action_loss_weight.ndim == 1:
+                action_loss_weight = (
+                    action_loss_weight.unsqueeze(0).expand(action.shape[0], -1).clone()
+                )
+            if action_loss_weight.shape != action.shape:
+                raise ValueError(
+                    f"action_loss_weight shape {tuple(action_loss_weight.shape)} does not match "
+                    f"action shape {tuple(action.shape)}"
+                )
+        if self.ego_dual_eef_cfg is not None and action_loss_weight.shape[-1] >= 20:
+            action_loss_weight[:, 18:20] *= self.ego_grip_proxy_weight
+
         if action.shape[0] != self.num_frames:
             t = int(self.num_frames)
             cur_t = int(action.shape[0])
             if cur_t >= t:
                 action = action[:t]
+                action_time_mask = action_time_mask[:t]
+                action_loss_weight = action_loss_weight[:t]
             else:
                 pad = torch.zeros((t - cur_t, action.shape[1]), dtype=action.dtype, device=action.device)
                 action = torch.cat([action, pad], dim=0)
-                
+                action_time_mask = torch.cat(
+                    [
+                        action_time_mask,
+                        torch.zeros(t - cur_t, dtype=torch.bool, device=action.device),
+                    ],
+                    dim=0,
+                )
+                action_loss_weight = torch.cat(
+                    [
+                        action_loss_weight,
+                        torch.zeros(
+                            (t - cur_t, action_loss_weight.shape[1]),
+                            dtype=action_loss_weight.dtype,
+                            device=action.device,
+                        ),
+                    ],
+                    dim=0,
+                )
+
         base = self._get_delta_mask(embodiment_id)
         assert base is not None, f"embodiment_id {embodiment_id} not found in delta_mask_by_embodiment_id"
         effective_dim = int(base.shape[-1])
+        if self.require_exact_effective_dim:
+            if state.shape[-1] != effective_dim or action.shape[-1] != effective_dim:
+                raise ValueError(
+                    f"embodiment {embodiment_id} requires exact physical dim {effective_dim}; "
+                    f"got state={state.shape[-1]} action={action.shape[-1]}. "
+                    "Legacy SONIC 30-D data cannot be truncated into the asymmetric 25-D schema."
+                )
         state = state[:, :effective_dim]
         action = action[:, :effective_dim]
+        action_loss_weight = action_loss_weight[:, :effective_dim]
 
         assert self.model_action_dim is not None, "model_action_dim must be provided"
         d = int(self.model_action_dim)
@@ -417,6 +504,14 @@ class WALeRobotTransformsPretrain(WATransforms):
             action = action[..., :d]
         if action.shape[-1] < d:
             action = torch_F.pad(action, (0, d - int(action.shape[-1])), value=0.0)
+        if action_loss_weight.shape[-1] < d:
+            action_loss_weight = torch_F.pad(
+                action_loss_weight,
+                (0, d - int(action_loss_weight.shape[-1])),
+                value=0.0,
+            )
+        elif action_loss_weight.shape[-1] > d:
+            action_loss_weight = action_loss_weight[..., :d]
 
         if d > len(base):
             base = np.pad(base, (0, d - len(base)), constant_values=False)
@@ -478,6 +573,15 @@ class WALeRobotTransformsPretrain(WATransforms):
         valid_dim_mask = torch.zeros(d, dtype=torch.bool, device=action.device)
         valid_dim_mask[:effective_dim] = True
         out["action_dim_mask"] = valid_dim_mask
+        out["action_time_mask"] = action_time_mask
+        # Keep the existing trainer-facing name while exposing the explicit
+        # contract requested by new datasets.
+        out["action_loss_mask"] = action_time_mask
+        out["action_loss_weight"] = (
+            action_loss_weight
+            * action_time_mask[:, None].to(dtype=action_loss_weight.dtype)
+            * valid_dim_mask[None, :].to(dtype=action_loss_weight.dtype)
+        )
         dim = out["action"].shape[-1]
         if self.emit_action_denorm_scale:
             scale = torch.ones(dim, dtype=torch.float32, device=action.device)

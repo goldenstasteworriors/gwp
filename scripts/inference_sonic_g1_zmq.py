@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 import time
 import traceback
 from io import BytesIO
@@ -24,11 +25,21 @@ import zmq
 from diffusers import AutoencoderKLWan, FlowMatchEulerDiscreteScheduler
 from PIL import Image, ImageOps
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from inference_openloop import WAPipeline, load_fixed_prompt_embedding
+from world_action_model.asymmetric_action_schema import (
+    ASYMMETRIC_ACTION_DIM,
+    ASYMMETRIC_SCHEMA_ID,
+    LEGACY_SCHEMA_ID,
+    LEGACY_SONIC_ACTION_DIM,
+    validate_asymmetric_norm_payload,
+)
 from world_action_model.models import CasualWorldActionTransformer_MoT
 
 
-SONIC_ACTION_DIM = 30
 MODEL_ACTION_DIM = 32
 IMAGE_SIZE = (320, 384)
 
@@ -62,14 +73,31 @@ def _unpack_object(obj: dict) -> Any:
     return obj
 
 
-def _load_stats(path: Path, device: torch.device) -> tuple[torch.Tensor, ...]:
+def _load_stats(
+    path: Path,
+    device: torch.device,
+    *,
+    physical_dim: int,
+    action_schema_id: str,
+) -> tuple[torch.Tensor, ...]:
     import json
 
-    stats = json.loads(path.read_text(encoding="utf-8"))["norm_stats"]
-    state_low = torch.tensor(stats["observation.state"]["q01"][:SONIC_ACTION_DIM], device=device)
-    state_high = torch.tensor(stats["observation.state"]["q99"][:SONIC_ACTION_DIM], device=device)
-    action_low = torch.tensor(stats["action"]["q01"][:SONIC_ACTION_DIM], device=device)
-    action_high = torch.tensor(stats["action"]["q99"][:SONIC_ACTION_DIM], device=device)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if action_schema_id == ASYMMETRIC_SCHEMA_ID:
+        validate_asymmetric_norm_payload(payload, model_dim=MODEL_ACTION_DIM)
+    stats = payload["norm_stats"]
+    state_low = torch.tensor(stats["observation.state"]["q01"][:physical_dim], device=device)
+    state_high = torch.tensor(stats["observation.state"]["q99"][:physical_dim], device=device)
+    action_low = torch.tensor(stats["action"]["q01"][:physical_dim], device=device)
+    action_high = torch.tensor(stats["action"]["q99"][:physical_dim], device=device)
+    for name, value in (
+        ("state q01", state_low),
+        ("state q99", state_high),
+        ("action q01", action_low),
+        ("action q99", action_high),
+    ):
+        if value.numel() != physical_dim:
+            raise ValueError(f"normalization {name} has {value.numel()} values; expected {physical_dim}")
     return state_low, state_high, action_low, action_high
 
 
@@ -138,13 +166,26 @@ class SonicG1Policy:
         device: str,
         prompt_embedding: torch.Tensor | None,
         inference_steps: int,
+        action_schema: str = "legacy30",
     ) -> None:
         self.pipeline = pipeline
         self.device = torch.device(device)
         self.prompt_embedding = prompt_embedding
         self.inference_steps = inference_steps
+        self.action_schema = str(action_schema)
+        if self.action_schema == "legacy30":
+            self.physical_dim = LEGACY_SONIC_ACTION_DIM
+            self.action_schema_id = LEGACY_SCHEMA_ID
+        elif self.action_schema == "asymmetric25":
+            self.physical_dim = ASYMMETRIC_ACTION_DIM
+            self.action_schema_id = ASYMMETRIC_SCHEMA_ID
+        else:
+            raise ValueError(f"unsupported action_schema={self.action_schema!r}")
         self.state_low, self.state_high, self.action_low, self.action_high = _load_stats(
-            norm_stats, self.device
+            norm_stats,
+            self.device,
+            physical_dim=self.physical_dim,
+            action_schema_id=self.action_schema_id,
         )
 
     @torch.inference_mode()
@@ -157,13 +198,14 @@ class SonicG1Policy:
         state = torch.as_tensor(example["state"], dtype=torch.float32, device=self.device)
         if state.ndim == 1:
             state = state.unsqueeze(0)
-        if tuple(state.shape) != (1, SONIC_ACTION_DIM):
+        if tuple(state.shape) != (1, self.physical_dim):
             raise ValueError(
-                f"SONIC GigaWorld state must have shape [1,{SONIC_ACTION_DIM}], got {tuple(state.shape)}"
+                f"SONIC GigaWorld {self.action_schema} state must have shape "
+                f"[1,{self.physical_dim}], got {tuple(state.shape)}"
             )
         state_range = (self.state_high - self.state_low).clamp_min(1e-8)
         normalized_state = ((state - self.state_low) / state_range * 2.0 - 1.0).clamp(-1.0, 1.0)
-        normalized_state = F.pad(normalized_state, (0, MODEL_ACTION_DIM - SONIC_ACTION_DIM))
+        normalized_state = F.pad(normalized_state, (0, MODEL_ACTION_DIM - self.physical_dim))
 
         images = example.get("image")
         if not isinstance(images, list) or len(images) != 1:
@@ -195,7 +237,7 @@ class SonicG1Policy:
             torch.cuda.synchronize(self.device)
         latency = time.perf_counter() - started
 
-        normalized_action = normalized_action[..., :SONIC_ACTION_DIM]
+        normalized_action = normalized_action[..., : self.physical_dim]
         action_range = (self.action_high - self.action_low).clamp_min(1e-8)
         action = ((normalized_action + 1.0) * 0.5 * action_range + self.action_low)
         action = action[0].float().cpu().numpy()
@@ -224,8 +266,10 @@ class MsgpackPolicyServer:
                         "status": "ok",
                         "data": {
                             "policy": "giga-world-policy-0.5-sonic-g1",
-                            "state_dim": SONIC_ACTION_DIM,
-                            "action_dim": SONIC_ACTION_DIM,
+                            "action_schema": self.policy.action_schema,
+                            "action_schema_id": self.policy.action_schema_id,
+                            "state_dim": self.policy.physical_dim,
+                            "action_dim": self.policy.physical_dim,
                             "action_horizon": 48,
                         },
                     }
@@ -259,6 +303,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=5556)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--inference-steps", type=int, default=10)
+    parser.add_argument(
+        "--action-schema",
+        choices=("legacy30", "asymmetric25"),
+        default="legacy30",
+        help="Legacy 30-D remains the default; asymmetric25 requires schema-labelled norm stats.",
+    )
     parser.add_argument("--no-compile-transformer", action="store_true")
     return parser.parse_args()
 
@@ -278,6 +328,7 @@ def main() -> None:
         args.device,
         fixed_t5,
         args.inference_steps,
+        args.action_schema,
     )
     MsgpackPolicyServer(policy, args.host, args.port).run()
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert SONIC G1 LeRobot data to the 30-D wrist/hand action space.
+"""Convert SONIC G1 LeRobot data to a selected wrist/hand action space.
 
 The converted per-frame action is the transition from the WBC target at frame
 ``t`` to the WBC target at frame ``t + 1``:
@@ -8,8 +8,12 @@ The converted per-frame action is the transition from the WBC target at frame
      right wrist local translation (3), right wrist relative rotation-6D (6),
      left hand joint delta (6), right hand joint delta (6)]
 
-All action dimensions are already relative, so the WAM delta mask must be all
-False.  The final frame in each episode has a zero action.
+The default ``legacy30`` schema preserves the existing two-Inspire-hand dataset
+exactly.  The opt-in ``asymmetric25`` schema is a distinct hardware contract:
+left/right wrist ``9+9``, left RH56DFTP targets ``6`` and right OmniPicker
+aperture target ``1``.  It requires an explicit hardware manifest and named
+source channels, so legacy right-hand joints cannot be silently truncated into
+an OmniPicker command.
 """
 
 from __future__ import annotations
@@ -23,6 +27,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.spatial.transform import Rotation
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from world_action_model.asymmetric_action_schema import (
+    ASYMMETRIC_ACTION_DIM,
+    ASYMMETRIC_ACTION_NAMES,
+    ASYMMETRIC_SCHEMA_ID,
+    ASYMMETRIC_STATE_NAMES,
+    LEGACY_SCHEMA_ID,
+    pack_asymmetric_physical,
+)
 
 
 STATE_NAMES = [
@@ -74,7 +91,76 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="GR00T-WholeBodyControl checkout containing gear_sonic.",
     )
+    parser.add_argument(
+        "--action-schema",
+        choices=("legacy30", "asymmetric25"),
+        default="legacy30",
+        help="Defaults to the unchanged 30-D two-Inspire-hand representation.",
+    )
+    parser.add_argument(
+        "--hardware-manifest",
+        type=Path,
+        default=None,
+        help="Required for asymmetric25; declares named RH56DFTP and OmniPicker source channels.",
+    )
     return parser.parse_args()
+
+
+def _feature_names(info: dict, key: str) -> list[str]:
+    feature = info.get("features", {}).get(key)
+    if not isinstance(feature, dict):
+        raise KeyError(f"source metadata is missing features[{key!r}]")
+    names = feature.get("names")
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        raise ValueError(f"features[{key!r}].names must be an explicit string list")
+    return names
+
+
+def _load_asymmetric_manifest(path: Path | None, info: dict) -> dict:
+    if path is None:
+        raise ValueError("--hardware-manifest is required with --action-schema asymmetric25")
+    payload = json.loads(path.resolve().read_text(encoding="utf-8"))
+    if payload.get("action_schema_id") != ASYMMETRIC_SCHEMA_ID:
+        raise ValueError(
+            f"hardware manifest action_schema_id must be {ASYMMETRIC_SCHEMA_ID!r}"
+        )
+
+    state_names = _feature_names(info, "observation.state")
+    action_names = _feature_names(info, "action.wbc")
+    left_state_names = payload.get("left_rh56_state_names")
+    left_action_names = payload.get("left_rh56_action_names")
+    right_state_name = payload.get("right_omnipicker_state_name")
+    right_action_name = payload.get("right_omnipicker_action_name")
+    if not isinstance(left_state_names, list) or len(left_state_names) != 6:
+        raise ValueError("hardware manifest left_rh56_state_names must contain six names")
+    if not isinstance(left_action_names, list) or len(left_action_names) != 6:
+        raise ValueError("hardware manifest left_rh56_action_names must contain six names")
+    if not isinstance(right_state_name, str) or not isinstance(right_action_name, str):
+        raise ValueError("hardware manifest must name the OmniPicker state and action channels")
+
+    right_text = f"{right_state_name} {right_action_name}".lower()
+    if not any(marker in right_text for marker in ("omnipicker", "aperture", "jaw", "gripper_width")):
+        raise ValueError(
+            "OmniPicker channels must be explicitly named as OmniPicker/aperture/jaw/gripper_width; "
+            "legacy finger joints are not accepted"
+        )
+    legacy_markers = ("little", "ring", "middle", "index", "thumb")
+    if any(marker in right_text for marker in legacy_markers):
+        raise ValueError("legacy right-hand finger channels cannot declare an OmniPicker aperture")
+
+    def indices(names: list[str], requested: list[str] | tuple[str, ...], field: str) -> list[int]:
+        missing = [name for name in requested if name not in names]
+        if missing:
+            raise KeyError(f"{field} channels are absent from source metadata: {missing}")
+        return [names.index(name) for name in requested]
+
+    return {
+        "left_state_indices": indices(state_names, left_state_names, "left RH56 state"),
+        "left_action_indices": indices(action_names, left_action_names, "left RH56 action"),
+        "right_state_index": indices(state_names, [right_state_name], "right OmniPicker state")[0],
+        "right_action_index": indices(action_names, [right_action_name], "right OmniPicker action")[0],
+        "manifest": payload,
+    }
 
 
 def rot6d(matrix: np.ndarray) -> np.ndarray:
@@ -120,13 +206,21 @@ def convert_episode(
     destination: Path,
     robot_model,
     source_names: list[str],
+    *,
+    action_schema: str = "legacy30",
+    asymmetric_layout: dict | None = None,
 ) -> int:
+    if action_schema not in {"legacy30", "asymmetric25"}:
+        raise ValueError(f"unsupported action_schema={action_schema!r}")
     frame = pd.read_parquet(source)
     observed_eef = np.stack(frame["observation.eef_state"]).astype(np.float64)
     observed_state = np.stack(frame["observation.state"]).astype(np.float64)
     wbc_action = np.stack(frame["action.wbc"]).astype(np.float64)
+    if len(frame) == 0:
+        raise ValueError(f"empty episode: {source}")
 
-    state = np.empty((len(frame), 30), dtype=np.float32)
+    physical_dim = 30 if action_schema == "legacy30" else ASYMMETRIC_ACTION_DIM
+    state = np.empty((len(frame), physical_dim), dtype=np.float32)
     for side, (pos_slice, quat_slice, out_start) in enumerate(
         ((slice(0, 3), slice(3, 7), 0), (slice(7, 10), slice(10, 14), 9))
     ):
@@ -135,11 +229,22 @@ def convert_episode(
         quat_wxyz = observed_eef[:, quat_slice]
         matrices = Rotation.from_quat(quat_wxyz[:, [1, 2, 3, 0]]).as_matrix()
         state[:, out_start + 3 : out_start + 9] = np.stack([rot6d(r) for r in matrices])
-    state[:, 18:24] = observed_state[:, 29:35]
-    state[:, 24:30] = observed_state[:, 35:41]
+    if action_schema == "legacy30":
+        state[:, 18:24] = observed_state[:, 29:35]
+        state[:, 24:30] = observed_state[:, 35:41]
+    else:
+        if asymmetric_layout is None:
+            raise ValueError("asymmetric25 conversion requires a validated hardware layout")
+        state = pack_asymmetric_physical(
+            state[:, :9],
+            state[:, 9:18],
+            observed_state[:, asymmetric_layout["left_state_indices"]],
+            observed_state[:, asymmetric_layout["right_state_index"]],
+            name="asymmetric state",
+        )
 
     target_pos, target_rot = wrist_poses(robot_model, wbc_action, source_names)
-    action = np.zeros((len(frame), 30), dtype=np.float32)
+    action = np.zeros((len(frame), physical_dim), dtype=np.float32)
     identity_rot6d = rot6d(np.eye(3, dtype=np.float32))
     action[:, 3:9] = identity_rot6d
     action[:, 12:18] = identity_rot6d
@@ -151,8 +256,23 @@ def convert_episode(
                 relative_p = current_r.T @ (target_pos[t + 1, side] - target_pos[t, side])
                 action[t, out_start : out_start + 3] = relative_p
                 action[t, out_start + 3 : out_start + 9] = rot6d(relative_r)
-            action[t, 18:24] = wbc_action[t + 1, 29:35] - wbc_action[t, 29:35]
-            action[t, 24:30] = wbc_action[t + 1, 35:41] - wbc_action[t, 35:41]
+            if action_schema == "legacy30":
+                action[t, 18:24] = wbc_action[t + 1, 29:35] - wbc_action[t, 29:35]
+                action[t, 24:30] = wbc_action[t + 1, 35:41] - wbc_action[t, 35:41]
+
+    if action_schema == "asymmetric25":
+        assert asymmetric_layout is not None
+        # Wrist commands stay local relative transforms. Hand commands are
+        # absolute normalized actuator/aperture targets, matching the human
+        # grip-target semantics instead of inventing a six-channel right hand.
+        target_indices = np.minimum(np.arange(len(frame)) + 1, len(frame) - 1)
+        action = pack_asymmetric_physical(
+            action[:, :9],
+            action[:, 9:18],
+            wbc_action[target_indices][:, asymmetric_layout["left_action_indices"]],
+            wbc_action[target_indices, asymmetric_layout["right_action_index"]],
+            name="asymmetric action",
+        )
 
     keep = ["timestamp", "frame_index", "episode_index", "index", "task_index"]
     converted = frame[keep].copy()
@@ -173,8 +293,13 @@ def main() -> None:
     info_path = source_root / "meta" / "info.json"
     info = json.loads(info_path.read_text(encoding="utf-8"))
     source_names = list(info["features"]["action.wbc"]["names"])
-    if len(source_names) != 41:
+    if args.action_schema == "legacy30" and len(source_names) != 41:
         raise ValueError(f"Expected 41-D Inspire action, found {len(source_names)}")
+    asymmetric_layout = (
+        _load_asymmetric_manifest(args.hardware_manifest, info)
+        if args.action_schema == "asymmetric25"
+        else None
+    )
 
     robot_model = load_robot_model(sonic_root)
     (output_root / "meta").mkdir(parents=True)
@@ -212,6 +337,8 @@ def main() -> None:
             output_root / "data" / "chunk-000" / f"file-{episode_idx:03d}.parquet",
             robot_model,
             source_names,
+            action_schema=args.action_schema,
+            asymmetric_layout=asymmetric_layout,
         )
         source_video = next(
             (source_root / "videos").glob(
@@ -249,22 +376,28 @@ def main() -> None:
             print(f"Converted {episode_idx + 1}/{len(parquet_paths)} episodes")
 
     info["robot_type"] = "sonic_g1"
-    info["codebase_version"] = "v3.0"
+    info["codebase_version"] = "v3.1"
+    info["action_schema_id"] = (
+        LEGACY_SCHEMA_ID if args.action_schema == "legacy30" else ASYMMETRIC_SCHEMA_ID
+    )
     info["data_path"] = "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
     info["video_path"] = (
         "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
     )
+    output_dim = 30 if args.action_schema == "legacy30" else ASYMMETRIC_ACTION_DIM
+    output_state_names = STATE_NAMES if args.action_schema == "legacy30" else list(ASYMMETRIC_STATE_NAMES)
+    output_action_names = ACTION_NAMES if args.action_schema == "legacy30" else list(ASYMMETRIC_ACTION_NAMES)
     info["features"] = {
         "observation.images.ego_view": info["features"]["observation.images.ego_view"],
         "observation.state": {
             "dtype": "float32",
-            "shape": [30],
-            "names": STATE_NAMES,
+            "shape": [output_dim],
+            "names": output_state_names,
         },
         "action": {
             "dtype": "float32",
-            "shape": [30],
-            "names": ACTION_NAMES,
+            "shape": [output_dim],
+            "names": output_action_names,
         },
         "timestamp": {"dtype": "float32", "shape": [1], "names": None},
         "frame_index": {"dtype": "int64", "shape": [1], "names": None},
@@ -277,13 +410,16 @@ def main() -> None:
     info["total_chunks"] = 1
     info["total_videos"] = len(parquet_paths)
     info["chunks_size"] = max(len(parquet_paths), 1)
+    if asymmetric_layout is not None:
+        info["asymmetric_hardware_manifest"] = asymmetric_layout["manifest"]
     (output_root / "meta" / "info.json").write_text(
         json.dumps(info, indent=4) + "\n",
         encoding="utf-8",
     )
+    action_modality_name = "wrist_hand_delta" if args.action_schema == "legacy30" else "wrist_hand_action"
     modality = {
-        "state": {"wrist_hand_state": {"start": 0, "end": 30}},
-        "action": {"wrist_hand_delta": {"start": 0, "end": 30}},
+        "state": {"wrist_hand_state": {"start": 0, "end": output_dim}},
+        "action": {action_modality_name: {"start": 0, "end": output_dim}},
         "video": {"ego_view": {"original_key": "observation.images.ego_view"}},
         "annotation": {"human.task_description": {"original_key": "task_index"}},
     }
