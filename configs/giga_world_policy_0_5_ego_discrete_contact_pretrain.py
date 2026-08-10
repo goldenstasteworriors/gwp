@@ -4,23 +4,35 @@ The preflight runs before importing the permissive legacy/smoke config.  Fixed
 semantic and transport choices below are not environment-tunable.
 """
 
-import copy
 import os
 
-from world_action_model.contact_ego_stage1_preflight import (
+
+# When the collector is enabled, reject launcher topology before importing the
+# full preflight stack or any permissive/base configuration.  Keep this import
+# inside the opt-in branch so the disabled collector adds no module/artifact IO.
+if os.environ.get("GWP_MATCHED_CONTROL_OUTPUT_DIR", "").strip():
+    from world_action_model.ego_stage1_gate_bootstrap import (
+        minimal_matched_control_topology_precheck_from_environment,
+    )
+
+    minimal_matched_control_topology_precheck_from_environment()
+
+import copy  # noqa: E402
+
+from world_action_model.contact_ego_stage1_preflight import (  # noqa: E402
     ContactEgoStage1PreflightError,
     preflight_from_environment,
 )
-from world_action_model.contact_transition_schema import (
+from world_action_model.contact_transition_schema import (  # noqa: E402
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
     contact_transport_capacity_metadata,
 )
-from world_action_model.ego_action_schema import (
+from world_action_model.ego_action_schema import (  # noqa: E402
     EGO_CANONICAL_ACTION_SCHEMA_ID,
     EGO_HAND_STATUS_SEMANTICS,
 )
-from world_action_model.matched_control_config import (
+from world_action_model.matched_control_config import (  # noqa: E402
     configure_matched_control_from_environment,
 )
 
@@ -71,6 +83,12 @@ if (
         "legacy dataloader T5 source differs from the preflighted source"
     )
 dataset.update(
+    training_source_runtime_receipt=preflight_receipt[
+        "training_source_runtime_receipt_record_only"
+    ],
+    t5_runtime_source_receipt=preflight_receipt[
+        "t5_runtime_source_receipt_record_only"
+    ],
     contact_sidecar_dir=os.environ["GWP_CONTACT_SIDECAR_DIR"],
     contact_sidecar_pattern="episode_{episode_index:06d}.npz",
     contact_sidecar_strict=True,
@@ -87,6 +105,10 @@ if (
     or os.path.realpath(norm_specs[0]["path"]) != preflight_receipt["norm_stats_path"]
 ):
     raise ContactEgoStage1PreflightError("transform norm differs from preflighted Ego norm")
+norm_specs[0].update(
+    sha256=preflight_receipt["norm_stats_sha256"],
+    runtime_stat_record_only=preflight_receipt["norm_runtime_stat_record_only"],
+)
 transform.update(
     num_frames=48,
     fps=20,

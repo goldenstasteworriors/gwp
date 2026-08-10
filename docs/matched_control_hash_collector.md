@@ -70,6 +70,14 @@ then reopens and hashes every trace. A copied old report, missing trace,
 same-path trace replacement, or self-consistent but externally unapproved
 manifest cannot pass.
 
+The Stage1 gate v3 also binds a separate training-launch nonce from the
+environment and an explicit UTC launch-admission deadline. This bounds stale
+bundle reuse but is not a one-time ledger: the same fully bound evidence may
+be reused before expiry only for the same Git/data/config and reviewer gate.
+The full production preflight compares expected/report Git commit with the
+current repository HEAD and expected/report collector SHA with the installed
+source bytes even when capture is disabled.
+
 The comparator rejects missing fields; duplicate runs, files, or record keys;
 different seed/step/rank sets; incomplete ranks; different sample identities;
 any of the six unequal hashes; different control-config hash, hash scope, Git
@@ -80,6 +88,13 @@ It recomputes the dataset IDs from every recorded `batch_ids` entry, requires
 one dataset across all ranks, steps, seeds, and variants, and emits both the
 scalar `dataset_id` and auditable `dataset_ids` list for the Stage-1/Stage-2
 preflight binding.
+
+All collector trace/report JSON is strict JSON and writers use
+`allow_nan=False`. Non-standard NaN/Infinity values (including exponent
+overflow such as `1e999`) and booleans masquerading as integer topology/seed
+fields are rejected. Production performs a minimal canonical-decimal
+rank/world check before full artifact IO; the disabled path performs no
+collector-artifact IO and does not mutate config or RNG state.
 
 The Q0, capacity-control, auxiliary-only, raw-latent, shuffled, delayed, and
 oracle rows remain without a matched-control runner. The exact implemented

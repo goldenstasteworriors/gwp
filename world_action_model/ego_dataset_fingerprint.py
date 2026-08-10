@@ -8,9 +8,15 @@ on its absolute mount path.
 from __future__ import annotations
 
 import hashlib
-import json
+import io
 from pathlib import Path
 from typing import Any
+
+from world_action_model.verified_io import (
+    hash_verified_regular_file,
+    read_verified_bytes,
+    strict_json_loads,
+)
 
 
 EGO_STAGE1_FPS = 20.0
@@ -32,6 +38,8 @@ class EgoDatasetFingerprintError(ValueError):
 
 
 def _canonical_sha256(value: Any) -> str:
+    import json
+
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
             "utf-8"
@@ -39,27 +47,30 @@ def _canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _load_json(path: Path) -> dict:
-    if not path.is_file():
-        raise EgoDatasetFingerprintError(f"missing dataset metadata: {path}")
-    value = json.loads(path.read_text(encoding="utf-8"))
+def _load_json(path: Path) -> tuple[dict, dict[Path, tuple[str, dict[str, int]]]]:
+    try:
+        payload, digest, runtime_stat = read_verified_bytes(path)
+        value = strict_json_loads(payload, name=str(path))
+    except (OSError, ValueError) as exc:
+        raise EgoDatasetFingerprintError(f"invalid dataset metadata: {path}") from exc
     if not isinstance(value, dict):
         raise EgoDatasetFingerprintError(f"metadata must be a JSON object: {path}")
-    return value
+    return value, {path.absolute(): (digest, runtime_stat)}
 
 
-def _episode_rows(meta_root: Path) -> list[dict]:
+def _episode_rows(
+    meta_root: Path,
+) -> tuple[list[dict], dict[Path, tuple[str, dict[str, int]]]]:
     path = meta_root / "episodes.jsonl"
+    verified_sources: dict[Path, tuple[str, dict[str, int]]] = {}
     if path.is_file():
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        payload, digest, runtime_stat = read_verified_bytes(path)
+        verified_sources[path.absolute()] = (digest, runtime_stat)
+        rows = [
+            strict_json_loads(line.encode("utf-8"), name=f"{path}:{line_number}")
+            for line_number, line in enumerate(payload.decode("utf-8").splitlines(), 1)
+            if line.strip()
+        ]
     else:
         parquet_paths = sorted((meta_root / "episodes").glob("*/*.parquet")) + sorted(
             (meta_root / "episodes").glob("*.parquet")
@@ -76,17 +87,21 @@ def _episode_rows(meta_root: Path) -> list[dict]:
             ) from exc
         rows = []
         for parquet_path in parquet_paths:
-            rows.extend(pd.read_parquet(parquet_path).to_dict(orient="records"))
+            payload, digest, runtime_stat = read_verified_bytes(parquet_path)
+            verified_sources[parquet_path.absolute()] = (digest, runtime_stat)
+            rows.extend(pd.read_parquet(io.BytesIO(payload)).to_dict(orient="records"))
     canonical = []
     seen = set()
     for row_number, row in enumerate(rows, 1):
-        try:
-            episode = int(row["episode_index"])
-            length = int(row["length"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise EgoDatasetFingerprintError(
-                f"invalid episode metadata row {row_number}"
-            ) from exc
+        episode = row.get("episode_index") if isinstance(row, dict) else None
+        length = row.get("length") if isinstance(row, dict) else None
+        if (
+            isinstance(episode, bool)
+            or not isinstance(episode, int)
+            or isinstance(length, bool)
+            or not isinstance(length, int)
+        ):
+            raise EgoDatasetFingerprintError(f"invalid episode metadata row {row_number}")
         if episode < 0 or length <= 0 or episode in seen:
             raise EgoDatasetFingerprintError(
                 f"duplicate/invalid episode metadata row {row_number}"
@@ -105,12 +120,15 @@ def _episode_rows(meta_root: Path) -> list[dict]:
     canonical.sort(key=lambda row: row["episode_index"])
     if not canonical:
         raise EgoDatasetFingerprintError("episode metadata is empty")
-    return canonical
+    return canonical, verified_sources
 
 
 def _training_source_manifest(
-    root: Path, info: dict, episode_rows: list[dict]
-) -> tuple[list[dict], dict, dict]:
+    root: Path,
+    info: dict,
+    episode_rows: list[dict],
+    preverified_sources: dict[Path, tuple[str, dict[str, int]]],
+) -> tuple[list[dict], dict, dict, list[dict]]:
     """Hash every file the Stage1 LeRobot loader can consume.
 
     Logical paths are independent of the mount.  ``meta/info.json`` uses
@@ -158,8 +176,12 @@ def _training_source_manifest(
         template = info.get("video_path")
         if not isinstance(template, str) or not template:
             raise EgoDatasetFingerprintError("video features require info.video_path")
-        chunk_size = int(info.get("chunks_size", 1000))
-        if chunk_size <= 0:
+        chunk_size = info.get("chunks_size", 1000)
+        if (
+            isinstance(chunk_size, bool)
+            or not isinstance(chunk_size, int)
+            or chunk_size <= 0
+        ):
             raise EgoDatasetFingerprintError("info.chunks_size must be positive")
         for row in episode_rows:
             episode = int(row["episode_index"])
@@ -177,7 +199,7 @@ def _training_source_manifest(
                 actual_path = Path(declared).expanduser()
                 if not actual_path.is_absolute():
                     actual_path = root / actual_path
-                actual_path = actual_path.resolve()
+                actual_path = actual_path.absolute()
                 video_sources.append(
                     (
                         f"videos/{video_key}/episode_{episode:06d}.mp4",
@@ -195,6 +217,7 @@ def _training_source_manifest(
     paths_with_roles.extend((logical, "video", path) for logical, path in video_sources)
     paths_with_roles.sort(key=lambda item: item[0])
     manifest = []
+    runtime_receipt = []
     audit_counts = {role: {"files": 0, "bytes": 0} for role in (
         "metadata", "parquet", "video"
     )}
@@ -209,8 +232,22 @@ def _training_source_manifest(
             raise EgoDatasetFingerprintError(
                 f"training source is missing or symlinked: {path}"
             )
+        verified = preverified_sources.get(path.absolute())
+        if verified is None:
+            raw_sha256, runtime_stat = hash_verified_regular_file(path)
+        else:
+            raw_sha256, runtime_stat = verified
         audit_counts[role]["files"] += 1
-        audit_counts[role]["bytes"] += path.stat().st_size
+        audit_counts[role]["bytes"] += runtime_stat["size_bytes"]
+        runtime_receipt.append(
+            {
+                "logical_path": relative,
+                "logical_role": role,
+                "path_record_only": str(path.absolute()),
+                "sha256": raw_sha256,
+                "stat": runtime_stat,
+            }
+        )
         if relative == "meta/info.json":
             portable_info = {
                 key: value
@@ -228,8 +265,8 @@ def _training_source_manifest(
                 "path": relative,
                 "logical_role": role,
                 "digest_mode": "raw_file_bytes",
-                "size_bytes": path.stat().st_size,
-                "sha256": _sha256_file(path),
+                "size_bytes": runtime_stat["size_bytes"],
+                "sha256": raw_sha256,
             }
         manifest.append(entry)
     relative_paths = {entry["path"] for entry in manifest}
@@ -252,7 +289,7 @@ def _training_source_manifest(
         "video_feature_keys": video_keys,
     }
     receipt["receipt_sha256"] = _canonical_sha256(receipt)
-    return manifest, receipt, audit_counts
+    return manifest, receipt, audit_counts, runtime_receipt
 
 
 def derive_ego_t5_source_receipt(
@@ -268,7 +305,7 @@ def derive_ego_t5_source_receipt(
     replacement changes it.
     """
 
-    root = Path(t5_embedding_dir).expanduser().resolve()
+    root = Path(t5_embedding_dir).expanduser().absolute()
     if root.is_symlink() or not root.is_dir():
         raise EgoDatasetFingerprintError(
             f"Stage1 T5 source must be a real directory: {root}"
@@ -281,6 +318,7 @@ def derive_ego_t5_source_receipt(
     ):
         raise EgoDatasetFingerprintError("T5 receipt requires unique non-negative episodes")
     manifest = []
+    runtime_receipt = []
     total_bytes = 0
     for episode_index in indices:
         filename = f"episode_{episode_index:06d}.pt"
@@ -289,7 +327,8 @@ def derive_ego_t5_source_receipt(
             raise EgoDatasetFingerprintError(
                 f"missing or symlinked Stage1 T5 episode source: {path}"
             )
-        size_bytes = path.stat().st_size
+        digest, runtime_stat = hash_verified_regular_file(path)
+        size_bytes = runtime_stat["size_bytes"]
         total_bytes += size_bytes
         manifest.append(
             {
@@ -298,7 +337,17 @@ def derive_ego_t5_source_receipt(
                 "episode_index": episode_index,
                 "digest_mode": "raw_file_bytes",
                 "size_bytes": size_bytes,
-                "sha256": _sha256_file(path),
+                "sha256": digest,
+            }
+        )
+        runtime_receipt.append(
+            {
+                "logical_path": f"t5_embedding/episode_{episode_index:06d}.pt",
+                "logical_role": "t5_episode_condition",
+                "episode_index": episode_index,
+                "path_record_only": str(path.absolute()),
+                "sha256": digest,
+                "stat": runtime_stat,
             }
         )
     manifest_sha256 = _canonical_sha256(manifest)
@@ -317,15 +366,25 @@ def derive_ego_t5_source_receipt(
         "source_manifest_sha256": manifest_sha256,
         "source_receipt": receipt,
         "source_receipt_sha256": receipt["receipt_sha256"],
+        "runtime_source_receipt_record_only": runtime_receipt,
     }
 
 
 def derive_ego_dataset_identity(data_root: str | Path) -> dict:
     """Validate Stage1 metadata and derive a path-independent dataset ID."""
 
-    root = Path(data_root).expanduser().resolve()
-    info = _load_json(root / "meta" / "info.json")
-    rows = _episode_rows(root / "meta")
+    root = Path(data_root).expanduser().absolute()
+    if root.is_symlink() or not root.is_dir():
+        raise EgoDatasetFingerprintError(
+            f"Stage1 LeRobot root must be a real directory: {root}"
+        )
+    info, verified_sources = _load_json(root / "meta" / "info.json")
+    if str(info.get("codebase_version", "")).lower() != "v2.1":
+        raise EgoDatasetFingerprintError(
+            "production Ego Stage1 accepts only the audited LeRobot v2.1 metadata schema"
+        )
+    rows, episode_verified_sources = _episode_rows(root / "meta")
+    verified_sources.update(episode_verified_sources)
     required_features = {
         "observation.images.left": ("image", [480, 640, 3]),
         "action_eef": ("float32", [14]),
@@ -347,14 +406,23 @@ def derive_ego_dataset_identity(data_root: str | Path) -> dict:
     if float(info.get("fps", -1)) != EGO_STAGE1_FPS:
         raise EgoDatasetFingerprintError("Ego Stage1 dataset must be exactly 20 Hz")
     episode_lengths = {int(row["episode_index"]): int(row["length"]) for row in rows}
+    total_episodes = info.get("total_episodes")
+    total_frames = info.get("total_frames")
     if (
-        int(info.get("total_episodes", -1)) != len(rows)
-        or int(info.get("total_frames", -1)) != sum(episode_lengths.values())
+        isinstance(total_episodes, bool)
+        or not isinstance(total_episodes, int)
+        or isinstance(total_frames, bool)
+        or not isinstance(total_frames, int)
+        or total_episodes != len(rows)
+        or total_frames != sum(episode_lengths.values())
     ):
         raise EgoDatasetFingerprintError("dataset totals differ from episode metadata")
-    source_manifest, source_receipt, source_audit_summary = _training_source_manifest(
-        root, info, rows
-    )
+    (
+        source_manifest,
+        source_receipt,
+        source_audit_summary,
+        runtime_source_receipt,
+    ) = _training_source_manifest(root, info, rows, verified_sources)
 
     # Only stable, portable fields participate. Absolute paths, mtimes and
     # incidental JSON formatting are deliberately excluded.
@@ -386,6 +454,7 @@ def derive_ego_dataset_identity(data_root: str | Path) -> dict:
         "source_receipt": source_receipt,
         "source_receipt_sha256": source_receipt["receipt_sha256"],
         "source_audit_summary_record_only": source_audit_summary,
+        "runtime_source_receipt_record_only": runtime_source_receipt,
         "portable_info_ignored_fields": list(EGO_PORTABLE_INFO_IGNORED_FIELDS),
         "training_source_roots": list(EGO_TRAINING_SOURCE_ROOTS),
         "episode_lengths": episode_lengths,

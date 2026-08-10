@@ -1,5 +1,7 @@
 {
-  "gate_version": "ego-discrete-contact-stage1-training-gate/v2",
+  "gate_version": "ego-discrete-contact-stage1-training-gate/v3",
+  "evidence_valid_until_utc": null,
+  "training_run_nonce": null,
   "human_adjudicated_sidecar_passed": false,
   "independent_segment_count": 0,
   "dual_annotation_agreement_passed": false,
