@@ -32,14 +32,32 @@ output directory below `GWP05_PROJECT_DIR`. With the opt-in variable absent,
 the dataset, transform, trainer output, and RNG path remain on the legacy
 route.
 
-Production configs must call
-`configure_matched_control_from_environment(..., expected_dataset_id=receipt["dataset_id"])`
-after their preflight. When capture is enabled, the helper rejects any
+Production configs must call the following after their preflight:
+
+```python
+configure_matched_control_from_environment(
+    ...,
+    expected_dataset_id=receipt["dataset_id"],
+    **receipt["matched_control_expectations"],
+)
+```
+
+When capture is enabled, the helper rejects any
 environment dataset ID that differs from this receipt-bound value. The
 optional argument also supports portable derived IDs for legacy Ego metadata;
 it does not require editing the source dataset. When capture is disabled, the
 helper returns before reading any other collector environment variable and
 does not mutate the config or create files.
+
+Production Ego Stage1 additionally passes the complete reviewer-authored
+expectation receipt: Git commit, control hash, variant hash mapping, world/rank
+topology, collector version, and collector source hash. The enabled helper
+recomputes all locally knowable values before mutating the config. Each runtime
+collector independently checks its rank/world identity, Git commit, version,
+and source bytes before creating its rank-local file. The comparator emits
+`world_size`, `rank_set`, and an exact `topology` object so the production
+preflight can bind the report to that external receipt instead of allowing the
+report to certify itself.
 
 The comparator rejects missing fields; duplicate runs, files, or record keys;
 different seed/step/rank sets; incomplete ranks; different sample identities;

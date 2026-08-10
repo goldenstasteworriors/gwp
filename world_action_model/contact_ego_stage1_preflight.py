@@ -38,6 +38,7 @@ from world_action_model.ego_dataset_fingerprint import (
     EGO_STAGE1_FRAME_CLOCK,
     derive_ego_dataset_identity,
 )
+from world_action_model.matched_control_hashes import COLLECTOR_VERSION
 
 
 EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v1"
@@ -64,6 +65,7 @@ REQUIRED_ENV_PATHS = (
     "GWP_EGO_STAGE1_TRAINING_GATE",
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REVIEWED_BUILDER_ID = "scripts/contact_labels/build_contact_segment_sidecars_v1_1.py"
 REQUIRED_SIDECAR_KEYS = (
     "contact_target", "contact_loss_mask", "contact_confidence", "contact_condition_mask"
@@ -447,6 +449,79 @@ def _resolve_report(gate_path: Path, entry: Mapping, name: str) -> tuple[Path, d
     return path, _load_json(path, name), digest
 
 
+def _validate_matched_control_expectations(gate: Mapping) -> dict:
+    """Load reviewer-authored expectations without consulting the report.
+
+    These values are deliberately part of the production gate.  Deriving any
+    of them from the evidence report would let the artifact certify itself.
+    """
+
+    raw = gate.get("matched_control_expectations")
+    required = {
+        "expected_git_commit",
+        "expected_control_config_sha256",
+        "expected_variant_config_sha256",
+        "expected_world_size",
+        "expected_rank_set",
+        "expected_collector_version",
+        "expected_collector_source_sha256",
+    }
+    if not isinstance(raw, Mapping) or set(raw) != required:
+        raise ContactEgoStage1PreflightError(
+            "training gate matched_control_expectations are missing or have an unexpected schema"
+        )
+    git_commit = raw.get("expected_git_commit")
+    control_hash = raw.get("expected_control_config_sha256")
+    variant_hashes = raw.get("expected_variant_config_sha256")
+    world_size = raw.get("expected_world_size")
+    rank_set = raw.get("expected_rank_set")
+    collector_version = raw.get("expected_collector_version")
+    collector_source_sha256 = raw.get("expected_collector_source_sha256")
+    if not isinstance(git_commit, str) or not _GIT_COMMIT_RE.fullmatch(git_commit):
+        raise ContactEgoStage1PreflightError("invalid expected matched-control Git commit")
+    if not isinstance(control_hash, str) or not _SHA256_RE.fullmatch(control_hash):
+        raise ContactEgoStage1PreflightError("invalid expected matched-control control config hash")
+    if (
+        not isinstance(variant_hashes, Mapping)
+        or len(variant_hashes) < 2
+        or "hard_st" not in variant_hashes
+        or any(not isinstance(name, str) or not name for name in variant_hashes)
+        or any(
+            not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
+            for value in variant_hashes.values()
+        )
+    ):
+        raise ContactEgoStage1PreflightError(
+            "invalid expected matched-control variant config hash mapping"
+        )
+    if isinstance(world_size, bool) or not isinstance(world_size, int) or world_size <= 0:
+        raise ContactEgoStage1PreflightError("invalid expected matched-control world size")
+    if (
+        not isinstance(rank_set, list)
+        or any(isinstance(rank, bool) or not isinstance(rank, int) for rank in rank_set)
+        or rank_set != list(range(world_size))
+    ):
+        raise ContactEgoStage1PreflightError(
+            "expected matched-control rank set must be the complete ordered topology"
+        )
+    if collector_version != COLLECTOR_VERSION:
+        raise ContactEgoStage1PreflightError("unexpected matched-control collector version")
+    if (
+        not isinstance(collector_source_sha256, str)
+        or not _SHA256_RE.fullmatch(collector_source_sha256)
+    ):
+        raise ContactEgoStage1PreflightError("invalid expected collector source hash")
+    return {
+        "expected_git_commit": git_commit,
+        "expected_control_config_sha256": control_hash,
+        "expected_variant_config_sha256": dict(variant_hashes),
+        "expected_world_size": world_size,
+        "expected_rank_set": list(rank_set),
+        "expected_collector_version": collector_version,
+        "expected_collector_source_sha256": collector_source_sha256,
+    }
+
+
 def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id: str) -> dict:
     if gate.get("gate_version") != EGO_STAGE1_GATE_VERSION:
         raise ContactEgoStage1PreflightError("training gate version differs")
@@ -467,6 +542,7 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
         raise ContactEgoStage1PreflightError("gate reviewer missing")
     if not isinstance(gate.get("reviewed_at_utc"), str) or not gate["reviewed_at_utc"].endswith("Z"):
         raise ContactEgoStage1PreflightError("gate review timestamp missing")
+    matched_control_expected = _validate_matched_control_expectations(gate)
     entries = gate.get("evidence_reports")
     if not isinstance(entries, Mapping):
         raise ContactEgoStage1PreflightError("gate evidence reports missing")
@@ -553,21 +629,55 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
     if valid_code:
         path = Path(code["path"])
         if not path.is_absolute(): path = reports["matched_control_hash_collector"][0].parent / path
-        valid_code = bool(code.get("version")) and code.get("sha256") == sha256_file(path.resolve())
+        try:
+            valid_code = (
+                code.get("version") == matched_control_expected["expected_collector_version"]
+                and code.get("sha256")
+                == matched_control_expected["expected_collector_source_sha256"]
+                and code.get("sha256") == sha256_file(path.resolve())
+            )
+        except OSError:
+            valid_code = False
+    expected_variants = matched_control_expected["expected_variant_config_sha256"]
+    expected_topology = {
+        "world_size": matched_control_expected["expected_world_size"],
+        "rank_set": matched_control_expected["expected_rank_set"],
+    }
     if (
-        collector.get("report_version") != "matched-control-hash-collector/v1"
+        collector.get("report_version")
+        != matched_control_expected["expected_collector_version"]
         or collector.get("status") != "passed" or collector.get("collector_implemented") is not True
         or set(collector.get("captured_hashes", [])) != required_hashes
         or collector.get("dry_run_passed") is not True
+        or collector.get("all_hashes_equal") is not True
         or collector.get("all_hashes_equal_across_variants") is not True
+        or collector.get("seeds") != [6666, 7777, 8888]
+        or not isinstance(collector.get("run_id"), str)
+        or not collector.get("run_id")
         or collector.get("dataset_id") != dataset_id
         or collector.get("dataset_ids") != [dataset_id]
+        or collector.get("git_commit")
+        != matched_control_expected["expected_git_commit"]
+        or collector.get("control_config_sha256")
+        != matched_control_expected["expected_control_config_sha256"]
+        or collector.get("variant_config_sha256") != expected_variants
+        or collector.get("variants") != sorted(expected_variants)
+        or collector.get("world_size")
+        != matched_control_expected["expected_world_size"]
+        or collector.get("rank_set")
+        != matched_control_expected["expected_rank_set"]
+        or collector.get("topology") != expected_topology
         or not isinstance(collector.get("matched_batch_count"), int)
         or isinstance(collector.get("matched_batch_count"), bool)
         or collector.get("matched_batch_count", 0) <= 0 or not valid_code
     ):
         raise ContactEgoStage1PreflightError("matched-control collector evidence failed")
-    return {"annotation_agreement": annotation_digest, "ego_action_grip": grip_digest, "matched_control_hash_collector": collector_digest}
+    return {
+        "annotation_agreement": annotation_digest,
+        "ego_action_grip": grip_digest,
+        "matched_control_hash_collector": collector_digest,
+        "matched_control_expectations": matched_control_expected,
+    }
 
 
 def validate_ego_stage1_training_preflight(
@@ -618,7 +728,11 @@ def validate_ego_stage1_training_preflight(
         "data_root": identity["data_root"], "norm_stats_path": str(norm_path),
         "sidecar_dir": str(Path(sidecar_dir).resolve()),
         "dataset_id": identity["dataset_id"], "episode_npz_sha256": sidecar["episode_npz_sha256"],
-        "evidence_report_sha256": evidence, **expected,
+        "evidence_report_sha256": {
+            key: value for key, value in evidence.items() if key != "matched_control_expectations"
+        },
+        "matched_control_expectations": evidence["matched_control_expectations"],
+        **expected,
     }
 
 
