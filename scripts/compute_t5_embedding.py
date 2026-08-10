@@ -303,7 +303,10 @@ def _encode_t5(encoder: Any, instruction: str, device: str) -> torch.Tensor:
 
     if emb.ndim == 3 and emb.shape[0] == 1:
         emb = emb.squeeze(0)
-    return emb.detach().cpu()
+    # WAN returns a short view into a text_len-sized context tensor. Clone the
+    # view so torch.save does not serialize the full backing storage for every
+    # episode-level cache file.
+    return emb.detach().cpu().clone()
 
 
 def _is_quality_label(text: str) -> bool:
