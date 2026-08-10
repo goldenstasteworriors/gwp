@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import pickle
 import re
@@ -9,6 +10,10 @@ from giga_datasets import utils
 from giga_datasets.datasets.base_dataset import BaseDataset
 from giga_datasets.datasets.dataset import ConcatDataset, load_config, register_dataset
 from giga_datasets.datasets.lerobot_dataset import FastLeRobotDataset, _LeRobotDatasetMetadata
+from world_action_model.contact_transition_schema import (
+    SEGMENT_SCHEMA_VERSION,
+    SEGMENT_TARGET_DIM,
+)
 
 _SUBTASK_MARKER_RE = re.compile(r"\bsubtask\s*:\s*", flags=re.IGNORECASE)
 _T5_LOAD_FROM_CHOICES = ("dir", "pkl", "path")
@@ -32,6 +37,9 @@ class WAMLeRobotDataset(BaseDataset):
         contact_sidecar_pattern: str = "episode_{episode_index:06d}.npz",
         contact_sidecar_cache_size: int = 8,
         contact_sidecar_strict: bool = False,
+        contact_sidecar_require_reviewed_v1_1: bool = False,
+        contact_sidecar_expected_meta_sha256: str | None = None,
+        contact_sidecar_expected_episode_sha256: dict[str, str] | None = None,
         meta_name: str | None = None,
         robotype: str | None = None,
         **kwargs,
@@ -63,6 +71,46 @@ class WAMLeRobotDataset(BaseDataset):
         self.contact_sidecar_pattern = str(contact_sidecar_pattern)
         self.contact_sidecar_cache_size = max(0, int(contact_sidecar_cache_size))
         self.contact_sidecar_strict = bool(contact_sidecar_strict)
+        self.contact_sidecar_require_reviewed_v1_1 = bool(
+            contact_sidecar_require_reviewed_v1_1
+        )
+        self.contact_sidecar_expected_meta_sha256 = (
+            None
+            if contact_sidecar_expected_meta_sha256 is None
+            else str(contact_sidecar_expected_meta_sha256)
+        )
+        self.contact_sidecar_expected_episode_sha256 = dict(
+            contact_sidecar_expected_episode_sha256 or {}
+        )
+        if self.contact_sidecar_require_reviewed_v1_1:
+            if not self.contact_sidecar_strict or self.contact_sidecar_dir is None:
+                raise ValueError(
+                    "reviewed contact_segment_v1_1 requires a strict sidecar directory"
+                )
+            meta_path = os.path.join(self.contact_sidecar_dir, "meta.json")
+            if not os.path.isfile(meta_path):
+                raise FileNotFoundError(f"missing reviewed contact sidecar meta: {meta_path}")
+            with open(meta_path, "rb") as handle:
+                meta_bytes = handle.read()
+            meta_digest = hashlib.sha256(meta_bytes).hexdigest()
+            if meta_digest != self.contact_sidecar_expected_meta_sha256:
+                raise ValueError("contact sidecar meta fingerprint differs from preflight")
+            meta = json.loads(meta_bytes.decode("utf-8"))
+            if (
+                meta.get("schema_version") != SEGMENT_SCHEMA_VERSION
+                or meta.get("target_dim") != SEGMENT_TARGET_DIM
+                or meta.get("num_queries") != 12
+                or meta.get("builder_identity")
+                != "scripts/contact_labels/build_contact_segment_sidecars_v1_1.py"
+                or meta.get("annotation_contract")
+                != {
+                    "annotation_role": "adjudicated",
+                    "review_status": "reviewed",
+                    "label_origin": "human_adjudicated",
+                    "automatic_or_proposal_ground_truth": False,
+                }
+            ):
+                raise ValueError("contact sidecar meta is not reviewed contact_segment_v1_1")
         self._contact_sidecar_cache = {}
         self._contact_sidecar_cache_order = []
         self.meta_name = meta_name
@@ -291,6 +339,18 @@ class WAMLeRobotDataset(BaseDataset):
             if self.contact_sidecar_strict:
                 raise FileNotFoundError(f"missing contact sidecar: {path}")
             return None
+        if self.contact_sidecar_require_reviewed_v1_1:
+            expected_digest = self.contact_sidecar_expected_episode_sha256.get(
+                os.path.basename(path)
+            )
+            if expected_digest is None:
+                raise ValueError(f"missing preflight NPZ fingerprint for {path}")
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            if digest.hexdigest() != expected_digest:
+                raise ValueError(f"contact sidecar NPZ changed after preflight: {path}")
         with np.load(path, allow_pickle=False) as archive:
             sidecar = {key: archive[key] for key in archive.files}
         required = {
@@ -305,6 +365,20 @@ class WAMLeRobotDataset(BaseDataset):
         lengths = {int(sidecar[key].shape[0]) for key in required}
         if len(lengths) != 1:
             raise ValueError(f"inconsistent frame counts in contact sidecar {path}: {lengths}")
+        if self.contact_sidecar_require_reviewed_v1_1:
+            expected_tail = (12, SEGMENT_TARGET_DIM)
+            for key in required:
+                value = sidecar[key]
+                if (
+                    value.ndim != 3
+                    or value.shape[1:] != expected_tail
+                    or value.dtype != np.float32
+                    or not np.isfinite(value).all()
+                ):
+                    raise ValueError(
+                        f"reviewed sidecar {path}:{key} must be finite float32 "
+                        f"[T,12,{SEGMENT_TARGET_DIM}], got {value.dtype} {value.shape}"
+                    )
         if self.contact_sidecar_cache_size > 0:
             self._contact_sidecar_cache[episode_index] = sidecar
             self._contact_sidecar_cache_order.append(episode_index)

@@ -3,7 +3,7 @@
 ## 独立轮
 
 - A/B 先对同一 episode 独立填写 coverage，再填写 physical segments；不共享屏幕、ID 或中间 CSV。
-- 独立轮 `annotation_role=independent_a|independent_b`、`label_origin=human_independent`。自动候选和 episode 0 timing hint 必须隐藏。
+- 独立轮 `annotation_role=independent_a|independent_b`、`review_status=submitted`、`label_origin=human_independent`。自动候选和 episode 0 timing hint 必须隐藏。
 - 标注者可看原速、逐帧及 ±10 帧上下文。直接可见用 `rgb_direct`，依赖状态变化判断用 `rgb_temporal`；不得把 hand_status、prescreen、模型输出或常识当物理接触真值。
 - 透明器材界面不可辨时，把类别留空或将边界记 unknown；禁止补写 stream、liquid 或接触位置标签。
 

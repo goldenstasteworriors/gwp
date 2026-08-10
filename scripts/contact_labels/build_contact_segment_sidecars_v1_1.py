@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -28,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--coverage-csv", required=True, type=Path)
     parser.add_argument("--segments-csv", required=True, type=Path)
     parser.add_argument("--inventory-csv", required=True, type=Path)
+    parser.add_argument("--split-manifest", required=True, type=Path)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--overwrite", action="store_true")
@@ -65,6 +67,7 @@ def main() -> None:
     for segment in segments:
         segment_by_episode[segment.episode_id].append(segment)
     provenance_rows = []
+    episode_npz_sha256 = {}
     for episode, item in sorted(inventory.items()):
         arrays, provenance = encode_episode(
             item.length_frames,
@@ -81,13 +84,26 @@ def main() -> None:
         with partial.open("wb") as handle:
             np.savez_compressed(handle, **arrays)
         partial.replace(destination)
+        episode_npz_sha256[destination.name] = sha256_file(destination)
         for row in provenance:
             provenance_rows.append({"episode_id": episode, **row})
+    provenance_path = args.output_dir / "window_segment_provenance.csv"
     write_csv(
-        args.output_dir / "window_segment_provenance.csv",
+        provenance_path,
         ("episode_id", "frame_index", "query_index", "segment_id", "onset_event_id", "release_event_id"),
         provenance_rows,
     )
+    provenance_sha256 = sha256_file(provenance_path)
+    sidecar_bundle_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "episode_npz_sha256": episode_npz_sha256,
+                "window_segment_provenance_sha256": provenance_sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     meta = {
         "schema_version": SEGMENT_SCHEMA_VERSION,
         "target_dim": SEGMENT_TARGET_DIM,
@@ -112,7 +128,21 @@ def main() -> None:
             "segments_csv": sha256_file(args.segments_csv),
             "inventory_csv": sha256_file(args.inventory_csv),
             "config": sha256_file(args.config),
+            "split_manifest": sha256_file(args.split_manifest),
         },
+        "episode_npz_sha256": episode_npz_sha256,
+        "window_segment_provenance_sha256": provenance_sha256,
+        "sidecar_bundle_sha256": sidecar_bundle_sha256,
+        "builder_identity": "scripts/contact_labels/build_contact_segment_sidecars_v1_1.py",
+        "annotation_contract": {
+            "annotation_role": "adjudicated",
+            "review_status": "reviewed",
+            "label_origin": "human_adjudicated",
+            "automatic_or_proposal_ground_truth": False,
+        },
+        "strategy_claim_allowed": bool(
+            config.get("split_policy", {}).get("strategy_claim_allowed", False)
+        ),
         "warning": "window_segment_rows are repeated views of unique physical segment_id values and are not independent events",
     }
     write_json(args.output_dir / "meta.json", meta)

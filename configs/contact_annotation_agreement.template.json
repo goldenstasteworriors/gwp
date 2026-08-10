@@ -1,0 +1,23 @@
+{
+  "report_version": "contact-annotation-agreement/v1",
+  "status": "not_run",
+  "independent_annotation": false,
+  "adjudication_completed": false,
+  "dual_annotation_agreement_passed": false,
+  "independent_segment_count": 0,
+  "metrics": {
+    "coverage_kappa": null,
+    "event_f1": null,
+    "median_temporal_iou": null,
+    "boundary_mae_frames": null,
+    "categorical_kappa": null
+  },
+  "source_files": {
+    "coverage_annotator_a": {"path": null, "sha256": null},
+    "segments_annotator_a": {"path": null, "sha256": null},
+    "coverage_annotator_b": {"path": null, "sha256": null},
+    "segments_annotator_b": {"path": null, "sha256": null},
+    "coverage_adjudicated": {"path": null, "sha256": null},
+    "segments_adjudicated": {"path": null, "sha256": null}
+  }
+}

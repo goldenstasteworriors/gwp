@@ -1,0 +1,10 @@
+{
+  "report_version": "matched-control-hash-collector/v1",
+  "status": "not_run",
+  "collector_implemented": false,
+  "collector_code": {"path": null, "sha256": null, "version": null},
+  "dry_run_passed": false,
+  "matched_batch_count": 0,
+  "all_hashes_equal_across_variants": false,
+  "captured_hashes": []
+}

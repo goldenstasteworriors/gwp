@@ -1,0 +1,10 @@
+{
+  "report_version": "asymmetric25-hardware-verification/v1",
+  "status": "not_run",
+  "real_hardware_capture": false,
+  "dataset_id": null,
+  "hardware_contract_sha256": null,
+  "calibration_capture_sha256": null,
+  "dataset_info_sha256": null,
+  "episode_metadata_sha256": null
+}

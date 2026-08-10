@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--coverage-csv", type=Path)
     parser.add_argument("--segments-csv", type=Path)
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--split-manifest", type=Path)
     return parser.parse_args()
 
 
@@ -145,6 +146,7 @@ def main() -> None:
         "segments_csv": args.segments_csv,
         "config": args.config,
         "inventory_csv": args.inventory_csv,
+        "split_manifest": args.split_manifest,
     }
     for key, path in supplied.items():
         if path is not None and meta["input_sha256"].get(key) != sha256_file(path):

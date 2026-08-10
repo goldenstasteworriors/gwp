@@ -47,6 +47,7 @@ python scripts/contact_labels/build_contact_segment_sidecars_v1_1.py \
   --coverage-csv /path/to/coverage_adjudicated.csv \
   --segments-csv /path/to/segments_adjudicated.csv \
   --inventory-csv track_a/contact_labels_v1_1/episode_inventory.csv \
+  --split-manifest /path/to/reviewed_group_split_manifest.csv \
   --config track_a/contact_labels_v1_1/config/sidecar_v1_1.json \
   --output-dir /path/to/contact_segment_sidecars
 ```
@@ -61,6 +62,7 @@ python scripts/contact_labels/validate_contact_segment_sidecars_v1_1.py \
   --inventory-csv track_a/contact_labels_v1_1/episode_inventory.csv \
   --coverage-csv /path/to/coverage_adjudicated.csv \
   --segments-csv /path/to/segments_adjudicated.csv \
+  --split-manifest /path/to/reviewed_group_split_manifest.csv \
   --config track_a/contact_labels_v1_1/config/sidecar_v1_1.json
 ```
 

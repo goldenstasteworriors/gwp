@@ -28,6 +28,7 @@ existing norm_stats JSON format consumed by WALeRobotTransformsPretrain.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sys
@@ -92,6 +93,31 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def episode_metadata_sha256(root: Path) -> str:
+    jsonl = root / "meta" / "episodes.jsonl"
+    paths = [jsonl] if jsonl.is_file() else (
+        sorted((root / "meta" / "episodes").glob("*/*.parquet"))
+        + sorted((root / "meta" / "episodes").glob("*.parquet"))
+    )
+    if not paths:
+        raise FileNotFoundError(f"missing episode metadata under {root / 'meta'}")
+    payload = [
+        {"path": str(path.relative_to(root)), "sha256": sha256_file(path)}
+        for path in paths
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def validate_dataset_schema(root: Path, action_schema_id: str) -> dict | None:
     info_path = root / "meta" / "info.json"
     info = json.loads(info_path.read_text(encoding="utf-8"))
@@ -116,6 +142,8 @@ def validate_dataset_schema(root: Path, action_schema_id: str) -> dict | None:
             "calibration_verification_level": manifest["calibration"][
                 "verification_level"
             ],
+            "dataset_info_sha256": sha256_file(info_path),
+            "episode_metadata_sha256": episode_metadata_sha256(root),
         }
     return None
 
@@ -453,16 +481,34 @@ def main() -> None:
     n_episodes = 0
     roots_meta = []
     asymmetric_contract = None
+    asymmetric_fingerprints = []
     for root in roots:
         if args.action_schema_id is not None:
             contract = validate_dataset_schema(root, args.action_schema_id)
             if contract is not None:
+                common_contract = {
+                    key: contract[key]
+                    for key in (
+                        "hardware_contract_sha256",
+                        "calibration_capture_sha256",
+                        "calibration_verification_level",
+                    )
+                }
                 if asymmetric_contract is None:
-                    asymmetric_contract = contract
-                elif contract != asymmetric_contract:
+                    asymmetric_contract = common_contract
+                elif common_contract != asymmetric_contract:
                     raise ValueError(
                         "asymmetric data roots use different hardware or calibration contracts"
                     )
+                asymmetric_fingerprints.append(
+                    {
+                        "root": str(root.resolve()),
+                        "dataset_info_sha256": contract["dataset_info_sha256"],
+                        "episode_metadata_sha256": contract[
+                            "episode_metadata_sha256"
+                        ],
+                    }
+                )
         check_delta_alignment(root, mask, strict=args.strict_align)
         eps, r_states, r_actions = process_root(
             root, dim=dim, offsets=offsets, mask=mask, dtype=dtype,
@@ -506,6 +552,9 @@ def main() -> None:
             result["metadata"]["action_schema_id"] = args.action_schema_id
         if asymmetric_contract is not None:
             result["metadata"].update(asymmetric_contract)
+            result["metadata"]["dataset_fingerprints"] = asymmetric_fingerprints
+            if len(asymmetric_fingerprints) == 1:
+                result["metadata"].update(asymmetric_fingerprints[0])
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)

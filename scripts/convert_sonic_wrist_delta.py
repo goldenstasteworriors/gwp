@@ -119,6 +119,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Required for asymmetric25; proves calibration digest, devices and verification level.",
     )
+    parser.add_argument(
+        "--dataset-id",
+        default=None,
+        help=(
+            "Stable identity for the converted dataset and contact sidecars. "
+            "Required for asymmetric25; legacy30 remains unchanged."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -314,6 +322,8 @@ def main() -> None:
         if args.action_schema == "asymmetric25"
         else None
     )
+    if args.action_schema == "asymmetric25" and not str(args.dataset_id or "").strip():
+        raise ValueError("--dataset-id is required with --action-schema asymmetric25")
     command_key = "action.wbc" if asymmetric_layout is None else asymmetric_layout["command_feature"]
     source_names = list(info["features"][command_key]["names"])
     if args.action_schema == "legacy30" and len(source_names) != 41:
@@ -429,6 +439,14 @@ def main() -> None:
     info["total_videos"] = len(parquet_paths)
     info["chunks_size"] = max(len(parquet_paths), 1)
     if asymmetric_layout is not None:
+        info["dataset_id"] = str(args.dataset_id).strip()
+        info["frame_clock"] = "dataset_native_frame_index"
+        info["timestamp_semantics"] = {
+            "feature": asymmetric_layout["manifest"]["timing"]["timestamp_feature"],
+            "origin": asymmetric_layout["manifest"]["timing"]["timestamp_origin"],
+            "state": asymmetric_layout["manifest"]["timing"]["state_sample_semantics"],
+            "action": asymmetric_layout["manifest"]["timing"]["action_sample_semantics"],
+        }
         info["asymmetric_hardware_manifest"] = asymmetric_layout["manifest"]
         info["hardware_contract_sha256"] = asymmetric_layout["hardware_contract_sha256"]
         info["calibration_capture_sha256"] = asymmetric_layout[

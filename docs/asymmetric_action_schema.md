@@ -96,9 +96,14 @@ python scripts/convert_sonic_wrist_delta.py \
   --output /path/to/asymmetric25_lerobot \
   --sonic-root /path/to/GR00T-WholeBodyControl \
   --action-schema asymmetric25 \
+  --dataset-id robot_rh56_omnipicker_collection_v1 \
   --hardware-manifest /path/to/rh56_omnipicker_manifest.json \
   --calibration-capture /path/to/rh56_omnipicker_calibration.json
 ```
+
+`--dataset-id` is mandatory for asymmetric25 and must also appear in the
+reviewed robot contact sidecar build config. It prevents a self-consistent
+sidecar from another dataset being attached by matching episode numbers alone.
 
 Compute schema-labelled normalization statistics with no further delta
 conversion, because the converter already emits local wrist transforms:

@@ -1,0 +1,23 @@
+{
+  "config_version": "contact_label_build_config_v1_1",
+  "dataset_id": null,
+  "annotation_schema_version": "contact_segment_annotation_v1_1",
+  "sidecar_schema_version": "contact_segment_v1_1",
+  "frame_clock": "dataset_native_frame_index",
+  "target_fps": null,
+  "horizon_frames": 48,
+  "num_queries": 12,
+  "negative_confidence": 0.1,
+  "accepted_annotation_role": "adjudicated",
+  "overflow_policy": "hard_error_no_drop",
+  "split_policy": {
+    "seeds": [6666, 7777, 8888],
+    "ood_eligible": false,
+    "strategy_claim_allowed": false,
+    "group_fields_by_seed": {
+      "seed_6666_split": ["subject_id", "session_id", "source_object_instance_id", "target_object_instance_id"],
+      "seed_7777_split": ["subject_id", "session_id", "source_object_instance_id", "target_object_instance_id"],
+      "seed_8888_split": ["subject_id", "session_id", "source_object_instance_id", "target_object_instance_id"]
+    }
+  }
+}
