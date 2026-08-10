@@ -28,6 +28,15 @@
     "ego_action_grip": {"path": null, "sha256": null},
     "matched_control_hash_collector": {"path": null, "sha256": null}
   },
+  "matched_control_expectations": {
+    "expected_git_commit": null,
+    "expected_control_config_sha256": null,
+    "expected_variant_config_sha256": null,
+    "expected_world_size": null,
+    "expected_rank_set": null,
+    "expected_collector_version": null,
+    "expected_collector_source_sha256": null
+  },
   "reviewed_by": null,
   "reviewed_at_utc": null,
   "note": "Fail-closed template only. It is not a true example and cannot authorize training."

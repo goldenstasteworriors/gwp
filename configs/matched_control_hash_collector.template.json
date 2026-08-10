@@ -33,6 +33,9 @@
   "control_config_sha256": null,
   "config_hash_scope": null,
   "git_commit": null,
+  "world_size": null,
+  "rank_set": null,
+  "topology": null,
   "global_hashes": {},
   "errors": ["template only: run the real collector and offline comparator"]
 }

@@ -290,6 +290,41 @@ class MatchedControlCollector:
             )
         self.config_hash_scope = dict(self.config_hash_scope)
 
+        expected_version = config.get("expected_collector_version")
+        if expected_version is not None and expected_version != COLLECTOR_VERSION:
+            raise MatchedControlError(
+                "collector version differs from the production expectation"
+            )
+        expected_world_size = config.get("expected_world_size")
+        if expected_world_size is not None and self.world_size != expected_world_size:
+            raise MatchedControlError(
+                "runtime world_size differs from the production expectation"
+            )
+        expected_rank_set = config.get("expected_rank_set")
+        if expected_rank_set is not None and (
+            not isinstance(expected_rank_set, list)
+            or expected_rank_set != list(range(self.world_size))
+            or self.rank not in expected_rank_set
+        ):
+            raise MatchedControlError(
+                "runtime rank topology differs from the production expectation"
+            )
+        self.git_commit = _discover_git_commit(Path(__file__).resolve().parent)
+        self.collector_code_sha256 = _sha256_file(Path(__file__).resolve())
+        expected_git_commit = config.get("expected_git_commit")
+        if expected_git_commit is not None and self.git_commit != expected_git_commit:
+            raise MatchedControlError(
+                "runtime Git commit differs from the production expectation"
+            )
+        expected_source_sha256 = config.get("expected_collector_source_sha256")
+        if (
+            expected_source_sha256 is not None
+            and self.collector_code_sha256 != expected_source_sha256
+        ):
+            raise MatchedControlError(
+                "runtime collector source SHA differs from the production expectation"
+            )
+
         project_path = Path(project_dir).expanduser().resolve()
         output_dir_value = config.get("output_dir")
         if not output_dir_value:
@@ -306,8 +341,6 @@ class MatchedControlCollector:
                 f"refusing to mix matched-control runs in existing file: {self.output_path}"
             )
         self.output_path.touch(exist_ok=False)
-        self.git_commit = str(config.get("git_commit") or _discover_git_commit(Path(__file__).resolve().parent))
-        self.collector_code_sha256 = _sha256_file(Path(__file__).resolve())
         self._micro_steps: dict[int, int] = {}
 
     @staticmethod
@@ -554,6 +587,9 @@ def compare_variant_traces(
         "control_config_sha256": None,
         "config_hash_scope": None,
         "git_commit": None,
+        "world_size": None,
+        "rank_set": None,
+        "topology": None,
         "errors": [],
     }
     try:
@@ -626,6 +662,15 @@ def compare_variant_traces(
             raise MatchedControlError("collector code SHA differs across traces or current code")
         if versions != {COLLECTOR_VERSION}:
             raise MatchedControlError("collector version differs across variants")
+        world_sizes = {int(record["world_size"]) for record in all_records}
+        if len(world_sizes) != 1:
+            raise MatchedControlError("world_size changes within the matched-control report")
+        report_world_size = next(iter(world_sizes))
+        report_rank_set = sorted({int(record["rank"]) for record in all_records})
+        if report_rank_set != list(range(report_world_size)):
+            raise MatchedControlError(
+                "report rank set is incomplete for its world_size"
+            )
         variant_hashes: dict[str, str] = {}
         for variant, records in indexed.items():
             values = {record["variant_config_sha256"] for record in records.values()}
@@ -703,6 +748,12 @@ def compare_variant_traces(
             control_config_sha256=next(iter(control_hashes)),
             config_hash_scope=json.loads(next(iter(hash_scopes))),
             git_commit=next(iter(git_commits)),
+            world_size=report_world_size,
+            rank_set=report_rank_set,
+            topology={
+                "world_size": report_world_size,
+                "rank_set": report_rank_set,
+            },
             errors=[],
         )
     except (KeyError, TypeError, ValueError, OSError) as exc:

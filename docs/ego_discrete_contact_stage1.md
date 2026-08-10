@@ -93,10 +93,21 @@ collector evidence, and separate `allow_server_training` and
 
 The matched-control report must expose exactly one `dataset_id`. Both its
 scalar `dataset_id` and singleton `dataset_ids` list must equal the portable ID
-derived by the Stage1 preflight. Optional in-process capture receives that same
-receipt as `expected_dataset_id`; an environment value cannot replace it. With
+derived by the Stage1 preflight. The production gate must independently state
+the expected full Git commit, control-config SHA256, complete variant-to-config
+SHA256 mapping, world size, complete ordered rank set, collector version, and
+collector source SHA256. The preflight compares every report field against
+those reviewer-authored values; it never copies expectations out of the report
+being checked. Null, partial, stale, or self-described expectations fail.
+
+Optional in-process capture receives the portable dataset identity and that
+same expectation receipt from the preflight. On the enabled path it recomputes
+the effective hard-ST config hash, current Git commit and collector source hash,
+then checks runtime rank topology before creating a trace file. An environment
+value cannot replace the dataset receipt. With
 `GWP_MATCHED_CONTROL_OUTPUT_DIR` unset, collector wiring returns before reading
-other collector variables, hashing files, mutating config, or creating paths.
+other collector variables, hashing files, resolving Git, mutating config,
+creating paths, or consuming RNG.
 
 ## Current decision
 

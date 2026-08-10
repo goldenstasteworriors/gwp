@@ -114,6 +114,7 @@ configure_matched_control_from_environment(
     config,
     variant_id="hard_st",
     expected_dataset_id=preflight_receipt["dataset_id"],
+    **preflight_receipt["matched_control_expectations"],
 )
 
 config["ego_discrete_contact_stage1"] = {
