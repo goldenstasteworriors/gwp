@@ -1,0 +1,53 @@
+{
+  "schema_version": "track_b_visibility_prescreen_v0.1",
+  "annotator": "researcher_A_prescreen",
+  "review_material": "five 4x5 contact sheets at 320x240 pixels per frame",
+  "disclaimer": "Single-person feasibility prescreen only; it is not ground truth and cannot replace independent annotator B plus adjudication.",
+  "episodes": {
+    "0": {
+      "boundary":       [2,2,2,2,2,2,2,2,1,1,1,1,1,2,2,2,2,2,2,2],
+      "source_rim":     [3,3,3,3,2,2,2,2,1,1,1,1,1,2,2,3,3,3,3,3],
+      "target_rim":     [3,3,3,3,3,3,3,3,2,2,2,2,2,3,3,3,3,3,3,3],
+      "liquid_surface": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+      "stream":         [0,0,0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,0],
+      "contact":        [0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0],
+      "notes": "Clear liquid has no reliably localized surface or stream; hand-glass interface is inferred from overlap and is largely self-occluded."
+    },
+    "14": {
+      "boundary":       [2,2,2,2,2,2,2,1,1,1,1,1,1,2,2,2,2,2,2,2],
+      "source_rim":     [3,3,3,3,3,2,2,1,1,1,1,1,1,2,2,3,3,3,3,3],
+      "target_rim":     [3,3,3,3,3,3,3,3,2,2,2,2,2,3,3,3,3,3,3,3],
+      "liquid_surface": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+      "stream":         [0,0,0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,0],
+      "contact":        [0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0],
+      "notes": "Rims are usable before and after manipulation, but the source rim and grasp contact are occluded during the central manipulation phase."
+    },
+    "29": {
+      "boundary":       [2,2,2,2,2,2,2,1,1,1,1,1,1,2,2,2,2,2,2,2],
+      "source_rim":     [3,3,3,3,3,3,2,1,1,1,1,1,1,2,2,3,3,3,3,3],
+      "target_rim":     [3,3,3,3,3,3,3,3,2,2,2,2,2,3,3,3,3,3,3,3],
+      "liquid_surface": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+      "stream":         [0,0,0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,0],
+      "contact":        [0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0,0,0,0,0],
+      "notes": "Fast episode; phase-bin sampling captures the grasp/pour window but no frame shows a crisp clear-liquid stream."
+    },
+    "30": {
+      "boundary":       [2,2,2,2,2,2,2,1,1,1,1,1,1,1,2,2,2,2,2,2],
+      "source_rim":     [3,3,3,3,3,3,2,1,1,1,1,1,1,1,2,2,3,3,3,3],
+      "target_rim":     [3,3,3,3,3,3,3,3,2,2,2,2,2,2,3,3,3,3,3,3],
+      "liquid_surface": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+      "stream":         [0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0],
+      "contact":        [0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0],
+      "notes": "Longer central manipulation window; transparent boundaries remain only partially traceable under hand occlusion."
+    },
+    "58": {
+      "boundary":       [2,2,2,2,2,2,2,1,1,1,1,1,1,2,2,2,2,2,2,2],
+      "source_rim":     [3,3,3,3,3,3,2,1,1,1,1,1,1,2,2,3,3,3,3,3],
+      "target_rim":     [3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],
+      "liquid_surface": [3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],
+      "stream":         [0,0,0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,0],
+      "contact":        [0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0,0,0,0,0],
+      "notes": "Purple liquid in the target gives a strong surface cue, but the poured clear stream and hand-source contact remain weak or hidden."
+    }
+  }
+}

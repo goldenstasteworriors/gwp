@@ -1,0 +1,137 @@
+{
+  "schema_version": "track_b_mesh_free_pour_sim_v0.1",
+  "purpose": "Validate 2D boundary/rim/liquid/contact/risk fields and contact-transition timing without transparent-object reconstruction or image editing.",
+  "units": {
+    "length": "mm",
+    "angle": "degree",
+    "time": "s",
+    "viscosity": "mPa.s",
+    "volume": "mL",
+    "impulse": "N.s"
+  },
+  "embodiment": {
+    "pouring_effector": "right_omnipicker",
+    "stabilizing_effector": "left_rh56dftp",
+    "canonical_roles": ["source_transport_and_tilt", "target_stabilization"],
+    "role_swap_is_ood": true
+  },
+  "nominal": {
+    "rim_offset_xy_mm": [0, 0],
+    "peak_tilt_deg": 75,
+    "initial_fill_fraction": 0.5,
+    "viscosity_mpas": 1,
+    "pouring_effector_delay_s": 0,
+    "stabilizing_effector_delay_s": 0,
+    "container_pair": "cylindrical_clear_60mm_to_cylindrical_clear_70mm",
+    "camera": "ego_nominal"
+  },
+  "factors": {
+    "rim_offset_xy_mm": {
+      "design": "radial_directional",
+      "radial_values": [0, 5, 10, 15, 25],
+      "directions_deg": [0, 45, 90, 135, 180, 225, 270, 315]
+    },
+    "peak_tilt_deg": [45, 60, 75, 90, 105],
+    "initial_fill_fraction": [0.2, 0.5, 0.8],
+    "viscosity_mpas": [1, 10, 100, 1000],
+    "pouring_effector_delay_s": [0, 0.1, 0.25, 0.5],
+    "stabilizing_effector_delay_s": [0, 0.1, 0.25, 0.5]
+  },
+  "derived_factors": {
+    "relative_role_delay_s": "pouring_effector_delay_s minus stabilizing_effector_delay_s"
+  },
+  "sampling": {
+    "stage_1": {
+      "name": "one_factor_at_a_time_sanity",
+      "count": 32,
+      "rule": "nominal plus each non-nominal scalar level; rim offset uses four cardinal directions only",
+      "seeds_per_scenario": 1
+    },
+    "stage_2": {
+      "name": "pairwise_boundary_coverage",
+      "count_target": 160,
+      "rule": "strength-2 covering array, force all minimum/maximum factor pairs, then Latin-hypercube continuous jitter within adjacent levels",
+      "seeds_per_scenario": 3
+    },
+    "stage_3": {
+      "name": "ood_holdout",
+      "count_target": 80,
+      "seeds_per_scenario": 3
+    }
+  },
+  "ood_split": {
+    "container_geometry": ["square_source", "narrow_neck_source", "wide_shallow_target"],
+    "optics": ["mirror_like_table", "backlit", "low_contrast_clear_liquid", "colored_liquid_unseen_hue"],
+    "dynamics": {
+      "viscosity_mpas": [300, 3000],
+      "initial_fill_fraction": [0.1, 0.9]
+    },
+    "control": {
+      "rim_offset_radial_mm": [20, 30],
+      "pouring_effector_delay_s": [0.75],
+      "stabilizing_effector_delay_s": [0.75],
+      "relative_role_delay_s": [-0.75, 0.75],
+      "embodiment_role_swap": true
+    },
+    "rule": "No OOD container, optics, dynamics, or role-swap value may appear in train or calibration scenarios."
+  },
+  "projected_supervision": {
+    "resolution": [64, 64],
+    "fields": {
+      "boundary": "one-pixel visible contour plus truncated signed distance field in image space",
+      "source_rim": "anti-aliased projected rim centerline with occlusion mask",
+      "target_rim": "anti-aliased projected rim centerline with occlusion mask",
+      "liquid_surface": "visible projected free-surface boundary with observability mask",
+      "stream": "visible projected liquid-particle occupancy with observability mask",
+      "contact": "projected robot-container contact points dilated by 2 pixels",
+      "risk": "per-pixel probability proxy for future spill or forbidden collision within 0.5 s"
+    },
+    "anti_artifact_rules": [
+      "Render native geometry, segmentation IDs, depth, optical flow, and events from the same simulator state; do not inpaint or composite robot hands.",
+      "Keep full-scene RGB as the policy observation; labels are auxiliary 2D fields, not edited observations.",
+      "Apply transparency/refraction only in the RGB pass; derive labels from physical state and visibility-aware ID/depth passes.",
+      "Randomize refractive index, roughness, background, lighting, exposure, and motion blur independently of outcome.",
+      "Reject frames whose RGB and label cameras differ by more than 5 ms or 0.25 pixel reprojection error."
+    ]
+  },
+  "event_timeline": {
+    "contact_transition_states": ["approach", "first_contact", "secure_grasp", "pour_onset", "pouring", "pour_offset", "release"],
+    "state_source": "simulator contacts plus liquid flux, not RGB appearance",
+    "gwp_alignment": "Export event state, time-to-next-transition, and six 2D fields at the same 20 Hz action timestamps used by WAM."
+  },
+  "outcomes": {
+    "spill": {
+      "spill_fraction": "liquid volume outside both container interiors divided by initial source volume",
+      "overflow_fraction": "liquid volume crossing target rim after entering target divided by initial source volume",
+      "binary_positive_if": "spill_fraction > 0.02 or overflow_fraction > 0.01"
+    },
+    "collision": {
+      "classes": ["source_target_rim", "effector_target", "source_table", "effector_table"],
+      "peak_impulse_by_class": true,
+      "binary_positive_if": "any forbidden contact impulse > 0.5 N.s or penetration > 2 mm"
+    },
+    "task": {
+      "transfer_fraction": "final target liquid volume divided by initial source volume",
+      "success_if": "transfer_fraction >= 0.8 and spill_fraction <= 0.02 and no collision binary positive and both vessels stable for 1.0 s"
+    }
+  },
+  "metrics": {
+    "field": ["boundary_F1_at_2px", "rim_chamfer_px", "liquid_surface_F1_at_2px", "stream_AUPRC", "contact_AUPRC", "temporal_jitter_px"],
+    "transition": ["first_contact_MAE_ms", "pour_onset_MAE_ms", "release_MAE_ms", "event_F1_at_100ms"],
+    "risk": ["spill_AUROC", "spill_AUPRC", "collision_AUPRC", "expected_calibration_error", "Brier_score", "time_to_failure_gain_ms"],
+    "control": ["success_rate", "transfer_fraction", "spill_fraction", "collision_rate"]
+  },
+  "minimum_baselines": [
+    "RGB-only action/contact-transition model with no 2D fields",
+    "RGB plus source/target rim heatmaps only",
+    "RGB plus all oracle simulator 2D fields",
+    "RGB plus learned all-field teacher predictions",
+    "proprioception/contact-transition timing only"
+  ],
+  "failure_gates": {
+    "simulation_integrity": "Reject Track B if repeated identical scenarios vary by >5 percentage points in transfer fraction or if mass conservation error exceeds 1% in >1% of rollouts.",
+    "field_value": "Stop model integration if oracle fields do not improve OOD spill AUPRC by >=0.05 absolute or reduce collision rate by >=20% relative to RGB-only across three seeds.",
+    "teacher_value": "Stop learned-field integration if it retains <50% of the oracle-field OOD gain or temporal jitter exceeds 4 pixels RMS at 64x64.",
+    "real_video_support": "Do not claim real stream/contact supervision until dual-label agreement passes the README gates and at least 10 synchronized episodes contain visible stream or physical contact evidence."
+  }
+}

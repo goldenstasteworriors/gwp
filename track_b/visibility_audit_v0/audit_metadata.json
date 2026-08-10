@@ -1,0 +1,17 @@
+{
+  "schema_version": "track_b_visibility_audit_v0.1",
+  "source_root": "/home/ykj/project/EgoHumanoid/data_collection/human_data/data_collection/7_4_pour_liquid_between_beakers",
+  "episodes": [
+    0,
+    29,
+    58,
+    30,
+    14
+  ],
+  "frames_per_episode": 20,
+  "total_frames": 100,
+  "selection": "one maximum-saliency frame per equal-duration phase bin; existing episode-0 contact hints override their bins",
+  "saliency": "robust-normalized action_delta_eef L2 norm plus a five-frame hand_status-transition boost",
+  "video_sync": "nearest color_system_timestamps_us to processed camera_timestamp (ns)",
+  "max_sync_error_ms": 0.0
+}

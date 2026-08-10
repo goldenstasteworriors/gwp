@@ -1,0 +1,68 @@
+{
+  "annotator": "researcher_A_prescreen",
+  "frames": 100,
+  "disclaimer": "Single-person feasibility prescreen only; it is not ground truth and cannot replace independent annotator B plus adjudication.",
+  "score_definition": "0 absent/not applicable; 1 expected/present but not localizable; 2 partial/ambiguous localization; 3 clear localization",
+  "per_feature": {
+    "boundary": {
+      "score_counts": {
+        "0": 0,
+        "1": 30,
+        "2": 70,
+        "3": 0
+      },
+      "localizable_2_or_3_over_all": 0.7,
+      "localizable_2_or_3_over_expected": 0.7
+    },
+    "source_rim": {
+      "score_counts": {
+        "0": 0,
+        "1": 30,
+        "2": 19,
+        "3": 51
+      },
+      "localizable_2_or_3_over_all": 0.7,
+      "localizable_2_or_3_over_expected": 0.7
+    },
+    "target_rim": {
+      "score_counts": {
+        "0": 0,
+        "1": 0,
+        "2": 21,
+        "3": 79
+      },
+      "localizable_2_or_3_over_all": 1.0,
+      "localizable_2_or_3_over_expected": 1.0
+    },
+    "liquid_surface": {
+      "score_counts": {
+        "0": 0,
+        "1": 80,
+        "2": 0,
+        "3": 20
+      },
+      "localizable_2_or_3_over_all": 0.2,
+      "localizable_2_or_3_over_expected": 0.2
+    },
+    "stream": {
+      "score_counts": {
+        "0": 74,
+        "1": 26,
+        "2": 0,
+        "3": 0
+      },
+      "localizable_2_or_3_over_all": 0.0,
+      "localizable_2_or_3_over_expected": 0.0
+    },
+    "contact": {
+      "score_counts": {
+        "0": 51,
+        "1": 49,
+        "2": 0,
+        "3": 0
+      },
+      "localizable_2_or_3_over_all": 0.0,
+      "localizable_2_or_3_over_expected": 0.0
+    }
+  }
+}
