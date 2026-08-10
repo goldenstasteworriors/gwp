@@ -1,33 +1,37 @@
 {
   "schema_version": "contact_transport_ablation_v2",
-  "canonical_commit": "f3ae3bf",
+  "canonical_commit": "913811d",
   "seeds": [6666, 7777, 8888],
   "control_capture": {
-    "implementation_status": "spec_only_no_hash_collector",
+    "implementation_status": "implemented_opt_in_rank_local_jsonl_offline_compare",
+    "collector_code": "world_action_model/matched_control_hashes.py",
+    "runner_config": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
+    "compare_cli": "scripts/compare_matched_control_hashes.py",
     "required_artifact_per_step": "jsonl with seed, rank, global_step, ordered sample ids, and every hash below",
     "comparison_gate": "reject a paired comparison if any required hash differs"
   },
   "fixed_controls": {
     "batch_size": "identical global and per-rank values",
-    "dataset_order_hash": "sha256(ordered episode_id,start_index tuples)",
+    "dataset_order_hash": "sha256(ordered dataset_id,episode_index,frame_index,global_index records)",
     "batch_hash": "sha256(canonical CPU bytes before augmentation and noise)",
     "augmentation_hash": "sha256(serialized sampled augmentation parameters)",
-    "timestep_hash": "sha256(sampled visual and action timestep tensors)",
-    "noise_hash": "sha256(visual_noise and action_noise tensors)",
+    "timestep_hash": "sha256(sampled visual and action timestep tensors, including dtype/shape/raw bytes)",
+    "visual_noise_hash": "sha256(visual_noise dtype/shape/raw bytes)",
+    "action_noise_hash": "sha256(action_noise dtype/shape/raw bytes)",
     "require_hash_equality_before_comparison": true
   },
   "stage_gates": {
     "v1_1_label_coverage_audit_passed": false,
     "asymmetric25_converter_and_runtime_passed": false,
     "tiny_cpu_transport_tests_passed": true,
-    "paired_hash_collector_implemented": false,
+    "paired_hash_collector_implemented": true,
     "allow_5b_training": false,
     "allow_server_training": false
   },
   "variants": [
     {
       "id": "original_q0_direct_lambda0",
-      "implementation_status": "existing_route_blocked_by_asymmetric25_gate",
+      "implementation_status": "spec_only_no_matched_control_runner",
       "config_source": "configs/giga_world_policy_0_5_sonic_g1_finetune.py",
       "config_overrides": {
         "models.transformer.num_contact_tokens": 0,
@@ -74,7 +78,7 @@
     },
     {
       "id": "soft_semantic",
-      "implementation_status": "implemented_transport_blocked_by_labels_and_asymmetric25_gate",
+      "implementation_status": "implemented_transport_and_matched_control_runner_blocked_by_labels_and_asymmetric25_gate",
       "config_source": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
       "config_overrides": {
         "GWP_CONTACT_TRANSPORT_MODE": "soft",
@@ -86,7 +90,7 @@
     },
     {
       "id": "hard_st",
-      "implementation_status": "implemented_transport_blocked_by_labels_and_asymmetric25_gate",
+      "implementation_status": "implemented_transport_and_matched_control_runner_blocked_by_labels_and_asymmetric25_gate",
       "config_source": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
       "config_overrides": {
         "GWP_CONTACT_TRANSPORT_MODE": "hard_st",
@@ -98,7 +102,7 @@
     },
     {
       "id": "hard_detached",
-      "implementation_status": "implemented_transport_blocked_by_labels_and_asymmetric25_gate",
+      "implementation_status": "implemented_transport_and_matched_control_runner_blocked_by_labels_and_asymmetric25_gate",
       "config_source": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
       "config_overrides": {
         "GWP_CONTACT_TRANSPORT_MODE": "hard_detached",
@@ -110,7 +114,7 @@
     },
     {
       "id": "oracle",
-      "implementation_status": "implemented_model_and_trainer_route_blocked_by_labels_and_asymmetric25_gate",
+      "implementation_status": "implemented_model_and_trainer_route_no_matched_control_runner_blocked_by_labels_and_asymmetric25_gate",
       "config_source": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
       "config_overrides": {
         "GWP_CONTACT_TRANSPORT_MODE": "hard_detached",

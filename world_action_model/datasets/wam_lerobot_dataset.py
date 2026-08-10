@@ -40,6 +40,8 @@ class WAMLeRobotDataset(BaseDataset):
         contact_sidecar_require_reviewed_v1_1: bool = False,
         contact_sidecar_expected_meta_sha256: str | None = None,
         contact_sidecar_expected_episode_sha256: dict[str, str] | None = None,
+        matched_control_identity: bool = False,
+        matched_control_dataset_id: str | None = None,
         meta_name: str | None = None,
         robotype: str | None = None,
         **kwargs,
@@ -82,6 +84,40 @@ class WAMLeRobotDataset(BaseDataset):
         self.contact_sidecar_expected_episode_sha256 = dict(
             contact_sidecar_expected_episode_sha256 or {}
         )
+        self.matched_control_identity = bool(matched_control_identity)
+        self.matched_control_dataset_id = (
+            None
+            if matched_control_dataset_id is None
+            else str(matched_control_dataset_id).strip()
+        )
+        if not self.matched_control_dataset_id:
+            self.matched_control_dataset_id = None
+        if self.matched_control_identity:
+            info_path = os.path.join(self.data_path, "meta", "info.json")
+            if not os.path.isfile(info_path):
+                raise FileNotFoundError(
+                    f"matched-control identity requires dataset metadata: {info_path}"
+                )
+            with open(info_path, "r", encoding="utf-8") as handle:
+                metadata_value = json.load(handle).get("dataset_id")
+            metadata_dataset_id = (
+                metadata_value.strip() if isinstance(metadata_value, str) else ""
+            )
+            if not metadata_dataset_id and not self.matched_control_dataset_id:
+                raise ValueError(
+                    "matched-control identity requires either meta/info.json dataset_id "
+                    "or an explicit preflight-bound matched_control_dataset_id"
+                )
+            if (
+                metadata_dataset_id
+                and self.matched_control_dataset_id is not None
+                and self.matched_control_dataset_id != metadata_dataset_id
+            ):
+                raise ValueError(
+                    "configured matched_control_dataset_id differs from meta/info.json"
+                )
+            if metadata_dataset_id:
+                self.matched_control_dataset_id = metadata_dataset_id
         if self.contact_sidecar_require_reviewed_v1_1:
             if not self.contact_sidecar_strict or self.contact_sidecar_dir is None:
                 raise ValueError(
@@ -312,6 +348,9 @@ class WAMLeRobotDataset(BaseDataset):
         data_dict = self.dataset[index]
         data_dict['robotype'] = self.robotype
         data_dict['data_path'] = self.data_path
+        if self.matched_control_identity:
+            data_dict['matched_control_dataset_id'] = self.matched_control_dataset_id
+            data_dict['matched_control_global_index'] = int(index)
         if self.meta_name is not None:
             assert self.meta_name not in data_dict
             data_dict[self.meta_name] = self.dataset.meta
