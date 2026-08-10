@@ -14,6 +14,14 @@ from world_action_model.contact_transition_schema import (
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
 )
+from world_action_model.ego_hand_active_sidecar import (
+    EGO_HAND_ACTIVE_BUILDER,
+    EGO_HAND_ACTIVE_FIELD_ORDER,
+    EGO_HAND_ACTIVE_HORIZON,
+    EGO_HAND_ACTIVE_SCHEMA_VERSION,
+    EGO_HAND_ACTIVE_SEMANTICS,
+    load_hand_active_npz,
+)
 from world_action_model.verified_io import read_verified_bytes, strict_json_loads
 
 _SUBTASK_MARKER_RE = re.compile(r"\bsubtask\s*:\s*", flags=re.IGNORECASE)
@@ -68,6 +76,12 @@ class WAMLeRobotDataset(BaseDataset):
         contact_sidecar_require_reviewed_v1_1: bool = False,
         contact_sidecar_expected_meta_sha256: str | None = None,
         contact_sidecar_expected_episode_sha256: dict[str, str] | None = None,
+        ego_hand_active_sidecar_dir: str | None = None,
+        ego_hand_active_sidecar_pattern: str = "episode_{episode_index:06d}.npz",
+        ego_hand_active_sidecar_cache_size: int = 8,
+        ego_hand_active_sidecar_strict: bool = False,
+        ego_hand_active_expected_meta_sha256: str | None = None,
+        ego_hand_active_expected_episode_sha256: dict[str, str] | None = None,
         training_source_runtime_receipt: list[dict] | None = None,
         t5_runtime_source_receipt: list[dict] | None = None,
         verified_private_cache_parent: str | None = None,
@@ -176,6 +190,24 @@ class WAMLeRobotDataset(BaseDataset):
         self.contact_sidecar_expected_episode_sha256 = dict(
             contact_sidecar_expected_episode_sha256 or {}
         )
+        self.ego_hand_active_sidecar_dir = (
+            None
+            if ego_hand_active_sidecar_dir is None
+            else str(ego_hand_active_sidecar_dir)
+        )
+        self.ego_hand_active_sidecar_pattern = str(ego_hand_active_sidecar_pattern)
+        self.ego_hand_active_sidecar_cache_size = max(
+            0, int(ego_hand_active_sidecar_cache_size)
+        )
+        self.ego_hand_active_sidecar_strict = bool(ego_hand_active_sidecar_strict)
+        self.ego_hand_active_expected_meta_sha256 = (
+            None
+            if ego_hand_active_expected_meta_sha256 is None
+            else str(ego_hand_active_expected_meta_sha256)
+        )
+        self.ego_hand_active_expected_episode_sha256 = dict(
+            ego_hand_active_expected_episode_sha256 or {}
+        )
         self.matched_control_identity = bool(matched_control_identity)
         self.matched_control_dataset_id = (
             None
@@ -265,8 +297,60 @@ class WAMLeRobotDataset(BaseDataset):
                 }
             ):
                 raise ValueError("contact sidecar meta is not reviewed contact_segment_v1_1")
+        if self.ego_hand_active_sidecar_dir is not None:
+            if (
+                not self.ego_hand_active_sidecar_strict
+                or not isinstance(self.ego_hand_active_expected_meta_sha256, str)
+                or not _SHA256_RE.fullmatch(self.ego_hand_active_expected_meta_sha256)
+                or not self.ego_hand_active_expected_episode_sha256
+                or any(
+                    not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
+                    for value in self.ego_hand_active_expected_episode_sha256.values()
+                )
+            ):
+                raise ValueError(
+                    "Ego hand-active sidecars require strict preflight SHA receipts"
+                )
+            try:
+                meta_bytes, _, _ = read_verified_bytes(
+                    os.path.join(self.ego_hand_active_sidecar_dir, "meta.json"),
+                    expected_sha256=self.ego_hand_active_expected_meta_sha256,
+                )
+                hand_active_meta = strict_json_loads(
+                    meta_bytes,
+                    name="Ego hand-active sidecar meta",
+                )
+            except (OSError, ValueError) as exc:
+                raise ValueError("invalid Ego hand-active sidecar meta") from exc
+            if (
+                not isinstance(hand_active_meta, dict)
+                or hand_active_meta.get("schema_version")
+                != EGO_HAND_ACTIVE_SCHEMA_VERSION
+                or hand_active_meta.get("builder_identity") != EGO_HAND_ACTIVE_BUILDER
+                or hand_active_meta.get("horizon_frames") != EGO_HAND_ACTIVE_HORIZON
+                or hand_active_meta.get("action_start_offset") != 1
+                or hand_active_meta.get("field_order")
+                != list(EGO_HAND_ACTIVE_FIELD_ORDER)
+                or hand_active_meta.get("hand_active_semantics")
+                != EGO_HAND_ACTIVE_SEMANTICS
+                or hand_active_meta.get("physical_contact_truth") is not False
+                or hand_active_meta.get("episode_npz_sha256")
+                != self.ego_hand_active_expected_episode_sha256
+            ):
+                raise ValueError("Ego hand-active sidecar semantic contract differs")
+            self.ego_hand_active_meta = hand_active_meta
+        else:
+            if (
+                self.ego_hand_active_sidecar_strict
+                or self.ego_hand_active_expected_meta_sha256 is not None
+                or self.ego_hand_active_expected_episode_sha256
+            ):
+                raise ValueError("Ego hand-active receipts require a sidecar directory")
+            self.ego_hand_active_meta = None
         self._contact_sidecar_cache = {}
         self._contact_sidecar_cache_order = []
+        self._ego_hand_active_cache = {}
+        self._ego_hand_active_cache_order = []
         self.meta_name = meta_name
         self.kwargs = kwargs
         self.dataset = None
@@ -568,6 +652,8 @@ class WAMLeRobotDataset(BaseDataset):
         self._t5_cache_order.clear()
         self._contact_sidecar_cache.clear()
         self._contact_sidecar_cache_order.clear()
+        self._ego_hand_active_cache.clear()
+        self._ego_hand_active_cache_order.clear()
         super().close()
 
     def __len__(self) -> int:
@@ -589,6 +675,7 @@ class WAMLeRobotDataset(BaseDataset):
             data_dict[self.meta_name] = self.dataset.meta
         self._load_t5_embedding(data_dict)
         self._load_contact_sidecar(data_dict)
+        self._load_ego_hand_active_sidecar(data_dict)
         return data_dict
 
     @staticmethod
@@ -679,6 +766,55 @@ class WAMLeRobotDataset(BaseDataset):
         for key, array in sidecar.items():
             if key.startswith("contact_"):
                 data_dict[key] = array[frame_index]
+
+    def _read_ego_hand_active_sidecar(self, episode_index: int):
+        if episode_index in self._ego_hand_active_cache:
+            return self._ego_hand_active_cache[episode_index]
+        path = os.path.join(
+            self.ego_hand_active_sidecar_dir,
+            self.ego_hand_active_sidecar_pattern.format(episode_index=episode_index),
+        )
+        name = os.path.basename(path)
+        expected_digest = self.ego_hand_active_expected_episode_sha256.get(name)
+        if expected_digest is None:
+            raise ValueError(f"missing preflight Ego hand-active NPZ fingerprint: {name}")
+        lengths = self.ego_hand_active_meta.get("episode_lengths", {})
+        frame_count = lengths.get(str(episode_index))
+        if isinstance(frame_count, bool) or not isinstance(frame_count, int):
+            raise ValueError(f"missing Ego hand-active episode length: {episode_index}")
+        try:
+            arrays = load_hand_active_npz(
+                path,
+                expected_sha256=expected_digest,
+                frame_count=frame_count,
+            )
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"invalid Ego hand-active sidecar: {path}") from exc
+        if self.ego_hand_active_sidecar_cache_size > 0:
+            self._ego_hand_active_cache[episode_index] = arrays
+            self._ego_hand_active_cache_order.append(episode_index)
+            if (
+                len(self._ego_hand_active_cache_order)
+                > self.ego_hand_active_sidecar_cache_size
+            ):
+                old = self._ego_hand_active_cache_order.pop(0)
+                self._ego_hand_active_cache.pop(old, None)
+        return arrays
+
+    def _load_ego_hand_active_sidecar(self, data_dict: dict) -> None:
+        if self.ego_hand_active_sidecar_dir is None:
+            return
+        episode_index = self._scalar_int(data_dict.get("episode_index"), "episode_index")
+        frame_index = self._scalar_int(data_dict.get("frame_index"), "frame_index")
+        arrays = self._read_ego_hand_active_sidecar(episode_index)
+        frame_count = int(arrays["ego_hand_active_current"].shape[0])
+        if not 0 <= frame_index < frame_count:
+            raise IndexError(
+                f"frame_index={frame_index} outside Ego hand-active sidecar "
+                f"episode {episode_index} length={frame_count}"
+            )
+        for key, value in arrays.items():
+            data_dict[key] = value[frame_index]
 
     def _load_t5_embedding(self, data_dict: dict) -> None:
         if self.t5_load_from is None:

@@ -29,11 +29,28 @@ from world_action_model.ego_action_schema import (  # noqa: E402
 from world_action_model.ego_dataset_fingerprint import (  # noqa: E402
     derive_ego_dataset_identity,
 )
+from world_action_model.ego_hand_active_sidecar import (  # noqa: E402
+    EGO_HAND_ACTIVE_SEMANTICS,
+    canonical_sha256,
+    load_and_validate_hand_active_bundle,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hdf5-dir", required=True, type=Path)
+    parser.add_argument(
+        "--raw-hdf5-dir",
+        required=True,
+        type=Path,
+        help="100 Hz source containing left/right_hand_active",
+    )
+    parser.add_argument(
+        "--hand-active-sidecar-dir",
+        required=True,
+        type=Path,
+        help="verified 20 Hz tracker-validity sidecar bundle",
+    )
     parser.add_argument(
         "--dataset-root",
         required=True,
@@ -68,15 +85,38 @@ def pad_feature(value: np.ndarray, model_dim: int) -> np.ndarray:
     return result
 
 
-def feature_stats(value: np.ndarray) -> dict[str, list[float]]:
-    return {
-        "mean": value.mean(axis=0, dtype=np.float64).tolist(),
-        "std": value.std(axis=0, dtype=np.float64).tolist(),
-        "min": value.min(axis=0).astype(np.float64).tolist(),
-        "max": value.max(axis=0).astype(np.float64).tolist(),
-        "q01": np.quantile(value, 0.01, axis=0).tolist(),
-        "q99": np.quantile(value, 0.99, axis=0).tolist(),
-    }
+def feature_stats(
+    value: np.ndarray,
+    validity: np.ndarray,
+    *,
+    source_dim: int,
+) -> tuple[dict[str, list[float]], list[int]]:
+    if value.shape != validity.shape or validity.dtype != np.bool_:
+        raise ValueError("normalization value/validity arrays differ")
+    names = ("mean", "std", "min", "max", "q01", "q99")
+    result = {name: [] for name in names}
+    counts = []
+    for dimension in range(value.shape[1]):
+        if dimension >= source_dim:
+            selected = np.zeros(0, dtype=np.float32)
+        else:
+            selected = value[validity[:, dimension], dimension]
+            if len(selected) == 0:
+                raise ValueError(
+                    f"normalization dimension {dimension} has no valid source samples"
+                )
+        counts.append(int(len(selected)))
+        if len(selected) == 0:
+            for name in names:
+                result[name].append(0.0)
+            continue
+        result["mean"].append(float(selected.mean(dtype=np.float64)))
+        result["std"].append(float(selected.std(dtype=np.float64)))
+        result["min"].append(float(selected.min()))
+        result["max"].append(float(selected.max()))
+        result["q01"].append(float(np.quantile(selected, 0.01)))
+        result["q99"].append(float(np.quantile(selected, 0.99)))
+    return result, counts
 
 
 def sha256_file(path: Path) -> str:
@@ -91,6 +131,12 @@ def main() -> None:
     args = parse_args()
     hdf5_dir = args.hdf5_dir.expanduser().resolve()
     identity = derive_ego_dataset_identity(args.dataset_root)
+    hand_active = load_and_validate_hand_active_bundle(
+        args.hand_active_sidecar_dir,
+        dataset_identity=identity,
+        raw_hdf5_dir=args.raw_hdf5_dir,
+        final_hdf5_dir=hdf5_dir,
+    )
     output = args.output.expanduser().resolve()
     if output.exists() and not args.overwrite:
         raise FileExistsError(f"refusing to overwrite {output}; pass --overwrite")
@@ -115,6 +161,8 @@ def main() -> None:
 
     state_chunks = []
     action_chunks = []
+    state_validity_chunks = []
+    action_validity_chunks = []
     episode_lengths = {}
     hdf5_hashes = {}
     paths = sorted(
@@ -147,11 +195,24 @@ def main() -> None:
             )
         state = dual_eef_pose_to_state(pose, hand_status)
         action = dual_eef_delta_to_action(delta, hand_status)
+        active = hand_active["arrays"][int(path.stem.split("_")[-1])][
+            "ego_hand_active_current"
+        ]
+        if active.shape != source_hand_status.shape or active.dtype != np.bool_:
+            raise ValueError(f"invalid hand-active source shape in {path}")
         raw_indices = np.arange(len(action), dtype=np.int64)[:, None] + offsets[None, :]
         valid = raw_indices < len(action)
         indices = np.minimum(raw_indices, len(action) - 1)
         state_chunks.append(pad_feature(state, args.model_dim))
         action_chunks.append(pad_feature(action[indices[valid]], args.model_dim))
+        state_validity = np.ones((len(state), args.model_dim), dtype=np.bool_)
+        state_validity[:, 18:20] = active
+        state_validity[:, EGO_WAM_ACTION_DIM:] = False
+        action_validity = np.ones((int(valid.sum()), args.model_dim), dtype=np.bool_)
+        action_validity[:, 18:20] = active[indices[valid]]
+        action_validity[:, EGO_WAM_ACTION_DIM:] = False
+        state_validity_chunks.append(state_validity)
+        action_validity_chunks.append(action_validity)
         episode_lengths[str(int(path.stem.split("_")[-1]))] = len(state)
         hdf5_hashes[path.name] = sha256_file(path)
 
@@ -163,16 +224,28 @@ def main() -> None:
 
     states = np.concatenate(state_chunks, axis=0)
     actions = np.concatenate(action_chunks, axis=0)
+    state_validity = np.concatenate(state_validity_chunks, axis=0)
+    action_validity = np.concatenate(action_validity_chunks, axis=0)
+    state_stats, state_valid_counts = feature_stats(
+        states,
+        state_validity,
+        source_dim=EGO_WAM_ACTION_DIM,
+    )
+    action_stats, action_valid_counts = feature_stats(
+        actions,
+        action_validity,
+        source_dim=EGO_WAM_ACTION_DIM,
+    )
     hdf5_bundle_sha256 = hashlib.sha256(
         json.dumps(hdf5_hashes, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     payload = {
         "norm_stats": {
-            "observation.state": feature_stats(states),
-            "action": feature_stats(actions),
+            "observation.state": state_stats,
+            "action": action_stats,
         },
         "metadata": {
-            "norm_contract_version": "ego-stage1-norm/v2",
+            "norm_contract_version": "ego-stage1-norm/v3",
             "action_schema_id": action_schema_id,
             "source_dim": EGO_WAM_ACTION_DIM,
             "model_dim": args.model_dim,
@@ -205,6 +278,26 @@ def main() -> None:
             "source_hand_status_semantics": EGO_HAND_STATUS_SEMANTICS,
             "target_hand_status_semantics": CANONICAL_OPEN_FRACTION_SEMANTICS,
             "hand_status_conversion": "target=1-source",
+            "hand_active_semantics": EGO_HAND_ACTIVE_SEMANTICS,
+            "hand_active_meta_sha256": hand_active["meta_sha256"],
+            "hand_active_sidecar_bundle_sha256": hand_active[
+                "sidecar_bundle_sha256"
+            ],
+            "hand_active_raw_hdf5_bundle_sha256": hand_active[
+                "raw_hdf5_bundle_sha256"
+            ],
+            "hand_active_statistics": hand_active["statistics"],
+            "hand_active_statistics_sha256": canonical_sha256(
+                hand_active["statistics"]
+            ),
+            "normalization_valid_sample_count": {
+                "observation.state": state_valid_counts,
+                "action": action_valid_counts,
+            },
+            "grip_normalization_contract": (
+                "dimensions_18_19_use_only_corresponding_active_tracker_frames;"
+                "inactive_proxy_values_excluded"
+            ),
             "padding_contract": "right_zero_pad_20_to_32",
             "action_dim_mask": [True] * EGO_WAM_ACTION_DIM
             + [False] * (args.model_dim - EGO_WAM_ACTION_DIM),

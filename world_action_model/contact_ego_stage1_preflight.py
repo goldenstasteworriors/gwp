@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import subprocess
 
+import h5py
 import numpy as np
 
 from scripts.contact_labels.contact_label_io_v1_1 import (
@@ -40,6 +41,12 @@ from world_action_model.ego_dataset_fingerprint import (
     EGO_STAGE1_FRAME_CLOCK,
     derive_ego_dataset_identity,
     derive_ego_t5_source_receipt,
+)
+from world_action_model.ego_hand_active_sidecar import (
+    EGO_HAND_ACTIVE_SEMANTICS,
+    EgoHandActiveSidecarError,
+    canonical_sha256 as canonical_hand_active_sha256,
+    load_and_validate_hand_active_bundle,
 )
 from world_action_model.ego_stage1_gate_bootstrap import (
     EGO_STAGE1_GATE_VERSION,
@@ -451,12 +458,17 @@ def validate_ego_reviewed_sidecar_bundle(
     }
 
 
-def _validate_norm(payload: Mapping, identity: Mapping, hdf5_dir: Path) -> str:
+def _validate_norm(
+    payload: Mapping,
+    identity: Mapping,
+    hdf5_dir: Path,
+    hand_active: Mapping,
+) -> str:
     metadata = payload.get("metadata")
     if not isinstance(metadata, Mapping):
         raise ContactEgoStage1PreflightError("norm lacks metadata")
     expected = {
-        "norm_contract_version": "ego-stage1-norm/v2",
+        "norm_contract_version": "ego-stage1-norm/v3",
         "action_schema_id": EGO_CANONICAL_ACTION_SCHEMA_ID,
         "source_dim": EGO_WAM_ACTION_DIM,
         "model_dim": 32,
@@ -485,6 +497,22 @@ def _validate_norm(payload: Mapping, identity: Mapping, hdf5_dir: Path) -> str:
         "source_hand_status_semantics": EGO_HAND_STATUS_SEMANTICS,
         "target_hand_status_semantics": CANONICAL_OPEN_FRACTION_SEMANTICS,
         "hand_status_conversion": "target=1-source",
+        "hand_active_semantics": EGO_HAND_ACTIVE_SEMANTICS,
+        "hand_active_meta_sha256": hand_active["meta_sha256"],
+        "hand_active_sidecar_bundle_sha256": hand_active[
+            "sidecar_bundle_sha256"
+        ],
+        "hand_active_raw_hdf5_bundle_sha256": hand_active[
+            "raw_hdf5_bundle_sha256"
+        ],
+        "hand_active_statistics_sha256": canonical_hand_active_sha256(
+            hand_active["statistics"]
+        ),
+        "hand_active_statistics": hand_active["statistics"],
+        "grip_normalization_contract": (
+            "dimensions_18_19_use_only_corresponding_active_tracker_frames;"
+            "inactive_proxy_values_excluded"
+        ),
         "padding_contract": "right_zero_pad_20_to_32",
         "action_dim_mask": [True] * 20 + [False] * 12,
         "hdf5_source_role": "processed_final_hdf5_20hz",
@@ -520,6 +548,37 @@ def _validate_norm(payload: Mapping, identity: Mapping, hdf5_dir: Path) -> str:
         raise ContactEgoStage1PreflightError("norm lacks action loss-weight contract")
     if metadata.get("action_time_mask") != "normalization_excludes_clamped_padding;training_masks_clamped_padding_false":
         raise ContactEgoStage1PreflightError("norm lacks action time-mask contract")
+    validity_counts = metadata.get("normalization_valid_sample_count")
+    active_counts = [
+        int(
+            sum(
+                arrays["ego_hand_active_current"][:, side].sum()
+                for arrays in hand_active["arrays"].values()
+            )
+        )
+        for side in range(2)
+    ]
+    future_active_counts = [
+        int(
+            sum(
+                arrays["ego_hand_active_future"][..., side].sum()
+                for arrays in hand_active["arrays"].values()
+            )
+        )
+        for side in range(2)
+    ]
+    expected_validity_counts = {
+        "observation.state": [identity["total_frames"]] * 18
+        + active_counts
+        + [0] * 12,
+        "action": [valid_action_samples] * 18
+        + future_active_counts
+        + [0] * 12,
+    }
+    if validity_counts != expected_validity_counts:
+        raise ContactEgoStage1PreflightError(
+            "norm validity counts do not exclude inactive grip proxies"
+        )
     stats = payload.get("norm_stats")
     if not isinstance(stats, Mapping) or set(stats) != {"observation.state", "action"}:
         raise ContactEgoStage1PreflightError("norm stats keys differ")
@@ -548,6 +607,68 @@ def _validate_norm(payload: Mapping, identity: Mapping, hdf5_dir: Path) -> str:
     ).hexdigest()
     if metadata.get("hdf5_bundle_sha256") != bundle:
         raise ContactEgoStage1PreflightError("norm HDF5 bundle fingerprint differs")
+    if bundle != hand_active["final_hdf5_bundle_sha256"]:
+        raise ContactEgoStage1PreflightError(
+            "norm and hand-active sidecar bind different final HDF5 bytes"
+        )
+
+    def expected_scalar_stats(values: np.ndarray) -> dict[str, float]:
+        if values.ndim != 1 or len(values) == 0 or not np.isfinite(values).all():
+            raise ContactEgoStage1PreflightError("empty/non-finite masked grip stats")
+        return {
+            "mean": float(values.mean(dtype=np.float64)),
+            "std": float(values.std(dtype=np.float64)),
+            "min": float(values.min()),
+            "max": float(values.max()),
+            "q01": float(np.quantile(values, 0.01)),
+            "q99": float(np.quantile(values, 0.99)),
+        }
+
+    state_grip = [[], []]
+    action_grip = [[], []]
+    for episode, length in identity["episode_lengths"].items():
+        try:
+            with h5py.File(hdf5_dir / f"episode_{episode}.hdf5", "r") as handle:
+                source = np.asarray(handle["hand_status"], dtype=np.float32)
+        except (OSError, KeyError, ValueError) as exc:
+            raise ContactEgoStage1PreflightError(
+                "cannot recheck masked grip normalization values"
+            ) from exc
+        if source.shape != (length, 2) or not np.isin(source, (0.0, 1.0)).all():
+            raise ContactEgoStage1PreflightError("invalid grip proxy during norm replay")
+        canonical = 1.0 - source
+        arrays = hand_active["arrays"][episode]
+        current = arrays["ego_hand_active_current"]
+        future = arrays["ego_hand_active_future"]
+        target_values = np.zeros_like(future, dtype=np.float32)
+        for offset in range(1, 49):
+            usable = length - offset
+            if usable <= 0:
+                break
+            target_values[:usable, offset - 1] = canonical[offset:]
+        for side in range(2):
+            state_grip[side].append(canonical[current[:, side], side])
+            action_grip[side].append(target_values[..., side][future[..., side]])
+    for side, dimension in enumerate((18, 19)):
+        expected_state = expected_scalar_stats(np.concatenate(state_grip[side]))
+        expected_action = expected_scalar_stats(np.concatenate(action_grip[side]))
+        for stat_name in expected_state:
+            actual_state = stats["observation.state"][stat_name][dimension]
+            actual_action = stats["action"][stat_name][dimension]
+            if not math.isclose(
+                actual_state,
+                expected_state[stat_name],
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ) or not math.isclose(
+                actual_action,
+                expected_action[stat_name],
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                raise ContactEgoStage1PreflightError(
+                    "norm grip statistics include inactive proxy values"
+                )
     return bundle
 
 
@@ -995,31 +1116,208 @@ def _validate_gate(
         and isinstance(source_evidence.get("sha256"), str)
         and bool(_SHA256_RE.fullmatch(source_evidence["sha256"]))
     )
+    source_receipt = None
     if source_evidence_valid:
         evidence_path = Path(source_evidence["path"])
         if not evidence_path.is_absolute():
             evidence_path = reports["ego_action_grip"][0].parent / evidence_path
         try:
-            _, evidence_digest, _ = read_verified_bytes(
+            evidence_bytes, evidence_digest, _ = read_verified_bytes(
                 Path(os.path.abspath(evidence_path)),
                 expected_sha256=source_evidence["sha256"],
             )
-            source_evidence_valid = evidence_digest == source_evidence["sha256"]
+            source_receipt = strict_json_loads(
+                evidence_bytes,
+                name="Ego action/grip source receipt",
+            )
+            source_evidence_valid = (
+                evidence_digest == source_evidence["sha256"]
+                and isinstance(source_receipt, Mapping)
+            )
         except (OSError, ValueError):
             source_evidence_valid = False
+    valid_source_receipt = False
+    if source_evidence_valid:
+        upstream = source_receipt.get("upstream")
+        wam = source_receipt.get("wam")
+        claims = source_receipt.get("verified_claims")
+        wam_files = wam.get("files") if isinstance(wam, Mapping) else None
+        expected_wam_paths = {
+            "world_action_model/ego_action_schema.py",
+            "world_action_model/ego_hand_active_sidecar.py",
+            "world_action_model/datasets/wam_lerobot_dataset.py",
+            "world_action_model/transforms/wa_transforms_lerobot_pretrain.py",
+            "world_action_model/trainer/wa_casual_trainer_mot.py",
+            "world_action_model/contact_ego_stage1_preflight.py",
+            "world_action_model/ego_stage1_gate_bootstrap.py",
+            "scripts/build_ego_hand_active_sidecars.py",
+            "scripts/compute_ego_wam_norm.py",
+            "scripts/audit_ego_action_grip_evidence.py",
+            "configs/giga_world_policy_0_5_ego_discrete_contact_pretrain.py",
+        }
+        valid_source_receipt = (
+            source_receipt.get("receipt_version")
+            == "ego-action-grip-source-receipt/v1"
+            and isinstance(upstream, Mapping)
+            and isinstance(upstream.get("git_commit"), str)
+            and bool(_GIT_COMMIT_RE.fullmatch(upstream["git_commit"]))
+            and upstream.get("historical_dataset_generator_commit_recorded_in_hdf5")
+            is False
+            and isinstance(upstream.get("files"), list)
+            and len(upstream["files"]) == 4
+            and isinstance(wam, Mapping)
+            and isinstance(wam.get("git_commit"), str)
+            and bool(_GIT_COMMIT_RE.fullmatch(wam["git_commit"]))
+            and isinstance(wam_files, list)
+            and len(wam_files) == len(expected_wam_paths)
+            and {
+                row.get("logical_path")
+                for row in wam_files
+                if isinstance(row, Mapping)
+            }
+            == expected_wam_paths
+            and claims
+            == {
+                "source_hand_status_semantics": EGO_HAND_STATUS_SEMANTICS,
+                "source_hand_field_order": ["left", "right"],
+                "source_wrist_field_order": "left_then_right",
+                "target_hand_status_semantics": CANONICAL_OPEN_FRACTION_SEMANTICS,
+                "conversion": "target=1-source",
+                "grip_action_dimensions": [18, 19],
+                "grip_proxy_loss_weight_when_active": 0.25,
+            }
+        )
+        if valid_source_receipt:
+            repository_root = Path(__file__).absolute().parents[1]
+            for row in wam_files:
+                logical_path = row.get("logical_path")
+                expected_digest = row.get("runtime_sha256")
+                expected_head = row.get("head_blob_sha256")
+                if (
+                    not isinstance(expected_digest, str)
+                    or not _SHA256_RE.fullmatch(expected_digest)
+                    or expected_digest != expected_head
+                ):
+                    valid_source_receipt = False
+                    break
+                try:
+                    actual_digest = sha256_file(repository_root / logical_path)
+                except (OSError, ValueError):
+                    valid_source_receipt = False
+                    break
+                if actual_digest != expected_digest:
+                    valid_source_receipt = False
+                    break
+    statistics = grip.get("hand_active_statistics")
+    dataset_scope = grip.get("dataset_scope")
+    clock_audit = grip.get("delta_and_clock_audit")
+    upstream_files = (
+        source_receipt.get("upstream", {}).get("files")
+        if isinstance(source_receipt, Mapping)
+        else None
+    )
+    upstream_paths = {
+        "data_alignment/human_data_process/add_hand_status.py",
+        "data_alignment/human_data_process/process_human_eef_pipeline.py",
+        "data_alignment/convert_to_lerobot.py",
+        "scripts/deploy.py",
+    }
+    valid_upstream_rows = (
+        isinstance(upstream_files, list)
+        and {
+            row.get("logical_path")
+            for row in upstream_files
+            if isinstance(row, Mapping)
+        }
+        == upstream_paths
+        and all(
+            isinstance(row, Mapping)
+            and isinstance(row.get("git_blob_sha1"), str)
+            and bool(_GIT_COMMIT_RE.fullmatch(row["git_blob_sha1"]))
+            and all(
+                isinstance(row.get(key), str)
+                and bool(_SHA256_RE.fullmatch(row[key]))
+                for key in (
+                    "head_blob_sha256",
+                    "audited_worktree_sha256",
+                    "required_semantic_fragments_sha256",
+                )
+            )
+            and isinstance(row.get("worktree_matches_head"), bool)
+            for row in upstream_files
+        )
+    )
+    valid_statistics = isinstance(statistics, Mapping)
+    valid_scope = (
+        isinstance(dataset_scope, Mapping)
+        and isinstance(dataset_scope.get("episode_indices"), list)
+        and isinstance(dataset_scope.get("episode_count"), int)
+        and not isinstance(dataset_scope.get("episode_count"), bool)
+        and dataset_scope["episode_count"] >= 0
+        and dataset_scope.get("episode_indices")
+        == list(range(dataset_scope["episode_count"]))
+        and valid_statistics
+        and dataset_scope.get("episode_count") == statistics.get("episode_count")
+        and dataset_scope.get("total_frames") == statistics.get("processed_frames")
+        and dataset_scope.get("fps") == EGO_STAGE1_FPS
+        and dataset_scope.get("frame_clock") == EGO_STAGE1_FRAME_CLOCK
+    )
+    valid_clock_audit = (
+        isinstance(clock_audit, Mapping)
+        and clock_audit.get("passed") is True
+        and clock_audit.get("delta_definition")
+        == "delta[t]=pose[t-1]^-1_times_pose[t];delta[0]=identity"
+        and clock_audit.get("wrist_field_order")
+        == "left_xyz_rpy_then_right_xyz_rpy"
+        and clock_audit.get("max_raw_100hz_to_processed_20hz_timestamp_residual_ns")
+        == 0.0
+    )
     if (
-        grip.get("report_version") != "ego-action-grip-evidence/v1"
-        or grip.get("status") != "passed" or grip.get("source_verified") is not True
+        grip.get("report_version") != "ego-action-grip-evidence/v2"
+        or grip.get("status") != "semantics_verified_missingness_masked"
+        or grip.get("source_verified") is not True
         or grip.get("transform_conversion_verified") is not True
+        or grip.get("missingness_masked") is not True
+        or grip.get("physical_contact_truth") is not False
         or grip.get("dataset_id") != dataset_id
         or grip.get("dataset_fingerprint_sha256") != expected["dataset_fingerprint_sha256"]
         or grip.get("source_receipt_sha256") != expected["source_receipt_sha256"]
         or grip.get("norm_stats_sha256") != expected["norm_stats_sha256"]
         or grip.get("hdf5_bundle_sha256") != expected["hdf5_bundle_sha256"]
+        or grip.get("hand_active_meta_sha256")
+        != expected["hand_active_meta_sha256"]
+        or grip.get("hand_active_sidecar_bundle_sha256")
+        != expected["hand_active_sidecar_bundle_sha256"]
+        or grip.get("hand_active_raw_hdf5_bundle_sha256")
+        != expected["hand_active_raw_hdf5_bundle_sha256"]
+        or not valid_statistics
+        or canonical_hand_active_sha256(statistics)
+        != expected["hand_active_statistics_sha256"]
         or grip.get("source_hand_status_semantics") != EGO_HAND_STATUS_SEMANTICS
         or grip.get("target_hand_status_semantics") != CANONICAL_OPEN_FRACTION_SEMANTICS
         or grip.get("source_action_dim") != 20 or grip.get("model_action_dim") != 32
+        or grip.get("hand_status_conversion") != "target=1-source"
+        or grip.get("hand_field_order") != ["left", "right"]
+        or grip.get("grip_action_dimensions") != [18, 19]
+        or grip.get("grip_proxy_loss_weight_when_active") != 0.25
+        or grip.get("inactive_grip_loss_weight") != 0.0
+        or grip.get("wrist_action_dimensions_unaffected") != list(range(18))
+        or grip.get("hand_active_semantics") != EGO_HAND_ACTIVE_SEMANTICS
+        or grip.get("transition_auxiliary")
+        != {
+            "enabled": False,
+            "pair_mask_recorded": True,
+            "validity": "active_at_target_minus_1_and_target",
+        }
+        or not isinstance(grip.get("reviewed_by"), str)
+        or not grip["reviewed_by"]
+        or not isinstance(grip.get("reviewed_at_utc"), str)
+        or not grip["reviewed_at_utc"].endswith("Z")
         or source_evidence_valid is not True
+        or valid_source_receipt is not True
+        or valid_upstream_rows is not True
+        or valid_scope is not True
+        or valid_clock_audit is not True
     ):
         raise ContactEgoStage1PreflightError("Ego action/grip evidence failed")
     collector_path, collector, collector_digest = reports[
@@ -1221,6 +1519,7 @@ def _validate_independent_t5_replay_evidence(
 
 def validate_ego_stage1_training_preflight(
     *, data_root: str | Path, norm_stats_path: str | Path, hdf5_dir: str | Path,
+    raw_hdf5_dir: str | Path, hand_active_sidecar_dir: str | Path,
     t5_embedding_dir: str | Path,
     training_run_nonce: str,
     sidecar_dir: str | Path,
@@ -1258,7 +1557,23 @@ def validate_ego_stage1_training_preflight(
         raise ContactEgoStage1PreflightError("invalid or unsafe Ego Stage1 norm") from exc
     if not isinstance(norm, dict):
         raise ContactEgoStage1PreflightError("Ego Stage1 norm must be a JSON object")
-    hdf5_bundle_sha256 = _validate_norm(norm, identity, Path(hdf5_dir).resolve())
+    try:
+        hand_active = load_and_validate_hand_active_bundle(
+            hand_active_sidecar_dir,
+            dataset_identity=identity,
+            raw_hdf5_dir=raw_hdf5_dir,
+            final_hdf5_dir=hdf5_dir,
+        )
+    except EgoHandActiveSidecarError as exc:
+        raise ContactEgoStage1PreflightError(
+            "Ego hand-active sidecar evidence failed"
+        ) from exc
+    hdf5_bundle_sha256 = _validate_norm(
+        norm,
+        identity,
+        Path(hdf5_dir).resolve(),
+        hand_active,
+    )
     sidecar = validate_ego_reviewed_sidecar_bundle(
         sidecar_dir=sidecar_dir, coverage_csv=coverage_csv, segments_csv=segments_csv,
         inventory_csv=inventory_csv, build_config_path=build_config_path, split_manifest=split_manifest,
@@ -1281,6 +1596,16 @@ def validate_ego_stage1_training_preflight(
         "t5_independent_replay_attestation_sha256": replay_evidence["sha256"],
         "norm_stats_sha256": norm_digest,
         "hdf5_bundle_sha256": hdf5_bundle_sha256,
+        "hand_active_meta_sha256": hand_active["meta_sha256"],
+        "hand_active_sidecar_bundle_sha256": hand_active[
+            "sidecar_bundle_sha256"
+        ],
+        "hand_active_raw_hdf5_bundle_sha256": hand_active[
+            "raw_hdf5_bundle_sha256"
+        ],
+        "hand_active_statistics_sha256": canonical_hand_active_sha256(
+            hand_active["statistics"]
+        ),
         "sidecar_meta_sha256": sidecar["meta_sha256"],
         "sidecar_bundle_sha256": sidecar["bundle_sha256"],
         "split_manifest_sha256": sidecar["split_sha256"],
@@ -1330,6 +1655,12 @@ def validate_ego_stage1_training_preflight(
             "runtime_source_receipt_record_only"
         ],
         "sidecar_dir": str(Path(sidecar_dir).resolve()),
+        "hand_active_sidecar_dir": hand_active["root"],
+        "hand_active_episode_npz_sha256": hand_active["episode_npz_sha256"],
+        "hand_active_meta_runtime_stat_record_only": hand_active[
+            "meta_runtime_stat_record_only"
+        ],
+        "hand_active_statistics": hand_active["statistics"],
         "dataset_id": identity["dataset_id"], "episode_npz_sha256": sidecar["episode_npz_sha256"],
         "evidence_report_sha256": {
             key: value for key, value in evidence.items() if key != "matched_control_expectations"
@@ -1346,6 +1677,8 @@ def preflight_from_environment() -> dict:
     return validate_ego_stage1_training_preflight(
         data_root=os.environ["GWP_EGO_DATA_PATH"], norm_stats_path=os.environ["GWP_EGO_NORM_STATS_PATH"],
         hdf5_dir=os.environ["GWP_EGO_FINAL_HDF5_DIR"],
+        raw_hdf5_dir=os.environ["GWP_EGO_RAW_HDF5_DIR"],
+        hand_active_sidecar_dir=os.environ["GWP_EGO_HAND_ACTIVE_SIDECAR_DIR"],
         training_run_nonce=os.environ.get("GWP_EGO_TRAINING_RUN_NONCE", ""),
         t5_embedding_dir=(
             os.environ.get("GWP_T5_EMBEDDING_DIR", "").strip()

@@ -110,6 +110,15 @@ dataset.update(
     contact_sidecar_require_reviewed_v1_1=True,
     contact_sidecar_expected_meta_sha256=preflight_receipt["sidecar_meta_sha256"],
     contact_sidecar_expected_episode_sha256=preflight_receipt["episode_npz_sha256"],
+    ego_hand_active_sidecar_dir=os.environ["GWP_EGO_HAND_ACTIVE_SIDECAR_DIR"],
+    ego_hand_active_sidecar_pattern="episode_{episode_index:06d}.npz",
+    ego_hand_active_sidecar_strict=True,
+    ego_hand_active_expected_meta_sha256=preflight_receipt[
+        "hand_active_meta_sha256"
+    ],
+    ego_hand_active_expected_episode_sha256=preflight_receipt[
+        "hand_active_episode_npz_sha256"
+    ],
 )
 
 transform = config["dataloaders"]["train"]["transform"]
@@ -133,6 +142,8 @@ transform.update(
     delta_mask_by_embodiment_id={"1": [False] * 20},
     ego_grip_semantics=EGO_HAND_STATUS_SEMANTICS,
     ego_grip_proxy_weight=0.25,
+    ego_hand_active_future_key="ego_hand_active_future",
+    ego_hand_active_transition_pair_key="ego_hand_active_transition_pair",
     require_exact_effective_dim=True,
     expected_action_schema_id=EGO_CANONICAL_ACTION_SCHEMA_ID,
 )
