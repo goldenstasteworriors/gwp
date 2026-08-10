@@ -1,0 +1,63 @@
+{
+  "schema_version": "contact_segment_annotation_v1_1",
+  "unknown_encoding": {
+    "categorical_field": "empty string",
+    "coverage": "coverage_mode=unknown",
+    "boundary": "start_boundary or end_boundary=unknown; corresponding tau and censor masks are zero only",
+    "forbidden_tokens_as_labels": ["prescreen", "automatic_hint", "model_prediction"]
+  },
+  "coverage_csv": {
+    "primary_key": "coverage_id",
+    "fields_in_order": [
+      "schema_version", "dataset_id", "episode_id", "coverage_id", "annotation_role",
+      "annotator_id", "review_status", "coverage_mode", "start_frame", "end_frame",
+      "frame_clock", "evidence_scope", "label_origin", "review_timestamp_utc",
+      "parent_coverage_ids", "notes"
+    ],
+    "coverage_mode": {
+      "unknown": "No presence positives or negatives may be inferred from this interval.",
+      "positive_only": "Only explicitly reviewed segment rows are positive; all unmatched queries remain unknown.",
+      "exhaustive": "The complete interval was reviewed; unmatched queries may be supervised as negatives."
+    },
+    "exhaustive_negative": "An exhaustive coverage interval with no overlapping segment row. Never encode a fake negative segment row."
+  },
+  "segment_csv": {
+    "primary_key": "segment_id",
+    "fields_in_order": [
+      "schema_version", "dataset_id", "episode_id", "coverage_id", "segment_id",
+      "onset_event_id", "release_event_id", "annotation_role", "annotator_id",
+      "review_status", "start_frame", "end_frame", "start_boundary", "end_boundary",
+      "side", "site", "object_role", "contact_mode", "confidence", "evidence_scope",
+      "label_origin", "source_proposal_id", "parent_segment_ids", "notes"
+    ],
+    "start_boundary": ["observed", "left_censored", "unknown"],
+    "end_boundary": ["observed", "right_censored", "unknown"],
+    "side": ["", "left", "right", "object_object"],
+    "site": ["", "opposition", "primary", "support", "palm_or_jaw", "tool_tip", "other_surface"],
+    "object_role": ["", "manipulated", "tool", "receptacle", "fixture"],
+    "contact_mode": ["", "stick", "slide", "roll", "impact"],
+    "identity_rules": [
+      "segment_id names one physical interval and is globally unique across the campaign.",
+      "onset_event_id is required iff the onset boundary is observed.",
+      "release_event_id is required iff the release boundary is observed.",
+      "Censored or unknown boundaries have no fabricated event ID.",
+      "Repeated sliding-window appearances retain one global segment_id."
+    ]
+  },
+  "boundary_mask_contract": {
+    "observed_onset": "If onset is inside the window, supervise its true start_tau and left_censored=0; if before the window, supervise start_tau=0 and left_censored=1.",
+    "observed_release": "If release is inside the window, supervise its true end_tau and right_censored=0; if after the window, supervise end_tau=1 and right_censored=1.",
+    "coverage_censored_or_unknown_onset": "Only current_frame > conservative confirmed-positive start proves onset is before the window; then supervise start_tau=0 and left_censored=1. Equality cannot distinguish onset at the boundary from onset before it, so equality and earlier windows mask both fields.",
+    "coverage_censored_or_unknown_release": "Only real_window_end < conservative confirmed-positive end proves release is after the window; then supervise end_tau=1 and right_censored=1. Equality cannot distinguish release at the boundary from release after it, so equality and later-ending windows mask both fields.",
+    "field_level_rule": "Masking unknown boundary fields never clears independently known presence/side/site/object_role/contact_mode.",
+    "left_censored": "The physical onset is before the reviewed/window boundary.",
+    "right_censored": "The physical release is after the reviewed/window boundary."
+  },
+  "window_query_contract": {
+    "num_queries": 12,
+    "sort_key": ["global start_frame", "global end_frame", "side or empty", "site or empty", "global segment_id"],
+    "assignment": "query_index is the zero-based rank under the deterministic sort in that window",
+    "overflow": "Hard validation/build failure when more than 12 physical segments overlap one window; no silent truncation or overwrite.",
+    "accounting": "Report unique_physical_segments separately from window_segment_rows."
+  }
+}

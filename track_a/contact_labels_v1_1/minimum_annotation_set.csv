@@ -1,0 +1,13 @@
+selection_rank,episode_id,length_frames,length_stratum,selection_seed,existing_timing_hint,proposal_only,requires_independent_a,requires_independent_b,metadata_blocker
+0,43,264,0,6666,none,true,true,true,cannot balance subject/session/object until metadata are collected
+1,50,223,0,6666,none,true,true,true,cannot balance subject/session/object until metadata are collected
+2,51,263,0,6666,none,true,true,true,cannot balance subject/session/object until metadata are collected
+3,58,294,1,6666,none,true,true,true,cannot balance subject/session/object until metadata are collected
+4,34,294,1,6666,none,true,true,true,cannot balance subject/session/object until metadata are collected
+5,38,293,1,6666,none,true,true,true,cannot balance subject/session/object until metadata are collected
+6,9,324,2,6666,none,true,true,true,cannot balance subject/session/object until metadata are collected
+7,54,314,2,6666,none,true,true,true,cannot balance subject/session/object until metadata are collected
+8,36,314,2,6666,none,true,true,true,cannot balance subject/session/object until metadata are collected
+9,53,344,3,6666,none,true,true,true,cannot balance subject/session/object until metadata are collected
+10,12,354,3,6666,none,true,true,true,cannot balance subject/session/object until metadata are collected
+11,0,414,3,6666,present_not_ground_truth,true,true,true,cannot balance subject/session/object until metadata are collected
