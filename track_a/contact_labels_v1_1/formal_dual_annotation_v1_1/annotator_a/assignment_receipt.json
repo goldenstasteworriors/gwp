@@ -1,0 +1,8 @@
+{
+  "packet_id": "contact-v1.1-a-20260810-min12",
+  "identity_sha256": "f1651bf61984d4c3ffe4bcaedcfa53f98f3deb0016b25353d4f49811bd62ee6f",
+  "coverage_sha256": "da79d5297fe6976d432f79d84e4d48fe3c1ece8b82ae539c06c5172c9b546adf",
+  "segments_sha256": "bb248268b0977575313f9373bca83af581e6325764583f3cd353fd645632663a",
+  "tasks_sha256": "c3e23b5a01d2fd97ddb9cc20a08e275a2349e935d7db5549d753bc22db59434f",
+  "timeline_evidence_sha256": "0e407d8570eb5ea3fce8f8c49121ae41d1649f112ce8538abc027a0ec73750c4"
+}

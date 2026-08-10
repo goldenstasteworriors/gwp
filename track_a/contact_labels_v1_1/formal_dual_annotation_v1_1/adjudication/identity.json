@@ -1,0 +1,6 @@
+{
+  "adjudicator_id": "UNASSIGNED_ADJUDICATOR",
+  "adjudication_session_id": "UNASSIGNED_ADJUDICATION_SESSION",
+  "identity_status": "must_be_replaced_after_agreement_gates_pass",
+  "must_be_distinct_from_annotator_a_and_b": true
+}
