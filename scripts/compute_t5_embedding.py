@@ -269,12 +269,16 @@ def _init_wan_t5_encoder(
     device: str,
     text_len: int = 512,
     wan_code_path: Optional[str] = None,
+    checkpoint_sha256: Optional[str] = None,
+    checkpoint_stat: Optional[Dict[str, int]] = None,
+    tokenizer_path_override: Optional[str] = None,
+    tokenizer_local_files_only: bool = False,
 ) -> Tuple[Any, Any]:
     torch = _import_torch()
     T5EncoderModel = _load_wan_t5_encoder_class(wan_code_path)
 
     ckpt = os.path.join(wan_path, "models_t5_umt5-xxl-enc-bf16.pth")
-    tok = os.path.join(wan_path, "google/umt5-xxl")
+    tok = tokenizer_path_override or os.path.join(wan_path, "google/umt5-xxl")
     if not os.path.exists(ckpt):
         raise FileNotFoundError(f"T5 checkpoint not found: {ckpt}")
     if not os.path.exists(tok):
@@ -286,7 +290,10 @@ def _init_wan_t5_encoder(
         dtype=dtype,
         device=device,
         checkpoint_path=ckpt,
+        checkpoint_sha256=checkpoint_sha256,
+        checkpoint_stat=checkpoint_stat,
         tokenizer_path=tok,
+        tokenizer_local_files_only=tokenizer_local_files_only,
     )
 
 

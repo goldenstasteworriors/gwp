@@ -48,6 +48,11 @@ from world_action_model.ego_stage1_gate_bootstrap import (
     EgoStage1BootstrapError,
     validate_ego_stage1_gate_freshness_and_training_nonce,
 )
+from world_action_model.ego_t5_replay_attestation import (
+    EgoT5ReplayAttestationError,
+    canonical_attestation_bytes,
+    validate_ego_t5_replay_attestation,
+)
 import world_action_model.matched_control_hashes as matched_control_hashes
 from world_action_model.matched_control_hashes import (
     COLLECTOR_VERSION,
@@ -1155,6 +1160,65 @@ def _validate_gate(
     }
 
 
+def _validate_independent_t5_replay_evidence(
+    *,
+    gate: Mapping,
+    gate_path: Path,
+    dataset_identity: Mapping,
+    t5_source: Mapping,
+) -> dict:
+    replay_entry = gate.get("evidence_reports", {}).get(
+        "t5_independent_replay"
+    )
+    replay_expected_sha256 = gate.get("artifact_fingerprints", {}).get(
+        "t5_independent_replay_attestation_sha256"
+    )
+    if (
+        not isinstance(replay_entry, Mapping)
+        or set(replay_entry) != {"path", "sha256"}
+        or not isinstance(replay_entry.get("path"), str)
+        or not replay_entry["path"]
+        or replay_entry.get("sha256") != replay_expected_sha256
+        or not isinstance(replay_expected_sha256, str)
+        or not _SHA256_RE.fullmatch(replay_expected_sha256)
+    ):
+        raise ContactEgoStage1PreflightError(
+            "training gate lacks reviewer-bound independent T5 replay evidence"
+        )
+    replay_path = Path(replay_entry["path"])
+    if not replay_path.is_absolute():
+        replay_path = gate_path.parent / replay_path
+    replay_path = Path(os.path.abspath(replay_path))
+    try:
+        replay_bytes, replay_digest, replay_runtime_stat = read_verified_bytes(
+            replay_path,
+            expected_sha256=replay_expected_sha256,
+        )
+        replay_attestation = strict_json_loads(
+            replay_bytes,
+            name="independent Ego T5 replay attestation",
+        )
+        if replay_bytes != canonical_attestation_bytes(replay_attestation):
+            raise EgoT5ReplayAttestationError(
+                "independent replay attestation is not canonical JSON"
+            )
+        validate_ego_t5_replay_attestation(
+            replay_attestation,
+            dataset_identity=dataset_identity,
+            t5_source=t5_source,
+            verify_current_code=True,
+        )
+    except (OSError, ValueError, EgoT5ReplayAttestationError) as exc:
+        raise ContactEgoStage1PreflightError(
+            "independent Ego T5 replay attestation failed"
+        ) from exc
+    return {
+        "path": replay_path,
+        "sha256": replay_digest,
+        "runtime_stat_record_only": replay_runtime_stat,
+    }
+
+
 def validate_ego_stage1_training_preflight(
     *, data_root: str | Path, norm_stats_path: str | Path, hdf5_dir: str | Path,
     t5_embedding_dir: str | Path,
@@ -1179,6 +1243,12 @@ def validate_ego_stage1_training_preflight(
         episode_indices=list(identity["episode_lengths"]),
         dataset_identity=identity,
         data_root=data_root,
+    )
+    replay_evidence = _validate_independent_t5_replay_evidence(
+        gate=gate,
+        gate_path=gate_path,
+        dataset_identity=identity,
+        t5_source=t5_source,
     )
     norm_path = Path(os.path.abspath(os.path.expanduser(str(norm_stats_path))))
     try:
@@ -1208,6 +1278,7 @@ def validate_ego_stage1_training_preflight(
         "source_receipt_sha256": identity["source_receipt_sha256"],
         "t5_source_manifest_sha256": t5_source["source_manifest_sha256"],
         "t5_source_receipt_sha256": t5_source["source_receipt_sha256"],
+        "t5_independent_replay_attestation_sha256": replay_evidence["sha256"],
         "norm_stats_sha256": norm_digest,
         "hdf5_bundle_sha256": hdf5_bundle_sha256,
         "sidecar_meta_sha256": sidecar["meta_sha256"],
@@ -1251,6 +1322,10 @@ def validate_ego_stage1_training_preflight(
         "t5_prompt_manifest_sha256": t5_source["source_receipt"][
             "prompt_manifest_sha256"
         ],
+        "t5_independent_replay_attestation_path": str(replay_evidence["path"]),
+        "t5_independent_replay_attestation_runtime_stat_record_only": (
+            replay_evidence["runtime_stat_record_only"]
+        ),
         "t5_runtime_source_receipt_record_only": t5_source[
             "runtime_source_receipt_record_only"
         ],

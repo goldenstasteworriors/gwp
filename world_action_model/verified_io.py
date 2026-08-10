@@ -41,12 +41,22 @@ def _finite_json_float(value: str) -> float:
     return parsed
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key is forbidden: {key}")
+        result[key] = value
+    return result
+
+
 def strict_json_loads(payload: bytes, *, name: str) -> Any:
     try:
         return json.loads(
             payload.decode("utf-8"),
             parse_constant=reject_json_constant,
             parse_float=_finite_json_float,
+            object_pairs_hook=_reject_duplicate_json_keys,
         )
     except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
         raise VerifiedIOError(f"invalid strict JSON: {name}") from exc

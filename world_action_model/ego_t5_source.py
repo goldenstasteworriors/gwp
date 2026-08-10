@@ -26,7 +26,7 @@ from world_action_model.verified_io import (
 
 
 EGO_T5_MANIFEST_FILENAME = "t5_source_manifest.json"
-EGO_T5_MANIFEST_VERSION = "ego-t5-source-manifest/v1"
+EGO_T5_MANIFEST_VERSION = "ego-t5-source-manifest/v2"
 EGO_T5_GENERATOR_IDENTITY = "scripts/prepare_ego_t5_source.py"
 EGO_T5_PROMPT_SELECTION = "first_non_quality_task/v1"
 EGO_T5_PROMPT_CLEANING = "wan_huggingface_tokenizer/whitespace/v1"
@@ -47,6 +47,15 @@ EGO_T5_TOKENIZER_FILES = (
 EGO_T5_ENCODER_CODE_FILES = (
     "wan/modules/t5.py",
     "wan/modules/tokenizers.py",
+)
+EGO_T5_GENERATION_CODE_FILES = (
+    EGO_T5_GENERATOR_IDENTITY,
+    "scripts/compute_t5_embedding.py",
+    "scripts/verify_ego_t5_replay.py",
+    "world_action_model/ego_dataset_fingerprint.py",
+    "world_action_model/ego_t5_source.py",
+    "world_action_model/verified_io.py",
+    *tuple(f"third_party/{path}" for path in EGO_T5_ENCODER_CODE_FILES),
 )
 QUALITY_TASK_LABELS = frozenset({"qualified", "unqualified", "success", "failure"})
 
@@ -161,8 +170,8 @@ def load_episode_prompts(
     return rows
 
 
-def tensor_semantic_receipt(payload: bytes, *, name: str) -> dict:
-    """Safely load one tensor and hash its logical dtype/shape/value bytes."""
+def tensor_semantic_bytes(payload: bytes, *, name: str) -> tuple[dict, bytes]:
+    """Safely load one tensor and return its receipt plus canonical value bytes."""
 
     try:
         import torch
@@ -191,11 +200,19 @@ def tensor_semantic_receipt(payload: bytes, *, name: str) -> dict:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("ascii")
+    semantic_bytes = header + b"\0" + raw
     return {
         "dtype": EGO_T5_OUTPUT_DTYPE,
         "shape": shape,
-        "semantic_sha256": hashlib.sha256(header + b"\0" + raw).hexdigest(),
-    }
+        "semantic_sha256": hashlib.sha256(semantic_bytes).hexdigest(),
+    }, semantic_bytes
+
+
+def tensor_semantic_receipt(payload: bytes, *, name: str) -> dict:
+    """Safely load one tensor and hash its logical dtype/shape/value bytes."""
+
+    receipt, _ = tensor_semantic_bytes(payload, name=name)
+    return receipt
 
 
 def _validate_source_file_manifest(
@@ -229,7 +246,6 @@ def validate_ego_t5_source_manifest(
     inspect_tensors: bool = True,
 ) -> dict:
     """Validate provenance plus every config-selected Stage1 tensor."""
-
     root = _absolute_no_resolve(t5_embedding_dir)
     if root.is_symlink() or not root.is_dir():
         raise EgoT5SourceError(f"T5 source must be a real directory: {root}")
@@ -258,6 +274,7 @@ def validate_ego_t5_source_manifest(
         {
             "manifest_version",
             "status",
+            "claim_scope",
             "dataset",
             "encoder",
             "generator",
@@ -270,9 +287,11 @@ def validate_ego_t5_source_manifest(
     )
     if (
         manifest["manifest_version"] != EGO_T5_MANIFEST_VERSION
-        or manifest["status"] != "generated_from_pinned_model"
+        or manifest["status"] != "generation_claim_from_pinned_assets"
+        or manifest["claim_scope"]
+        != "generator_authored_not_independent_replay_proof"
     ):
-        raise EgoT5SourceError("T5 source is not pinned-model generated")
+        raise EgoT5SourceError("T5 source is not a supported generation claim")
 
     dataset = _require_exact_keys(
         manifest["dataset"],
@@ -371,11 +390,14 @@ def validate_ego_t5_source_manifest(
         {
             "identity",
             "git_commit",
-            "source_sha256",
+            "code_manifest",
+            "code_manifest_sha256",
             "device_type",
             "runtime_versions",
             "one_encode_per_unique_prompt",
             "episode_file_pattern",
+            "claim_scope",
+            "threat_model_boundary",
         },
         "T5 generator provenance",
     )
@@ -384,20 +406,61 @@ def validate_ego_t5_source_manifest(
         generator["identity"] != EGO_T5_GENERATOR_IDENTITY
         or not isinstance(generator["git_commit"], str)
         or not _GIT_COMMIT_RE.fullmatch(generator["git_commit"])
-        or not isinstance(generator["source_sha256"], str)
-        or not _SHA256_RE.fullmatch(generator["source_sha256"])
         or generator["device_type"] not in {"cpu", "cuda"}
         or not isinstance(runtime_versions, dict)
         or set(runtime_versions)
-        != {"python", "torch", "transformers", "ftfy", "regex"}
+        != {
+            "python",
+            "torch",
+            "transformers",
+            "tokenizers",
+            "ftfy",
+            "regex",
+            "torch_load_weights_only",
+        }
         or any(
             not isinstance(value, str) or not value
             for value in runtime_versions.values()
         )
+        or runtime_versions["torch_load_weights_only"]
+        != "required_and_supported"
         or generator["one_encode_per_unique_prompt"] is not True
         or generator["episode_file_pattern"] != "episode_{episode_index:06d}.pt"
+        or generator["claim_scope"]
+        != "generator_authored_generation_claim_not_independent_proof"
+        or generator["threat_model_boundary"]
+        != (
+            "ordinary pathname races fail closed; same-UID process-memory or "
+            "forged-metadata attacks are outside this verifier boundary"
+        )
     ):
         raise EgoT5SourceError("invalid T5 generator provenance")
+    code_manifest = generator["code_manifest"]
+    if (
+        not isinstance(code_manifest, list)
+        or len(code_manifest) != len(EGO_T5_GENERATION_CODE_FILES)
+    ):
+        raise EgoT5SourceError("invalid T5 generation code manifest")
+    normalized_code_manifest = []
+    for row, expected_path in zip(code_manifest, EGO_T5_GENERATION_CODE_FILES):
+        row = _require_exact_keys(
+            row,
+            {"logical_path", "git_blob_sha1", "sha256", "size_bytes"},
+            "T5 generation code file",
+        )
+        if (
+            row["logical_path"] != expected_path
+            or not isinstance(row["git_blob_sha1"], str)
+            or not _GIT_COMMIT_RE.fullmatch(row["git_blob_sha1"])
+        ):
+            raise EgoT5SourceError("unexpected T5 generation code identity")
+        _require_sha256(row["sha256"], "T5 generation code")
+        _require_positive_int(row["size_bytes"], "T5 generation code size")
+        normalized_code_manifest.append(dict(row))
+    if generator["code_manifest_sha256"] != canonical_sha256(
+        normalized_code_manifest
+    ):
+        raise EgoT5SourceError("T5 generation code manifest SHA differs")
     if (
         (generator["device_type"] == "cpu" and encoder["compute_dtype"] != "float32")
         or (generator["device_type"] == "cuda" and encoder["compute_dtype"] != "bfloat16")

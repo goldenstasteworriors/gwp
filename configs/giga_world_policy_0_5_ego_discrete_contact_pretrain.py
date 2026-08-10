@@ -10,7 +10,8 @@ import os
 # Reject missing paths, false/stale gates, nonce mismatch, and an absent T5
 # directory before importing NumPy, Torch, dataset, or model modules.  This
 # lightweight pass never authorizes a launch; the full preflight below repeats
-# these checks and verifies all artifact bytes.
+# these checks, verifies all artifact bytes, and binds the reviewer-pinned
+# independent T5 replay attestation into the final preflight receipt.
 from world_action_model.ego_stage1_gate_bootstrap import (  # noqa: E402
     minimal_ego_stage1_admission_precheck_from_environment,
 )

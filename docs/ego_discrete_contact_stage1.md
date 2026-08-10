@@ -109,9 +109,11 @@ LeRobot dataset ID. Stage1 fixes `t5_load_from=dir` and requires exactly one
 `t5_source_manifest.json`. The latter binds the runtime-derived dataset ID,
 episode metadata digest, every exact prompt, model repository and full
 revision, checkpoint SHA/Hugging Face etag, tokenizer files, WAN encoder code,
-text cleaning/tokenization settings, compute/output dtype, generator commit,
-file SHA and logical tensor SHA. The production receipt includes the
-provenance manifest; its absolute source directory remains record-only.
+text cleaning/tokenization settings, compute/output dtype, current-HEAD code
+blobs plus installed code bytes, file SHA and logical tensor SHA. This manifest
+is explicitly a **generator-authored generation claim**, not independent proof
+that those assets produced the tensors. The production receipt includes the
+claim manifest; its absolute source directory remains record-only.
 
 The local `b530...` LeRobot root currently has zero T5 files. A separate
 read-only 4x server snapshot contains 66 legacy files, each a finite float32
@@ -130,7 +132,9 @@ the same second, immediately after the cache/dedup changes to
 `scripts/compute_t5_embedding.py`. That is strong evidence that the old script
 produced them, but it is not proof of the command line, checkpoint revision,
 tokenizer bytes, device/dtype, or source commit used at execution time; the
-production decision therefore remains unchanged.
+production decision therefore remains unchanged. Local Hugging Face download
+metadata is not a trust root: generation requires reviewer-supplied checkpoint
+SHA, model revision and HF etag, then checks the actual checkpoint bytes.
 
 The production loader call chain is fixed to `t5_load_from=dir`:
 `WAMLeRobotDataset` resolves `episode_{episode_index:06d}.pt`, verifies the
@@ -143,6 +147,36 @@ subtask prompt can be sampled. WAN tokenization is fixed to whitespace
 cleaning, `text_len=512`, padding/truncation at tokenizer input, and
 `add_special_tokens=True`; the encoder output is sliced back to the non-padding
 token count before the Stage1 64-token contract is enforced.
+
+WAN checkpoint loading is single-open and fail-closed: `O_NOFOLLOW` pins one
+regular-file descriptor, the same FD is stream-hashed, rewound and passed as a
+file object to `torch.load(..., weights_only=True, map_location="cpu")`, only a
+non-empty string-key tensor state dict is accepted, and descriptor/path
+identity is checked again after loading. The four tokenizer files are copied
+from verified bytes into an owner-only, no-extra-file staging snapshot;
+`AutoTokenizer` uses only that snapshot with `local_files_only=True`, and every
+snapshot file is rehashed with its original identity after tokenizer loading.
+The hard-coded UMT5 model configuration is bound by the WAN encoder code hash.
+Generator/WAN code records current-HEAD blob IDs and installed byte hashes and
+is checked before and after encoding. Generation and replay reject a WAN code
+path that is not the current checkout's `third_party` directory.
+
+A read-only 4x trace on the actual tokenizer directory used Transformers
+4.51.3 and Tokenizers 0.21.4 with all framework backends disabled. Linux
+inotify observed `T5TokenizerFast` open/read only `tokenizer_config.json` and
+`tokenizer.json`; it did not access `config.json` or `generation_config.json`.
+The snapshot still binds all four audited tokenizer files, including
+`special_tokens_map.json` and `spiece.model`, as a conservative exact inventory.
+Both Transformers and Tokenizers versions are recorded in generation and
+independent-replay evidence.
+
+All staging directories and files use exclusive creation. Files and directories
+are fsynced before Linux `renameat2(RENAME_NOREPLACE)` publication, followed by
+a parent-directory fsync; a concurrent target or unsupported atomic primitive
+fails closed. These controls cover ordinary filesystem races and crashes. Code
+running under the same UID can attack process memory or forge metadata and is
+outside this boundary; production requiring that threat model needs a distinct
+UID or mount namespace.
 
 Prompt planning is CPU-only and does not import or probe an accelerator:
 
@@ -186,6 +220,8 @@ python scripts/prepare_ego_t5_source.py generate \
   --model-root /workspace/WM/giga-world-policy/weights/Wan2.2-TI2V-5B-Diffusers \
   --wan-code-path /workspace/WM/giga-world-policy-contact-transition/third_party \
   --model-revision 921dbaf3f1674a56f47e83fb80a34bac8a8f203e \
+  --checkpoint-sha256 "$REVIEWER_CHECKPOINT_SHA256" \
+  --checkpoint-hf-etag "$REVIEWER_CHECKPOINT_HF_ETAG" \
   --device cuda:0
 ```
 
@@ -198,8 +234,9 @@ memory during load). CPU float32 generation avoids accelerator use but expands
 the model/state memory requirement to tens of GB and is expected to be much
 slower. In either mode the saved T5 sidecar itself is only about 12 MB.
 
-After generation, validate all model assets, prompts and tensor bytes before
-placing its manifest/receipt hashes into the external training gate:
+After generation, ordinary validation can rehash model assets, prompts and
+tensor bytes, but it remains in the generator trust domain and cannot unlock
+the training gate:
 
 ```bash
 python scripts/prepare_ego_t5_source.py validate \
@@ -209,6 +246,32 @@ python scripts/prepare_ego_t5_source.py validate \
   --wan-code-path /workspace/WM/giga-world-policy-contact-transition/third_party \
   --model-revision 921dbaf3f1674a56f47e83fb80a34bac8a8f203e
 ```
+
+In a separate process, with a new replay output directory and a previously
+nonexistent attestation path, replay every unique prompt and compare exact
+float32 contiguous tensor bytes:
+
+```bash
+python scripts/verify_ego_t5_replay.py \
+  --data-root /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers \
+  --t5-embedding-dir /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers/t5_embedding_verified_v1 \
+  --replay-output-dir /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers/t5_embedding_replay_v1 \
+  --attestation-output /workspace/WM/giga-world-policy-contact-transition/evidence/t5_independent_replay_v1.json \
+  --model-root /workspace/WM/giga-world-policy/weights/Wan2.2-TI2V-5B-Diffusers \
+  --wan-code-path /workspace/WM/giga-world-policy-contact-transition/third_party \
+  --model-revision 921dbaf3f1674a56f47e83fb80a34bac8a8f203e \
+  --checkpoint-sha256 "$REVIEWER_CHECKPOINT_SHA256" \
+  --checkpoint-hf-etag "$REVIEWER_CHECKPOINT_HF_ETAG" \
+  --device cuda:0
+```
+
+The verifier has no gate argument and cannot modify the source or gate. A
+reviewer must separately place the attestation raw SHA-256 in both the v4
+gate's `artifact_fingerprints.t5_independent_replay_attestation_sha256` and
+`evidence_reports.t5_independent_replay.sha256`, plus its path. The checked-in
+template keeps these values null and every authorization flag false. A v3 gate,
+a self-authored/fake attestation, or an attestation missing any unique prompt is
+rejected.
 
 ## Action and norm contract
 
@@ -271,7 +334,7 @@ fail.
 
 The full preflight performs the current-HEAD and installed collector-source
 checks regardless of whether in-process collection is enabled. Every trusted
-JSON/JSONL is strict JSON (NaN, Infinity, `1e999`, strings and booleans cannot
+JSON/JSONL is strict JSON (duplicate keys, NaN, Infinity, `1e999`, strings and booleans cannot
 stand in for agreement numbers), and agreement values are checked for both
 physical range and threshold. Gate/report JSON, evidence CSVs, sidecar CSVs,
 build config, split and provenance are each parsed from the same no-follow
@@ -356,7 +419,8 @@ the RAII cleanup paths.
 
 ## Current decision
 
-Current data are **No-Go for production Stage1**. The 66-episode inventory lacks
+Current data are **No-Go for production Stage1**. No real independent replay
+attestation or reviewer-authored v4 gate exists. The 66-episode inventory lacks
 required subject/session/operator/object/liquid/batch metadata, the existing
 split is diagnostic and strategy-ineligible, and episode 0 is only a proposal.
 The new entry therefore cannot be imported successfully with current Track A

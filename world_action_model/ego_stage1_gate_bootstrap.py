@@ -15,7 +15,7 @@ import re
 from world_action_model.verified_io import read_verified_bytes, strict_json_loads
 
 
-EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v3"
+EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v4"
 EGO_STAGE1_REQUIRED_ENV_PATHS = (
     "GWP_EGO_DATA_PATH",
     "GWP_EGO_NORM_STATS_PATH",
@@ -43,10 +43,38 @@ _NONCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}$")
 _UTC_DEADLINE_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
 )
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class EgoStage1BootstrapError(ValueError):
     pass
+
+
+def _validate_independent_replay_gate_binding(gate: dict) -> None:
+    fingerprints = gate.get("artifact_fingerprints")
+    reports = gate.get("evidence_reports")
+    replay_entry = (
+        reports.get("t5_independent_replay")
+        if isinstance(reports, dict)
+        else None
+    )
+    replay_sha = (
+        fingerprints.get("t5_independent_replay_attestation_sha256")
+        if isinstance(fingerprints, dict)
+        else None
+    )
+    if (
+        not isinstance(replay_sha, str)
+        or not _SHA256_RE.fullmatch(replay_sha)
+        or not isinstance(replay_entry, dict)
+        or set(replay_entry) != {"path", "sha256"}
+        or not isinstance(replay_entry.get("path"), str)
+        or not replay_entry["path"]
+        or replay_entry.get("sha256") != replay_sha
+    ):
+        raise EgoStage1BootstrapError(
+            "training gate lacks reviewer-bound independent T5 replay evidence"
+        )
 
 
 def _load_gate(path: str) -> dict:
@@ -127,6 +155,7 @@ def minimal_ego_stage1_admission_precheck_from_environment() -> bool:
         gate,
         training_run_nonce=os.environ["GWP_EGO_TRAINING_RUN_NONCE"].strip(),
     )
+    _validate_independent_replay_gate_binding(gate)
     t5_text = os.environ.get("GWP_T5_EMBEDDING_DIR", "").strip()
     if not t5_text:
         t5_text = str(Path(os.environ["GWP_EGO_DATA_PATH"]) / "t5_embedding")
@@ -155,6 +184,7 @@ def minimal_matched_control_topology_precheck_from_environment() -> bool:
     gate = _load_gate(gate_path)
     if gate.get("gate_version") != EGO_STAGE1_GATE_VERSION:
         raise EgoStage1BootstrapError("training gate version differs during topology precheck")
+    _validate_independent_replay_gate_binding(gate)
     expectations = gate.get("matched_control_expectations")
     if not isinstance(expectations, dict):
         raise EgoStage1BootstrapError("training gate lacks matched-control expectations")

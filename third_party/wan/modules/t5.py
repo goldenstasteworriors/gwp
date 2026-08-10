@@ -1,7 +1,12 @@
 # Modified from transformers.models.t5.modeling_t5
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+from collections.abc import Mapping
+import hashlib
+import inspect
 import logging
 import math
+import os
+import stat
 
 import torch
 import torch.nn as nn
@@ -14,7 +19,98 @@ __all__ = [
     'T5Encoder',
     'T5Decoder',
     'T5EncoderModel',
+    'load_verified_state_dict',
 ]
+
+
+def _stat_identity(value):
+    return {
+        'device': int(value.st_dev),
+        'inode': int(value.st_ino),
+        'mode': int(value.st_mode),
+        'size_bytes': int(value.st_size),
+        'mtime_ns': int(value.st_mtime_ns),
+        'ctime_ns': int(value.st_ctime_ns),
+    }
+
+
+def load_verified_state_dict(
+        checkpoint_path,
+        expected_sha256=None,
+        expected_stat=None):
+    """Hash and deserialize one pinned regular-file FD exactly once.
+
+    The pathname is used only for the initial no-follow open.  SHA-256 and
+    ``torch.load`` consume the same file descriptor, and the descriptor plus
+    pathname identity are checked again after deserialization.  This is a
+    generation-time safety boundary, not a signature or publisher proof.
+    """
+
+    if 'weights_only' not in inspect.signature(torch.load).parameters:
+        raise RuntimeError('installed torch.load lacks required weights_only support')
+    if not hasattr(os, 'O_NOFOLLOW'):
+        raise RuntimeError('secure checkpoint loading requires POSIX O_NOFOLLOW')
+    absolute = os.path.abspath(os.path.expanduser(os.fspath(checkpoint_path)))
+    try:
+        path_before = os.lstat(absolute)
+    except OSError as exc:
+        raise ValueError(f'cannot lstat T5 checkpoint: {absolute}') from exc
+    if stat.S_ISLNK(path_before.st_mode) or not stat.S_ISREG(path_before.st_mode):
+        raise ValueError(f'T5 checkpoint must be a non-symlink regular file: {absolute}')
+    before_identity = _stat_identity(path_before)
+    if expected_stat is not None and before_identity != dict(expected_stat):
+        raise ValueError(f'T5 checkpoint stat receipt differs: {absolute}')
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)
+    fd = None
+    try:
+        try:
+            fd = os.open(absolute, flags)
+        except OSError as exc:
+            raise ValueError(f'cannot safely open T5 checkpoint: {absolute}') from exc
+        opened_identity = _stat_identity(os.fstat(fd))
+        if opened_identity != before_identity:
+            raise ValueError(f'T5 checkpoint changed during open: {absolute}')
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+        if _stat_identity(os.fstat(fd)) != opened_identity:
+            raise ValueError(f'T5 checkpoint changed while hashing: {absolute}')
+        actual_sha256 = digest.hexdigest()
+        if expected_sha256 is not None and actual_sha256 != expected_sha256:
+            raise ValueError(f'T5 checkpoint SHA-256 differs: {absolute}')
+        os.lseek(fd, 0, os.SEEK_SET)
+        with os.fdopen(fd, 'rb', closefd=True) as checkpoint_file:
+            fd = None
+            state_dict = torch.load(
+                checkpoint_file,
+                map_location='cpu',
+                weights_only=True,
+            )
+            if _stat_identity(os.fstat(checkpoint_file.fileno())) != opened_identity:
+                raise ValueError(f'T5 checkpoint changed while loading: {absolute}')
+        try:
+            path_after = os.lstat(absolute)
+        except OSError as exc:
+            raise ValueError(f'T5 checkpoint pathname changed while loading: {absolute}') from exc
+        if _stat_identity(path_after) != opened_identity:
+            raise ValueError(f'T5 checkpoint pathname was replaced while loading: {absolute}')
+        if (
+            not isinstance(state_dict, Mapping)
+            or not state_dict
+            or any(not isinstance(key, str) for key in state_dict)
+            or any(not isinstance(value, torch.Tensor) for value in state_dict.values())
+        ):
+            raise ValueError('T5 checkpoint must be a non-empty string-key tensor state_dict')
+        return state_dict, actual_sha256, opened_identity
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def fp16_clamp(x):
@@ -477,7 +573,10 @@ class T5EncoderModel:
         dtype=torch.bfloat16,
         device=None,
         checkpoint_path=None,
+        checkpoint_sha256=None,
+        checkpoint_stat=None,
         tokenizer_path=None,
+        tokenizer_local_files_only=False,
         shard_fn=None,
     ):
         # Do not query CUDA while importing this module.  The strict Ego T5
@@ -498,7 +597,12 @@ class T5EncoderModel:
             dtype=dtype,
             device=device).eval().requires_grad_(False)
         logging.info(f'loading {checkpoint_path}')
-        model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+        state_dict, _, _ = load_verified_state_dict(
+            checkpoint_path,
+            expected_sha256=checkpoint_sha256,
+            expected_stat=checkpoint_stat,
+        )
+        model.load_state_dict(state_dict)
         self.model = model
         if shard_fn is not None:
             self.model = shard_fn(self.model, sync_module_states=False)
@@ -506,7 +610,11 @@ class T5EncoderModel:
             self.model.to(self.device)
         # init tokenizer
         self.tokenizer = HuggingfaceTokenizer(
-            name=tokenizer_path, seq_len=text_len, clean='whitespace')
+            name=tokenizer_path,
+            seq_len=text_len,
+            clean='whitespace',
+            local_files_only=tokenizer_local_files_only,
+        )
 
     def __call__(self, texts, device):
         ids, mask = self.tokenizer(
