@@ -37,6 +37,10 @@ builder 只接受 `annotation_role=adjudicated`、`review_status=reviewed`、`la
 
 `minimum_annotation_set.csv` 只是按 episode 长度四分层、seed 6666 选出的 12 段工程提案。episode 0 的已有 timing 文件只记作 `present_not_ground_truth`；A/B 必须独立观看原视频，不得看到该提示。
 
+正式双标的协调员母版、A/B 隔离 packet、逐 processed 帧证据索引、标签词典和交付/裁决
+检查器见 `formal_dual_annotation_v1_1/README.md`。该目录中的 CSV 初始状态仍是空白任务，
+不是 GT；只有两名真实标注者独立提交、质量门槛通过并由第三人裁决后，才能进入下方 builder。
+
 ## 使用
 
 只有在 A/B 独立标注和裁决完成后，才能运行：

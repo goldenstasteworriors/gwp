@@ -1,0 +1,16 @@
+{
+  "packet_schema_version": "contact_dual_assignment_packet_v1_1",
+  "canonical_commit": "913811dab0a7ee74a0493f19d7bab40225546d99",
+  "episodes_audited": 66,
+  "processed_frames_audited": 20013,
+  "minimum_tasks": 12,
+  "minimum_processed_frames": 3695,
+  "source_manifest_sha256": "bcc3f46167f53d1a3e0caa2366f9d3b6173857db290376484073165b0e9b2ae2",
+  "timeline_evidence_sha256": "81a47fde7c7fbd95b55d4d2cc6b6b71b14c3f0affad71660738a8ab09d752ded",
+  "tasks_sha256": "c3e23b5a01d2fd97ddb9cc20a08e275a2349e935d7db5549d753bc22db59434f",
+  "inventory_sha256": "3623497e631d54f4d62f50a3728479b8232bda7c7ae9f2576e29a25f4d9c7f07",
+  "minimum_proposal_sha256_coordinator_only": "c174e280069d1df5eeb60c0f1e3eee018f4b2bb704585c25eecb8371f8b4bf84",
+  "merge_report_sha256": "bfdd8ab3a68ba4fefacc8633103d6ffec1793cc22a24ff1fe57bae4819591220",
+  "proposal_material_copied_to_packets": false,
+  "thumbnail_assets_generated": false
+}

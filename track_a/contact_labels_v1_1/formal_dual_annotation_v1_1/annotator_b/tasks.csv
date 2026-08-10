@@ -1,0 +1,13 @@
+task_id,episode_id,coverage_start_frame,coverage_end_frame,frame_clock,target_fps,context_frames_each_side,required_coverage_review
+contact-min12-00,43,0,264,processed_action_20hz,20.0,10,full_episode
+contact-min12-01,50,0,223,processed_action_20hz,20.0,10,full_episode
+contact-min12-02,51,0,263,processed_action_20hz,20.0,10,full_episode
+contact-min12-03,58,0,294,processed_action_20hz,20.0,10,full_episode
+contact-min12-04,34,0,294,processed_action_20hz,20.0,10,full_episode
+contact-min12-05,38,0,293,processed_action_20hz,20.0,10,full_episode
+contact-min12-06,9,0,324,processed_action_20hz,20.0,10,full_episode
+contact-min12-07,54,0,314,processed_action_20hz,20.0,10,full_episode
+contact-min12-08,36,0,314,processed_action_20hz,20.0,10,full_episode
+contact-min12-09,53,0,344,processed_action_20hz,20.0,10,full_episode
+contact-min12-10,12,0,354,processed_action_20hz,20.0,10,full_episode
+contact-min12-11,0,0,414,processed_action_20hz,20.0,10,full_episode
