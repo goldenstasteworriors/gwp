@@ -22,12 +22,14 @@ from diffusers.models.normalization import FP32LayerNorm
 from diffusers.utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscale_lora_layers
 
 from world_action_model.contact_transition_schema import (
+    CONTACT_SEMANTIC_TRANSPORT_MODES,
     SEGMENT_BINARY_FIELDS,
     SEGMENT_CATEGORICAL_FIELDS,
     SEGMENT_CONTINUOUS_FIELDS,
     SEGMENT_FIELD_SLICES,
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
+    contact_transport_capacity_metadata,
 )
 
 from .transformer_wa_casual import (
@@ -607,6 +609,8 @@ class CasualWorldActionTransformer_MoT(
         contact_schema_version: str = "contact_transition_v1",
         contact_semantic_bottleneck: bool = False,
         contact_planner_num_heads: int = 8,
+        contact_semantic_transport_mode: str = "soft",
+        contact_time_bins: int = 16,
     ) -> None:
         super().__init__()
 
@@ -685,12 +689,32 @@ class CasualWorldActionTransformer_MoT(
         self.contact_bottleneck = bool(contact_bottleneck)
         self.contact_schema_version = str(contact_schema_version)
         self.contact_semantic_bottleneck = bool(contact_semantic_bottleneck)
+        self.contact_semantic_transport_mode = str(contact_semantic_transport_mode)
+        self.contact_time_bins = int(contact_time_bins)
         if self.num_contact_tokens < 0:
             raise ValueError("num_contact_tokens must be non-negative")
         if self.contact_target_dim < 0 or self.contact_condition_dim < 0:
             raise ValueError("contact target/condition dimensions must be non-negative")
         if self.contact_bottleneck and not self.num_contact_tokens:
             raise ValueError("contact_bottleneck=True requires num_contact_tokens > 0")
+        if self.contact_semantic_transport_mode not in CONTACT_SEMANTIC_TRANSPORT_MODES:
+            raise ValueError(
+                "unsupported contact_semantic_transport_mode="
+                f"{self.contact_semantic_transport_mode!r}; expected one of "
+                f"{CONTACT_SEMANTIC_TRANSPORT_MODES}"
+            )
+        if self.contact_time_bins < 2:
+            raise ValueError(
+                f"contact_time_bins must be at least 2, got {self.contact_time_bins}"
+            )
+        if (
+            self.contact_semantic_transport_mode != "soft"
+            and not self.contact_semantic_bottleneck
+        ):
+            raise ValueError(
+                "hard contact semantic transport requires "
+                "contact_semantic_bottleneck=True"
+            )
         if self.contact_semantic_bottleneck:
             if not self.contact_bottleneck:
                 raise ValueError(
@@ -715,6 +739,17 @@ class CasualWorldActionTransformer_MoT(
                 raise ValueError(
                     "action_expert_dim must be divisible by contact_planner_num_heads"
                 )
+
+        self.contact_transport_metadata = contact_transport_capacity_metadata(
+            mode=self.contact_semantic_transport_mode,
+            time_bins=self.contact_time_bins,
+            num_queries=self.num_contact_tokens,
+        )
+        if self.contact_semantic_bottleneck:
+            logger.info(
+                "Contact semantic transport capacity: %s",
+                self.contact_transport_metadata,
+            )
 
         if self.num_contact_tokens:
             self.contact_query_tokens = nn.Parameter(
@@ -971,6 +1006,77 @@ class CasualWorldActionTransformer_MoT(
             semantic[..., field_slice] = logits[..., field_slice].softmax(dim=-1)
         return semantic
 
+    def transport_contact_semantic(self, semantic: torch.Tensor) -> torch.Tensor:
+        """Apply the configured action-visible semantic channel.
+
+        ``soft`` returns the exact input tensor for v1.1 compatibility.
+        Hard modes expose only grammar-valid finite states: binary fields are
+        Bernoulli decisions, categorical groups are one-hot argmax decisions,
+        and timing fields use uniformly spaced levels including 0 and 1.
+        Every non-presence field is canonicalized to zero for absent queries.
+        """
+
+        if self.contact_semantic_transport_mode == "soft":
+            return semantic
+        if semantic.shape[-1] != SEGMENT_TARGET_DIM:
+            raise ValueError(
+                f"expected {SEGMENT_TARGET_DIM}-D contact semantic, "
+                f"got {semantic.shape[-1]}"
+            )
+
+        hard = torch.zeros_like(semantic)
+        for field in SEGMENT_BINARY_FIELDS:
+            field_slice = SEGMENT_FIELD_SLICES[field]
+            hard[..., field_slice] = (
+                semantic[..., field_slice] >= 0.5
+            ).to(dtype=semantic.dtype)
+        for field in SEGMENT_CATEGORICAL_FIELDS:
+            field_slice = SEGMENT_FIELD_SLICES[field]
+            index = semantic[..., field_slice].argmax(dim=-1)
+            hard[..., field_slice] = F.one_hot(
+                index,
+                num_classes=field_slice.stop - field_slice.start,
+            ).to(dtype=semantic.dtype)
+        time_scale = float(self.contact_time_bins - 1)
+        for field in SEGMENT_CONTINUOUS_FIELDS:
+            field_slice = SEGMENT_FIELD_SLICES[field]
+            value = semantic[..., field_slice].clamp(0.0, 1.0)
+            hard[..., field_slice] = torch.round(value * time_scale) / time_scale
+
+        start_slice = SEGMENT_FIELD_SLICES["start_tau"]
+        end_slice = SEGMENT_FIELD_SLICES["end_tau"]
+        left_slice = SEGMENT_FIELD_SLICES["left_censored"]
+        right_slice = SEGMENT_FIELD_SLICES["right_censored"]
+        start = hard[..., start_slice]
+        end = hard[..., end_slice]
+        left_censored = hard[..., left_slice]
+        right_censored = hard[..., right_slice]
+
+        # Remove invalid-combination side channels.  Only uncensored segments
+        # need sorting; a censored boundary has a unique canonical value.
+        uncensored = (1.0 - left_censored) * (1.0 - right_censored)
+        ordered_start = torch.minimum(start, end)
+        ordered_end = torch.maximum(start, end)
+        start = uncensored * ordered_start + (1.0 - uncensored) * start
+        end = uncensored * ordered_end + (1.0 - uncensored) * end
+        start = torch.where(left_censored.bool(), torch.zeros_like(start), start)
+        end = torch.where(right_censored.bool(), torch.ones_like(end), end)
+        hard[..., start_slice] = start
+        hard[..., end_slice] = end
+
+        presence = hard[..., SEGMENT_FIELD_SLICES["presence"]]
+        for field in (
+            SEGMENT_CATEGORICAL_FIELDS
+            + SEGMENT_CONTINUOUS_FIELDS
+            + ("left_censored", "right_censored")
+        ):
+            field_slice = SEGMENT_FIELD_SLICES[field]
+            hard[..., field_slice] = hard[..., field_slice] * presence
+
+        if self.contact_semantic_transport_mode == "hard_st":
+            return semantic + (hard - semantic).detach()
+        return hard.detach()
+
     def plan_contact_semantic(
         self,
         state: torch.Tensor,
@@ -1014,7 +1120,9 @@ class CasualWorldActionTransformer_MoT(
         predicted_semantic = self.activate_contact_segment_logits(contact_logits)
 
         if contact_condition is None:
-            return contact_logits, predicted_semantic
+            return contact_logits, self.transport_contact_semantic(
+                predicted_semantic
+            )
         expected = (batch_size, self.num_contact_tokens, SEGMENT_TARGET_DIM)
         if tuple(contact_condition.shape) != expected:
             raise ValueError(
@@ -1037,8 +1145,12 @@ class CasualWorldActionTransformer_MoT(
         oracle = contact_condition.to(
             device=predicted_semantic.device, dtype=predicted_semantic.dtype
         )
-        semantic = mask * oracle + (1.0 - mask) * predicted_semantic.detach()
-        return contact_logits, semantic
+        predicted_for_merge = predicted_semantic
+        if self.contact_semantic_transport_mode == "soft":
+            # Preserve the f3ae3bf oracle teacher-forcing behavior bitwise.
+            predicted_for_merge = predicted_for_merge.detach()
+        semantic = mask * oracle + (1.0 - mask) * predicted_for_merge
+        return contact_logits, self.transport_contact_semantic(semantic)
 
     def encode_action_tokens(
         self,

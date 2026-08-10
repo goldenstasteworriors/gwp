@@ -1,0 +1,147 @@
+{
+  "schema_version": "contact_transport_ablation_v2",
+  "canonical_commit": "f3ae3bf",
+  "seeds": [6666, 7777, 8888],
+  "control_capture": {
+    "implementation_status": "spec_only_no_hash_collector",
+    "required_artifact_per_step": "jsonl with seed, rank, global_step, ordered sample ids, and every hash below",
+    "comparison_gate": "reject a paired comparison if any required hash differs"
+  },
+  "fixed_controls": {
+    "batch_size": "identical global and per-rank values",
+    "dataset_order_hash": "sha256(ordered episode_id,start_index tuples)",
+    "batch_hash": "sha256(canonical CPU bytes before augmentation and noise)",
+    "augmentation_hash": "sha256(serialized sampled augmentation parameters)",
+    "timestep_hash": "sha256(sampled visual and action timestep tensors)",
+    "noise_hash": "sha256(visual_noise and action_noise tensors)",
+    "require_hash_equality_before_comparison": true
+  },
+  "stage_gates": {
+    "v1_1_label_coverage_audit_passed": false,
+    "asymmetric25_converter_and_runtime_passed": false,
+    "tiny_cpu_transport_tests_passed": true,
+    "paired_hash_collector_implemented": false,
+    "allow_5b_training": false,
+    "allow_server_training": false
+  },
+  "variants": [
+    {
+      "id": "original_q0_direct_lambda0",
+      "implementation_status": "existing_route_blocked_by_asymmetric25_gate",
+      "config_source": "configs/giga_world_policy_0_5_sonic_g1_finetune.py",
+      "config_overrides": {
+        "models.transformer.num_contact_tokens": 0,
+        "models.transformer.contact_bottleneck": false,
+        "models.transformer.contact_semantic_bottleneck": false,
+        "models.contact_loss_weight": 0.0
+      },
+      "route_definition": "Q=0; action tokens directly attend reference tokens through the original MoT route; no contact planner, token, encoder, or auxiliary loss is active."
+    },
+    {
+      "id": "q12_direct_lambda0_capacity_control",
+      "implementation_status": "spec_only_requires_discarded_planner_route",
+      "config_source": "planned derivative of configs/giga_world_policy_0_5_sonic_g1_finetune.py",
+      "config_overrides": {
+        "models.transformer.num_contact_tokens": 12,
+        "models.transformer.contact_bottleneck": false,
+        "models.contact_loss_weight": 0.0
+      },
+      "route_definition": "Run the same Q=12 planner modules for parameter/FLOP control, then discard every planner output. Contact queries must be completely absent from the action context; action tokens retain the original direct reference route. The present model cannot express this route with config alone."
+    },
+    {
+      "id": "aux_only",
+      "implementation_status": "spec_only_requires_action_invisible_aux_head",
+      "config_source": "planned derivative of configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
+      "config_overrides": {
+        "models.transformer.num_contact_tokens": 12,
+        "models.transformer.contact_bottleneck": false,
+        "models.contact_loss_weight": 0.25,
+        "models.require_contact_targets": true
+      },
+      "route_definition": "The Q=12 contact planner and grouped loss run, but planner hidden/logits/semantics are all invisible to action; action retains direct reference attention. This decoupled auxiliary-only route is not implemented."
+    },
+    {
+      "id": "raw_latent_routing",
+      "implementation_status": "spec_only_requires_raw_planner_hidden_route",
+      "config_source": "planned derivative of configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
+      "config_overrides": {
+        "models.transformer.num_contact_tokens": 12,
+        "models.transformer.contact_bottleneck": true,
+        "models.transformer.contact_semantic_bottleneck": false,
+        "models.contact_loss_weight": 0.25
+      },
+      "route_definition": "Action may read the Q=12 planner's raw 1024-D hidden states and may not attend reference tokens directly. The existing non-semantic Q-token path uses learned query tokens, not standalone planner hidden states, so it is not this control."
+    },
+    {
+      "id": "soft_semantic",
+      "implementation_status": "implemented_transport_blocked_by_labels_and_asymmetric25_gate",
+      "config_source": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
+      "config_overrides": {
+        "GWP_CONTACT_TRANSPORT_MODE": "soft",
+        "GWP_CONTACT_TIME_BINS": "16",
+        "GWP_CONTACT_TOKENS": "12",
+        "models.contact_loss_weight": 0.25
+      },
+      "route_definition": "Action cannot attend reference tokens and reads only the continuous activated 22-D semantic tensor through the 22-to-action-width encoder; this is a compatibility control without an auditable finite semantic alphabet."
+    },
+    {
+      "id": "hard_st",
+      "implementation_status": "implemented_transport_blocked_by_labels_and_asymmetric25_gate",
+      "config_source": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
+      "config_overrides": {
+        "GWP_CONTACT_TRANSPORT_MODE": "hard_st",
+        "GWP_CONTACT_TIME_BINS": ["8", "16", "32"],
+        "GWP_CONTACT_TOKENS": "12",
+        "models.contact_loss_weight": 0.25
+      },
+      "route_definition": "Action cannot attend reference tokens and reads only canonical hard 22-D semantics through the 22-to-action-width encoder; action gradients use straight-through identity back to the planner."
+    },
+    {
+      "id": "hard_detached",
+      "implementation_status": "implemented_transport_blocked_by_labels_and_asymmetric25_gate",
+      "config_source": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
+      "config_overrides": {
+        "GWP_CONTACT_TRANSPORT_MODE": "hard_detached",
+        "GWP_CONTACT_TIME_BINS": ["8", "16", "32"],
+        "GWP_CONTACT_TOKENS": "12",
+        "models.contact_loss_weight": 0.25
+      },
+      "route_definition": "The forward action-visible route is identical to hard_st, but the transported tensor is detached; only the explicit grouped contact loss can update the planner."
+    },
+    {
+      "id": "oracle",
+      "implementation_status": "implemented_model_and_trainer_route_blocked_by_labels_and_asymmetric25_gate",
+      "config_source": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
+      "config_overrides": {
+        "GWP_CONTACT_TRANSPORT_MODE": "hard_detached",
+        "GWP_CONTACT_TIME_BINS": "16",
+        "GWP_CONTACT_TOKENS": "12",
+        "models.contact_condition_mode": "oracle",
+        "models.require_contact_targets": true
+      },
+      "route_definition": "Merge known ground-truth fields with unknown predicted fields before canonical hard transport; action reads only the transported result. It cannot run until audited v1.1 labels and masks exist."
+    },
+    {
+      "id": "shuffled",
+      "implementation_status": "blocked_by_labels_and_spec_only_data_route",
+      "config_source": "planned derivative of the oracle variant",
+      "config_overrides": {
+        "GWP_CONTACT_TRANSPORT_MODE": "hard_detached",
+        "models.contact_condition_mode": "oracle",
+        "models.require_contact_targets": true
+      },
+      "route_definition": "After field masks are finalized, permute complete contact-condition examples across episodes within each batch; never shuffle individual fields or action targets. No shuffle transform/runner exists yet."
+    },
+    {
+      "id": "delayed",
+      "implementation_status": "blocked_by_labels_and_spec_only_data_route",
+      "config_source": "planned derivative of the oracle variant",
+      "config_overrides": {
+        "GWP_CONTACT_TRANSPORT_MODE": "hard_detached",
+        "models.contact_condition_mode": "oracle",
+        "models.require_contact_targets": true
+      },
+      "route_definition": "Condition chunk t with episode-local contact labels from chunk t-1, mask the leading invalid chunk, and never wrap across episode boundaries. No delay transform/runner exists yet."
+    }
+  ]
+}
