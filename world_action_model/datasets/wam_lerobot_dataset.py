@@ -411,8 +411,19 @@ class WAMLeRobotDataset(BaseDataset):
                 raise
             return None
         emb = self._extract_t5_embedding(
-            torch.load(io.BytesIO(payload), map_location="cpu")
+            torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True)
         )
+        if self.t5_runtime_source_receipt and (
+            not isinstance(emb, torch.Tensor)
+            or emb.ndim != 2
+            or not 1 <= int(emb.shape[0]) <= 64
+            or int(emb.shape[1]) != 4096
+            or emb.dtype != torch.float32
+            or not bool(torch.isfinite(emb).all())
+        ):
+            raise ValueError(
+                f"verified Stage1 T5 source must be a finite float32 [1..64,4096] tensor: {path}"
+            )
         if self.t5_cache_size > 0:
             self._t5_cache[path] = emb
             self._t5_cache_order.append(path)

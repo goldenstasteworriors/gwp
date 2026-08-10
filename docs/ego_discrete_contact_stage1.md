@@ -104,12 +104,111 @@ canonicalization rule, so later readers cannot silently reinterpret the hash.
 
 T5 is selected by dataloader config, not by LeRobot `info.json`, so it has a
 separate production receipt instead of being confused with the portable
-LeRobot dataset ID. Stage1 fixes `t5_load_from=dir` and hashes exactly one
-`episode_{episode_index:06d}.pt` per audited episode. The manifest stores only
-stable logical role + episode + content SHA/size; its absolute source directory
-is record-only. The production gate independently binds both T5 manifest and
-receipt SHA. The audited LeRobot root currently has no T5 files, so it remains
-fail-closed until a complete 66-file T5 source is explicitly supplied.
+LeRobot dataset ID. Stage1 fixes `t5_load_from=dir` and requires exactly one
+`episode_{episode_index:06d}.pt` per runtime-audited episode plus
+`t5_source_manifest.json`. The latter binds the runtime-derived dataset ID,
+episode metadata digest, every exact prompt, model repository and full
+revision, checkpoint SHA/Hugging Face etag, tokenizer files, WAN encoder code,
+text cleaning/tokenization settings, compute/output dtype, generator commit,
+file SHA and logical tensor SHA. The production receipt includes the
+provenance manifest; its absolute source directory remains record-only.
+
+The local `b530...` LeRobot root currently has zero T5 files. A separate
+read-only 4x server snapshot contains 66 legacy files, each a finite float32
+`[11,4096]` tensor. All 66 logical tensor payloads are identical, which is
+expected because all 66 metadata rows contain the same exact prompt,
+`pour liquid from one beaker into another beaker`. Those files nevertheless
+lack model/tokenizer/generator provenance and belong to a different
+runtime-derived dataset receipt (its metadata was previously augmented with
+T5 path pointers). They are **not** portable to the local `b530...` source and
+remain No-Go. The strict generator never modifies `episodes.jsonl`, never adds
+T5 pointers, and refuses an existing output directory, so legacy files cannot
+be upgraded merely by writing a JSON claim beside them.
+
+The legacy files and the pointer-augmented `episodes.jsonl` were written within
+the same second, immediately after the cache/dedup changes to
+`scripts/compute_t5_embedding.py`. That is strong evidence that the old script
+produced them, but it is not proof of the command line, checkpoint revision,
+tokenizer bytes, device/dtype, or source commit used at execution time; the
+production decision therefore remains unchanged.
+
+The production loader call chain is fixed to `t5_load_from=dir`:
+`WAMLeRobotDataset` resolves `episode_{episode_index:06d}.pt`, verifies the
+preflight SHA/stat receipt, uses `torch.load(..., weights_only=True)`, and
+accepts only a direct finite float32 tensor with shape `[1..64,4096]`.
+`WALeRobotTransformsPretrain` keeps at most 64 rows and zero-pads to
+`[64,4096]` before the 4096-D text projection. The legacy `pkl` main/subtask
+lookup is not in this path, and Stage1 fixes `subtask_prob=0`; no unbound
+subtask prompt can be sampled. WAN tokenization is fixed to whitespace
+cleaning, `text_len=512`, padding/truncation at tokenizer input, and
+`add_special_tokens=True`; the encoder output is sliced back to the non-padding
+token count before the Stage1 64-token contract is enforced.
+
+Prompt planning is CPU-only and does not import or probe an accelerator:
+
+```bash
+conda run -n gigaworld-policy python scripts/prepare_ego_t5_source.py plan \
+  --data-root /home/ykj/project/EgoHumanoid/data_collection/human_data/data_collection/7_4_pour_liquid_between_beakers/vla_processed/lerobot/7_4_pour_liquid_between_beakers
+```
+
+Future generation on `4xH20-node2` must write a new directory on the same
+`/workspace` mount. The audited 4x model asset is the WAN 2.2 TI2V 5B UMT5
+checkpoint at revision `921dbaf3f1674a56f47e83fb80a34bac8a8f203e`; generation
+rehashes the 11.36 GB checkpoint, tokenizer and encoder code before loading the
+model. Because this dataset has only one unique prompt, the encoder runs once
+and the result is copied into 66 independently hashed episode files:
+
+First verify the project runtime without loading the 11.36 GB checkpoint or
+running an accelerator forward:
+
+```bash
+python scripts/prepare_ego_t5_source.py runtime-check \
+  --wan-code-path /workspace/WM/giga-world-policy-contact-transition/third_party \
+  --device cuda:0
+```
+
+This gate requires importable `torch`, `transformers`, `ftfy`, `regex`, the WAN
+encoder class, and an available requested device. Their exact versions are
+recorded in the generated manifest. The local README-named conda environment
+currently lacks torch, while the inspected EgoHumanoid virtual environment has
+torch but lacks `ftfy`; neither local environment is generation-ready, and no
+dependency was installed during this audit. No project-owned Python/conda
+runtime was found under the inspected 4x `/workspace` checkout, and its system
+Python cannot currently import torch because a vendor runtime library is
+missing. The 4x runtime-check is therefore also presently No-Go. Resolve this
+only through the vendor-supported project environment; do not change the
+device driver or system CUDA/runtime stack for this T5 task.
+
+```bash
+python scripts/prepare_ego_t5_source.py generate \
+  --data-root /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers \
+  --output-dir /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers/t5_embedding_verified_v1 \
+  --model-root /workspace/WM/giga-world-policy/weights/Wan2.2-TI2V-5B-Diffusers \
+  --wan-code-path /workspace/WM/giga-world-policy-contact-transition/third_party \
+  --model-revision 921dbaf3f1674a56f47e83fb80a34bac8a8f203e \
+  --device cuda:0
+```
+
+The command above is a future execution plan, not an executed result. It must
+use the project environment and the vendor-supported accelerator stack; it
+must not change CUDA or driver versions. One UMT5-XXL load plus one short
+forward is expected to take a few minutes on one accelerator, with roughly
+the checkpoint/model footprint (about 12 GB on disk and materially more device
+memory during load). CPU float32 generation avoids accelerator use but expands
+the model/state memory requirement to tens of GB and is expected to be much
+slower. In either mode the saved T5 sidecar itself is only about 12 MB.
+
+After generation, validate all model assets, prompts and tensor bytes before
+placing its manifest/receipt hashes into the external training gate:
+
+```bash
+python scripts/prepare_ego_t5_source.py validate \
+  --data-root /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers \
+  --t5-embedding-dir /workspace/WM/giga-world-policy-contact-transition/data/7_4_pour_liquid_between_beakers/t5_embedding_verified_v1 \
+  --model-root /workspace/WM/giga-world-policy/weights/Wan2.2-TI2V-5B-Diffusers \
+  --wan-code-path /workspace/WM/giga-world-policy-contact-transition/third_party \
+  --model-revision 921dbaf3f1674a56f47e83fb80a34bac8a8f203e
+```
 
 ## Action and norm contract
 
