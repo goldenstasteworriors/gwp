@@ -1177,6 +1177,8 @@ def validate_ego_stage1_training_preflight(
     t5_source = derive_ego_t5_source_receipt(
         t5_embedding_dir,
         episode_indices=list(identity["episode_lengths"]),
+        dataset_identity=identity,
+        data_root=data_root,
     )
     norm_path = Path(os.path.abspath(os.path.expanduser(str(norm_stats_path))))
     try:
@@ -1240,6 +1242,15 @@ def validate_ego_stage1_training_preflight(
             "runtime_source_receipt_record_only"
         ],
         "t5_source_manifest": t5_source["source_manifest"],
+        "t5_generation_provenance_manifest_sha256": t5_source[
+            "source_receipt"
+        ]["provenance_manifest_sha256"],
+        "t5_encoder_provenance_sha256": t5_source["source_receipt"][
+            "encoder_provenance_sha256"
+        ],
+        "t5_prompt_manifest_sha256": t5_source["source_receipt"][
+            "prompt_manifest_sha256"
+        ],
         "t5_runtime_source_receipt_record_only": t5_source[
             "runtime_source_receipt_record_only"
         ],

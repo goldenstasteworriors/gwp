@@ -475,11 +475,16 @@ class T5EncoderModel:
         self,
         text_len,
         dtype=torch.bfloat16,
-        device=torch.cuda.current_device(),
+        device=None,
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,
     ):
+        # Do not query CUDA while importing this module.  The strict Ego T5
+        # generator passes an explicit device, and CPU planning/validation
+        # must not initialize or even probe an accelerator.
+        if device is None:
+            device = torch.cuda.current_device()
         self.text_len = text_len
         self.dtype = dtype
         self.device = device

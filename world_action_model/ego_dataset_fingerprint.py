@@ -23,7 +23,7 @@ EGO_STAGE1_FPS = 20.0
 EGO_STAGE1_FRAME_CLOCK = "processed_action_20hz"
 EGO_DATASET_FINGERPRINT_VERSION = "ego-processed-dataset-fingerprint/v2"
 EGO_SOURCE_RECEIPT_VERSION = "ego-lerobot-training-source-receipt/v1"
-EGO_T5_SOURCE_RECEIPT_VERSION = "ego-t5-training-source-receipt/v1"
+EGO_T5_SOURCE_RECEIPT_VERSION = "ego-t5-training-source-receipt/v2"
 EGO_INFO_IDENTITY_FIELDS = (
     "codebase_version", "robot_type", "total_episodes", "total_frames",
     "total_tasks", "fps", "splits", "features",
@@ -296,14 +296,21 @@ def derive_ego_t5_source_receipt(
     t5_embedding_dir: str | Path,
     *,
     episode_indices: list[int] | tuple[int, ...],
+    dataset_identity: dict,
+    data_root: str | Path,
 ) -> dict:
-    """Hash exactly the config-selected T5 files the Stage1 wrapper reads.
+    """Validate provenance and hash the exact Stage1 T5 source.
 
-    The external directory is deliberately absent from the manifest. Each
-    digest is instead bound to a stable episode/logical-role key, so an
-    identical copied source has the same receipt while any referenced-byte
-    replacement changes it.
+    The external directory is deliberately absent from the portable manifest.
+    The required provenance manifest binds the runtime-derived dataset ID,
+    exact per-episode prompt, model revision, checkpoint, tokenizer and encoder
+    code.  Existing bare ``.pt`` files therefore cannot self-attest.
     """
+
+    from world_action_model.ego_t5_source import (
+        EGO_T5_MANIFEST_FILENAME,
+        validate_ego_t5_source_manifest,
+    )
 
     root = Path(t5_embedding_dir).expanduser().absolute()
     if root.is_symlink() or not root.is_dir():
@@ -317,47 +324,44 @@ def derive_ego_t5_source_receipt(
         or len(indices) != len(set(indices))
     ):
         raise EgoDatasetFingerprintError("T5 receipt requires unique non-negative episodes")
-    manifest = []
-    runtime_receipt = []
-    total_bytes = 0
-    for episode_index in indices:
-        filename = f"episode_{episode_index:06d}.pt"
-        path = root / filename
-        if not path.is_file() or path.is_symlink():
-            raise EgoDatasetFingerprintError(
-                f"missing or symlinked Stage1 T5 episode source: {path}"
-            )
-        digest, runtime_stat = hash_verified_regular_file(path)
-        size_bytes = runtime_stat["size_bytes"]
-        total_bytes += size_bytes
-        manifest.append(
-            {
-                "path": f"t5_embedding/episode_{episode_index:06d}.pt",
-                "logical_role": "t5_episode_condition",
-                "episode_index": episode_index,
-                "digest_mode": "raw_file_bytes",
-                "size_bytes": size_bytes,
-                "sha256": digest,
-            }
+    if indices != sorted(dataset_identity.get("episode_lengths", {})):
+        raise EgoDatasetFingerprintError(
+            "T5 episode request differs from runtime-derived dataset identity"
         )
-        runtime_receipt.append(
-            {
-                "logical_path": f"t5_embedding/episode_{episode_index:06d}.pt",
-                "logical_role": "t5_episode_condition",
-                "episode_index": episode_index,
-                "path_record_only": str(path.absolute()),
-                "sha256": digest,
-                "stat": runtime_stat,
-            }
-        )
+    validation = validate_ego_t5_source_manifest(
+        root,
+        dataset_identity=dataset_identity,
+        data_root=data_root,
+        inspect_tensors=True,
+    )
+    provenance_size = validation["manifest_stat_record_only"]["size_bytes"]
+    manifest = [
+        {
+            "path": f"t5_embedding/{EGO_T5_MANIFEST_FILENAME}",
+            "logical_role": "t5_generation_provenance",
+            "digest_mode": "raw_file_bytes",
+            "size_bytes": provenance_size,
+            "sha256": validation["manifest_sha256"],
+        },
+        *validation["portable_episode_files"],
+    ]
+    runtime_receipt = validation["runtime_episode_receipt_record_only"]
+    total_bytes = provenance_size + sum(
+        row["size_bytes"] for row in validation["portable_episode_files"]
+    )
     manifest_sha256 = _canonical_sha256(manifest)
     receipt = {
         "receipt_version": EGO_T5_SOURCE_RECEIPT_VERSION,
         "manifest_sha256": manifest_sha256,
         "file_count": len(manifest),
+        "episode_file_count": len(validation["portable_episode_files"]),
         "total_bytes": total_bytes,
-        "logical_role": "t5_episode_condition",
+        "logical_roles": ["t5_generation_provenance", "t5_episode_condition"],
         "pattern": "episode_{episode_index:06d}.pt",
+        "provenance_manifest_sha256": validation["manifest_sha256"],
+        "encoder_provenance_sha256": validation["encoder_provenance_sha256"],
+        "prompt_manifest_sha256": validation["prompt_manifest_sha256"],
+        "dataset_id": dataset_identity["dataset_id"],
     }
     receipt["receipt_sha256"] = _canonical_sha256(receipt)
     return {
@@ -367,6 +371,7 @@ def derive_ego_t5_source_receipt(
         "source_receipt": receipt,
         "source_receipt_sha256": receipt["receipt_sha256"],
         "runtime_source_receipt_record_only": runtime_receipt,
+        "provenance_manifest": validation["manifest"],
     }
 
 
