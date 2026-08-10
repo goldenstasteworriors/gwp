@@ -37,11 +37,17 @@ from world_action_model.ego_dataset_fingerprint import (
     EGO_STAGE1_FPS,
     EGO_STAGE1_FRAME_CLOCK,
     derive_ego_dataset_identity,
+    derive_ego_t5_source_receipt,
 )
-from world_action_model.matched_control_hashes import COLLECTOR_VERSION
+from world_action_model.matched_control_hashes import (
+    COLLECTOR_VERSION,
+    HASH_SCHEMA,
+    IMPLEMENTED_RUNNER_VARIANTS,
+    canonical_sha256,
+)
 
 
-EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v1"
+EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v2"
 REQUIRED_GATE_FLAGS = (
     "human_adjudicated_sidecar_passed",
     "dual_annotation_agreement_passed",
@@ -359,7 +365,7 @@ def _validate_norm(payload: Mapping, identity: Mapping, hdf5_dir: Path) -> str:
     if not isinstance(metadata, Mapping):
         raise ContactEgoStage1PreflightError("norm lacks metadata")
     expected = {
-        "norm_contract_version": "ego-stage1-norm/v1",
+        "norm_contract_version": "ego-stage1-norm/v2",
         "action_schema_id": EGO_CANONICAL_ACTION_SCHEMA_ID,
         "source_dim": EGO_WAM_ACTION_DIM,
         "model_dim": 32,
@@ -375,6 +381,14 @@ def _validate_norm(payload: Mapping, identity: Mapping, hdf5_dir: Path) -> str:
         "dataset_fingerprint_sha256": identity["dataset_fingerprint_sha256"],
         "info_identity_sha256": identity["info_identity_sha256"],
         "episode_metadata_sha256": identity["episode_metadata_sha256"],
+        "dataset_portable_info_ignored_fields": identity[
+            "portable_info_ignored_fields"
+        ],
+        "dataset_training_source_roots": identity["training_source_roots"],
+        "dataset_source_manifest": identity["source_manifest"],
+        "dataset_source_manifest_sha256": identity["source_manifest_sha256"],
+        "dataset_source_receipt": identity["source_receipt"],
+        "dataset_source_receipt_sha256": identity["source_receipt_sha256"],
         "fps": EGO_STAGE1_FPS,
         "frame_clock": EGO_STAGE1_FRAME_CLOCK,
         "source_hand_status_semantics": EGO_HAND_STATUS_SEMANTICS,
@@ -459,6 +473,13 @@ def _validate_matched_control_expectations(gate: Mapping) -> dict:
     raw = gate.get("matched_control_expectations")
     required = {
         "expected_git_commit",
+        "expected_run_id",
+        "expected_run_nonce",
+        "expected_report_sha256",
+        "expected_trace_files",
+        "expected_trace_manifest_sha256",
+        "expected_global_hashes_sha256",
+        "expected_hash_schema_sha256",
         "expected_control_config_sha256",
         "expected_variant_config_sha256",
         "expected_world_size",
@@ -471,6 +492,13 @@ def _validate_matched_control_expectations(gate: Mapping) -> dict:
             "training gate matched_control_expectations are missing or have an unexpected schema"
         )
     git_commit = raw.get("expected_git_commit")
+    run_id = raw.get("expected_run_id")
+    run_nonce = raw.get("expected_run_nonce")
+    report_sha256 = raw.get("expected_report_sha256")
+    trace_files = raw.get("expected_trace_files")
+    trace_manifest_sha256 = raw.get("expected_trace_manifest_sha256")
+    global_hashes_sha256 = raw.get("expected_global_hashes_sha256")
+    hash_schema_sha256 = raw.get("expected_hash_schema_sha256")
     control_hash = raw.get("expected_control_config_sha256")
     variant_hashes = raw.get("expected_variant_config_sha256")
     world_size = raw.get("expected_world_size")
@@ -479,12 +507,27 @@ def _validate_matched_control_expectations(gate: Mapping) -> dict:
     collector_source_sha256 = raw.get("expected_collector_source_sha256")
     if not isinstance(git_commit, str) or not _GIT_COMMIT_RE.fullmatch(git_commit):
         raise ContactEgoStage1PreflightError("invalid expected matched-control Git commit")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ContactEgoStage1PreflightError("invalid expected matched-control run ID")
+    if not isinstance(run_nonce, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}", run_nonce
+    ):
+        raise ContactEgoStage1PreflightError("invalid expected matched-control run nonce")
+    for name, value in (
+        ("report", report_sha256),
+        ("trace manifest", trace_manifest_sha256),
+        ("global hashes", global_hashes_sha256),
+        ("hash schema", hash_schema_sha256),
+    ):
+        if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+            raise ContactEgoStage1PreflightError(
+                f"invalid expected matched-control {name} SHA"
+            )
     if not isinstance(control_hash, str) or not _SHA256_RE.fullmatch(control_hash):
         raise ContactEgoStage1PreflightError("invalid expected matched-control control config hash")
     if (
         not isinstance(variant_hashes, Mapping)
-        or len(variant_hashes) < 2
-        or "hard_st" not in variant_hashes
+        or set(variant_hashes) != set(IMPLEMENTED_RUNNER_VARIANTS)
         or any(not isinstance(name, str) or not name for name in variant_hashes)
         or any(
             not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
@@ -493,6 +536,44 @@ def _validate_matched_control_expectations(gate: Mapping) -> dict:
     ):
         raise ContactEgoStage1PreflightError(
             "invalid expected matched-control variant config hash mapping"
+        )
+    if not isinstance(trace_files, Mapping) or set(trace_files) != set(
+        IMPLEMENTED_RUNNER_VARIANTS
+    ):
+        raise ContactEgoStage1PreflightError(
+            "expected matched-control trace variants differ from the implemented runner set"
+        )
+    canonical_trace_files = {}
+    seen_trace_paths = set()
+    for variant in IMPLEMENTED_RUNNER_VARIANTS:
+        entries = trace_files[variant]
+        if not isinstance(entries, list) or not entries:
+            raise ContactEgoStage1PreflightError(
+                f"expected matched-control traces are empty for {variant}"
+            )
+        canonical_trace_files[variant] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping) or set(entry) != {"path", "sha256"}:
+                raise ContactEgoStage1PreflightError("invalid expected trace entry schema")
+            path = entry["path"]
+            digest = entry["sha256"]
+            if (
+                not isinstance(path, str)
+                or not path
+                or path in seen_trace_paths
+                or not isinstance(digest, str)
+                or not _SHA256_RE.fullmatch(digest)
+            ):
+                raise ContactEgoStage1PreflightError("invalid/duplicate expected trace entry")
+            seen_trace_paths.add(path)
+            canonical_trace_files[variant].append({"path": path, "sha256": digest})
+    if canonical_sha256(canonical_trace_files) != trace_manifest_sha256:
+        raise ContactEgoStage1PreflightError(
+            "expected trace manifest SHA differs from expected trace entries"
+        )
+    if canonical_sha256(HASH_SCHEMA) != hash_schema_sha256:
+        raise ContactEgoStage1PreflightError(
+            "expected matched-control hash schema differs from installed code"
         )
     if isinstance(world_size, bool) or not isinstance(world_size, int) or world_size <= 0:
         raise ContactEgoStage1PreflightError("invalid expected matched-control world size")
@@ -513,6 +594,13 @@ def _validate_matched_control_expectations(gate: Mapping) -> dict:
         raise ContactEgoStage1PreflightError("invalid expected collector source hash")
     return {
         "expected_git_commit": git_commit,
+        "expected_run_id": run_id,
+        "expected_run_nonce": run_nonce,
+        "expected_report_sha256": report_sha256,
+        "expected_trace_files": canonical_trace_files,
+        "expected_trace_manifest_sha256": trace_manifest_sha256,
+        "expected_global_hashes_sha256": global_hashes_sha256,
+        "expected_hash_schema_sha256": hash_schema_sha256,
         "expected_control_config_sha256": control_hash,
         "expected_variant_config_sha256": dict(variant_hashes),
         "expected_world_size": world_size,
@@ -546,6 +634,15 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
     entries = gate.get("evidence_reports")
     if not isinstance(entries, Mapping):
         raise ContactEgoStage1PreflightError("gate evidence reports missing")
+    matched_entry = entries.get("matched_control_hash_collector")
+    if (
+        not isinstance(matched_entry, Mapping)
+        or matched_entry.get("sha256")
+        != matched_control_expected["expected_report_sha256"]
+    ):
+        raise ContactEgoStage1PreflightError(
+            "matched-control report SHA is not independently bound by the gate"
+        )
     reports = {name: _resolve_report(gate_path, entries.get(name), name) for name in (
         "annotation_agreement", "ego_action_grip", "matched_control_hash_collector"
     )}
@@ -614,6 +711,7 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
         or grip.get("transform_conversion_verified") is not True
         or grip.get("dataset_id") != dataset_id
         or grip.get("dataset_fingerprint_sha256") != expected["dataset_fingerprint_sha256"]
+        or grip.get("source_receipt_sha256") != expected["source_receipt_sha256"]
         or grip.get("norm_stats_sha256") != expected["norm_stats_sha256"]
         or grip.get("hdf5_bundle_sha256") != expected["hdf5_bundle_sha256"]
         or grip.get("source_hand_status_semantics") != EGO_HAND_STATUS_SEMANTICS
@@ -622,7 +720,13 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
         or source_evidence_valid is not True
     ):
         raise ContactEgoStage1PreflightError("Ego action/grip evidence failed")
-    _, collector, collector_digest = reports["matched_control_hash_collector"]
+    collector_path, collector, collector_digest = reports[
+        "matched_control_hash_collector"
+    ]
+    if collector_digest != matched_control_expected["expected_report_sha256"]:
+        raise ContactEgoStage1PreflightError(
+            "matched-control report bytes differ from expectation"
+        )
     required_hashes = {"ordered_sample_ids", "raw_batch", "augmentation_parameters", "visual_action_timesteps", "visual_noise", "action_noise"}
     code = collector.get("collector_code")
     valid_code = isinstance(code, Mapping) and isinstance(code.get("path"), str)
@@ -639,10 +743,49 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
         except OSError:
             valid_code = False
     expected_variants = matched_control_expected["expected_variant_config_sha256"]
+    expected_trace_files = matched_control_expected["expected_trace_files"]
+    if collector.get("trace_files") != expected_trace_files:
+        raise ContactEgoStage1PreflightError(
+            "matched-control trace manifest differs from external expectations"
+        )
+    for entries_for_variant in expected_trace_files.values():
+        for entry in entries_for_variant:
+            trace_path = Path(entry["path"])
+            if not trace_path.is_absolute():
+                trace_path = collector_path.parent / trace_path
+            trace_path = trace_path.resolve()
+            if not trace_path.is_file() or sha256_file(trace_path) != entry["sha256"]:
+                raise ContactEgoStage1PreflightError(
+                    f"matched-control trace is missing or changed: {trace_path}"
+                )
     expected_topology = {
         "world_size": matched_control_expected["expected_world_size"],
         "rank_set": matched_control_expected["expected_rank_set"],
     }
+    global_hashes = collector.get("global_hashes")
+    valid_global_hashes = isinstance(global_hashes, Mapping) and bool(global_hashes)
+    if valid_global_hashes:
+        for logical_name, variants in global_hashes.items():
+            if (
+                not isinstance(logical_name, str)
+                or not isinstance(variants, Mapping)
+                or set(variants) != set(IMPLEMENTED_RUNNER_VARIANTS)
+            ):
+                valid_global_hashes = False
+                break
+            for hashes in variants.values():
+                if (
+                    not isinstance(hashes, Mapping)
+                    or set(hashes) != required_hashes
+                    or any(
+                        not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
+                        for value in hashes.values()
+                    )
+                ):
+                    valid_global_hashes = False
+                    break
+            if not valid_global_hashes:
+                break
     if (
         collector.get("report_version")
         != matched_control_expected["expected_collector_version"]
@@ -652,8 +795,9 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
         or collector.get("all_hashes_equal") is not True
         or collector.get("all_hashes_equal_across_variants") is not True
         or collector.get("seeds") != [6666, 7777, 8888]
-        or not isinstance(collector.get("run_id"), str)
-        or not collector.get("run_id")
+        or collector.get("run_id") != matched_control_expected["expected_run_id"]
+        or collector.get("run_nonce")
+        != matched_control_expected["expected_run_nonce"]
         or collector.get("dataset_id") != dataset_id
         or collector.get("dataset_ids") != [dataset_id]
         or collector.get("git_commit")
@@ -661,12 +805,23 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
         or collector.get("control_config_sha256")
         != matched_control_expected["expected_control_config_sha256"]
         or collector.get("variant_config_sha256") != expected_variants
-        or collector.get("variants") != sorted(expected_variants)
+        or collector.get("variants") != sorted(IMPLEMENTED_RUNNER_VARIANTS)
         or collector.get("world_size")
         != matched_control_expected["expected_world_size"]
         or collector.get("rank_set")
         != matched_control_expected["expected_rank_set"]
         or collector.get("topology") != expected_topology
+        or collector.get("trace_manifest_sha256")
+        != matched_control_expected["expected_trace_manifest_sha256"]
+        or collector.get("global_hashes_sha256")
+        != matched_control_expected["expected_global_hashes_sha256"]
+        or collector.get("hash_schema_sha256")
+        != matched_control_expected["expected_hash_schema_sha256"]
+        or collector.get("hash_schema") != HASH_SCHEMA
+        or not valid_global_hashes
+        or canonical_sha256(global_hashes)
+        != matched_control_expected["expected_global_hashes_sha256"]
+        or collector.get("matched_batch_count") != len(global_hashes or {})
         or not isinstance(collector.get("matched_batch_count"), int)
         or isinstance(collector.get("matched_batch_count"), bool)
         or collector.get("matched_batch_count", 0) <= 0 or not valid_code
@@ -682,11 +837,16 @@ def _validate_gate(gate: Mapping, expected: Mapping, gate_path: Path, dataset_id
 
 def validate_ego_stage1_training_preflight(
     *, data_root: str | Path, norm_stats_path: str | Path, hdf5_dir: str | Path,
+    t5_embedding_dir: str | Path,
     sidecar_dir: str | Path,
     coverage_csv: str | Path, segments_csv: str | Path, inventory_csv: str | Path,
     build_config_path: str | Path, split_manifest: str | Path, training_gate_path: str | Path,
 ) -> dict:
     identity = derive_ego_dataset_identity(data_root)
+    t5_source = derive_ego_t5_source_receipt(
+        t5_embedding_dir,
+        episode_indices=list(identity["episode_lengths"]),
+    )
     norm_path = Path(norm_stats_path).resolve()
     norm = _load_json(norm_path, "Ego Stage1 norm")
     hdf5_bundle_sha256 = _validate_norm(norm, identity, Path(hdf5_dir).resolve())
@@ -705,6 +865,10 @@ def validate_ego_stage1_training_preflight(
         "dataset_fingerprint_sha256": identity["dataset_fingerprint_sha256"],
         "info_identity_sha256": identity["info_identity_sha256"],
         "episode_metadata_sha256": identity["episode_metadata_sha256"],
+        "source_manifest_sha256": identity["source_manifest_sha256"],
+        "source_receipt_sha256": identity["source_receipt_sha256"],
+        "t5_source_manifest_sha256": t5_source["source_manifest_sha256"],
+        "t5_source_receipt_sha256": t5_source["source_receipt_sha256"],
         "norm_stats_sha256": sha256_file(norm_path),
         "hdf5_bundle_sha256": hdf5_bundle_sha256,
         "sidecar_meta_sha256": sidecar["meta_sha256"],
@@ -726,6 +890,7 @@ def validate_ego_stage1_training_preflight(
         "contact_target_dim": SEGMENT_TARGET_DIM, "num_contact_tokens": 12,
         "transport_mode": "hard_st", "time_bins": 16,
         "data_root": identity["data_root"], "norm_stats_path": str(norm_path),
+        "t5_embedding_dir": t5_source["source_dir_record_only"],
         "sidecar_dir": str(Path(sidecar_dir).resolve()),
         "dataset_id": identity["dataset_id"], "episode_npz_sha256": sidecar["episode_npz_sha256"],
         "evidence_report_sha256": {
@@ -743,6 +908,10 @@ def preflight_from_environment() -> dict:
     return validate_ego_stage1_training_preflight(
         data_root=os.environ["GWP_EGO_DATA_PATH"], norm_stats_path=os.environ["GWP_EGO_NORM_STATS_PATH"],
         hdf5_dir=os.environ["GWP_EGO_FINAL_HDF5_DIR"],
+        t5_embedding_dir=os.environ.get(
+            "GWP_T5_EMBEDDING_DIR",
+            str(Path(os.environ["GWP_EGO_DATA_PATH"]) / "t5_embedding"),
+        ),
         sidecar_dir=os.environ["GWP_CONTACT_SIDECAR_DIR"], coverage_csv=os.environ["GWP_CONTACT_COVERAGE_CSV"],
         segments_csv=os.environ["GWP_CONTACT_SEGMENTS_CSV"], inventory_csv=os.environ["GWP_CONTACT_INVENTORY_CSV"],
         build_config_path=os.environ["GWP_CONTACT_BUILD_CONFIG"], split_manifest=os.environ["GWP_CONTACT_SPLIT_MANIFEST"],

@@ -13,6 +13,8 @@ import world_action_model.matched_control_hashes as matched_control_hashes
 from world_action_model.matched_control_hashes import (
     ALLOWED_SEEDS,
     COLLECTOR_VERSION,
+    HASH_SCHEMA,
+    IMPLEMENTED_RUNNER_VARIANTS,
     canonical_sha256,
 )
 
@@ -63,6 +65,13 @@ def _validate_expected_evidence_binding(
     *,
     variant_id: str,
     expected_git_commit: str | None,
+    expected_run_id: str | None,
+    expected_run_nonce: str | None,
+    expected_report_sha256: str | None,
+    expected_trace_files: Mapping[str, list[Mapping[str, str]]] | None,
+    expected_trace_manifest_sha256: str | None,
+    expected_global_hashes_sha256: str | None,
+    expected_hash_schema_sha256: str | None,
     expected_control_config_sha256: str | None,
     expected_variant_config_sha256: Mapping[str, str] | None,
     expected_world_size: int | None,
@@ -72,6 +81,13 @@ def _validate_expected_evidence_binding(
 ) -> dict[str, Any] | None:
     values = (
         expected_git_commit,
+        expected_run_id,
+        expected_run_nonce,
+        expected_report_sha256,
+        expected_trace_files,
+        expected_trace_manifest_sha256,
+        expected_global_hashes_sha256,
+        expected_hash_schema_sha256,
         expected_control_config_sha256,
         expected_variant_config_sha256,
         expected_world_size,
@@ -84,24 +100,81 @@ def _validate_expected_evidence_binding(
     if any(value is None for value in values):
         raise ValueError("matched-control evidence expectations must be supplied as one complete set")
     assert expected_git_commit is not None
+    assert expected_run_id is not None
+    assert expected_run_nonce is not None
+    assert expected_report_sha256 is not None
+    assert expected_trace_files is not None
+    assert expected_trace_manifest_sha256 is not None
+    assert expected_global_hashes_sha256 is not None
+    assert expected_hash_schema_sha256 is not None
     assert expected_control_config_sha256 is not None
     assert expected_variant_config_sha256 is not None
     assert expected_world_size is not None
     assert expected_rank_set is not None
     assert expected_collector_version is not None
     assert expected_collector_source_sha256 is not None
-    if not re.fullmatch(r"[0-9a-f]{40}", expected_git_commit):
+    if not isinstance(expected_git_commit, str) or not re.fullmatch(
+        r"[0-9a-f]{40}", expected_git_commit
+    ):
         raise ValueError("expected_git_commit must be a full 40-hex Git SHA")
-    if not re.fullmatch(r"[0-9a-f]{64}", expected_control_config_sha256):
+    if not isinstance(expected_run_id, str) or not expected_run_id.strip():
+        raise ValueError("expected_run_id must be non-empty")
+    if not isinstance(expected_run_nonce, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}", expected_run_nonce
+    ):
+        raise ValueError("expected_run_nonce must be an explicit 16-128 character audit nonce")
+    for name, value in (
+        ("expected_report_sha256", expected_report_sha256),
+        ("expected_trace_manifest_sha256", expected_trace_manifest_sha256),
+        ("expected_global_hashes_sha256", expected_global_hashes_sha256),
+        ("expected_hash_schema_sha256", expected_hash_schema_sha256),
+    ):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError(f"{name} must be a SHA256")
+    if not isinstance(expected_control_config_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_control_config_sha256
+    ):
         raise ValueError("expected_control_config_sha256 must be a SHA256")
     variant_hashes = dict(expected_variant_config_sha256)
     if (
-        len(variant_hashes) < 2
-        or variant_id not in variant_hashes
+        set(variant_hashes) != set(IMPLEMENTED_RUNNER_VARIANTS)
+        or variant_id not in IMPLEMENTED_RUNNER_VARIANTS
         or any(not isinstance(name, str) or not name for name in variant_hashes)
-        or any(not re.fullmatch(r"[0-9a-f]{64}", str(value)) for value in variant_hashes.values())
+        or any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in variant_hashes.values()
+        )
     ):
         raise ValueError("expected_variant_config_sha256 is not a complete variant mapping")
+    if not isinstance(expected_trace_files, Mapping):
+        raise ValueError("expected_trace_files must be a variant mapping")
+    trace_files = {}
+    for name, entries in expected_trace_files.items():
+        if not isinstance(name, str) or not isinstance(entries, list):
+            raise ValueError("expected_trace_files has an invalid variant entry")
+        if any(not isinstance(entry, Mapping) for entry in entries):
+            raise ValueError("expected_trace_files entries must be mappings")
+        trace_files[name] = [dict(entry) for entry in entries]
+    if set(trace_files) != set(IMPLEMENTED_RUNNER_VARIANTS):
+        raise ValueError("expected_trace_files variants differ from the implemented runner set")
+    seen_trace_paths = set()
+    for variant, entries in trace_files.items():
+        if not entries:
+            raise ValueError(f"expected_trace_files is empty for {variant}")
+        for entry in entries:
+            if set(entry) != {"path", "sha256"}:
+                raise ValueError("expected trace entries require exactly path and sha256")
+            path = entry["path"]
+            digest = entry["sha256"]
+            if not isinstance(path, str) or not path or path in seen_trace_paths:
+                raise ValueError("expected trace paths must be non-empty and globally unique")
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("expected trace SHA must be a SHA256")
+            seen_trace_paths.add(path)
+    if canonical_sha256(trace_files) != expected_trace_manifest_sha256:
+        raise ValueError("expected trace manifest SHA does not match expected_trace_files")
+    if canonical_sha256(HASH_SCHEMA) != expected_hash_schema_sha256:
+        raise ValueError("expected hash schema differs from the installed collector")
     if (
         isinstance(expected_world_size, bool)
         or not isinstance(expected_world_size, int)
@@ -119,7 +192,9 @@ def _validate_expected_evidence_binding(
         raise ValueError("expected_rank_set must equal range(expected_world_size)")
     if expected_collector_version != COLLECTOR_VERSION:
         raise ValueError("expected_collector_version differs from the installed collector")
-    if not re.fullmatch(r"[0-9a-f]{64}", expected_collector_source_sha256):
+    if not isinstance(expected_collector_source_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_collector_source_sha256
+    ):
         raise ValueError("expected_collector_source_sha256 must be a SHA256")
     source_path = Path(matched_control_hashes.__file__).resolve()
     if _file_sha256(source_path) != expected_collector_source_sha256:
@@ -128,6 +203,13 @@ def _validate_expected_evidence_binding(
         raise ValueError("current Git commit differs from the matched-control gate")
     return {
         "expected_git_commit": expected_git_commit,
+        "expected_run_id": expected_run_id,
+        "expected_run_nonce": expected_run_nonce,
+        "expected_report_sha256": expected_report_sha256,
+        "expected_trace_files": trace_files,
+        "expected_trace_manifest_sha256": expected_trace_manifest_sha256,
+        "expected_global_hashes_sha256": expected_global_hashes_sha256,
+        "expected_hash_schema_sha256": expected_hash_schema_sha256,
         "expected_world_size": expected_world_size,
         "expected_rank_set": list(expected_rank_set),
         "expected_collector_version": expected_collector_version,
@@ -137,12 +219,49 @@ def _validate_expected_evidence_binding(
     }
 
 
+def _runtime_topology_from_environment(
+    *, expected_world_size: int | None, expected_rank_set: list[int] | None
+) -> dict[str, int]:
+    """Read/compare launcher identity before config or filesystem inspection."""
+
+    try:
+        rank = int(_required_environment("RANK"))
+        world_size = int(_required_environment("WORLD_SIZE"))
+    except ValueError as exc:
+        raise ValueError("RANK and WORLD_SIZE must be base-10 integers") from exc
+    if world_size <= 0 or rank < 0 or rank >= world_size:
+        raise ValueError(f"invalid runtime topology rank={rank}, world_size={world_size}")
+    if expected_world_size is not None or expected_rank_set is not None:
+        if (
+            isinstance(expected_world_size, bool)
+            or not isinstance(expected_world_size, int)
+            or expected_world_size <= 0
+            or not isinstance(expected_rank_set, list)
+            or any(
+                isinstance(expected_rank, bool) or not isinstance(expected_rank, int)
+                for expected_rank in expected_rank_set
+            )
+            or expected_rank_set != list(range(expected_world_size))
+        ):
+            raise ValueError("external rank/world topology is invalid or incomplete")
+        if world_size != expected_world_size or rank not in expected_rank_set:
+            raise ValueError("actual runtime rank/world differs from external expectations")
+    return {"rank": rank, "world_size": world_size}
+
+
 def configure_matched_control_from_environment(
     config: dict[str, Any],
     *,
     variant_id: str,
     expected_dataset_id: str | None = None,
     expected_git_commit: str | None = None,
+    expected_run_id: str | None = None,
+    expected_run_nonce: str | None = None,
+    expected_report_sha256: str | None = None,
+    expected_trace_files: Mapping[str, list[Mapping[str, str]]] | None = None,
+    expected_trace_manifest_sha256: str | None = None,
+    expected_global_hashes_sha256: str | None = None,
+    expected_hash_schema_sha256: str | None = None,
     expected_control_config_sha256: str | None = None,
     expected_variant_config_sha256: Mapping[str, str] | None = None,
     expected_world_size: int | None = None,
@@ -160,9 +279,24 @@ def configure_matched_control_from_environment(
     output_dir = os.environ.get("GWP_MATCHED_CONTROL_OUTPUT_DIR", "").strip()
     if not output_dir:
         return False
+    runtime_topology = _runtime_topology_from_environment(
+        expected_world_size=expected_world_size,
+        expected_rank_set=expected_rank_set,
+    )
+    if variant_id not in IMPLEMENTED_RUNNER_VARIANTS:
+        raise ValueError(
+            f"variant_id is not an implemented matched-control runner: {variant_id!r}"
+        )
     evidence_binding = _validate_expected_evidence_binding(
         variant_id=variant_id,
         expected_git_commit=expected_git_commit,
+        expected_run_id=expected_run_id,
+        expected_run_nonce=expected_run_nonce,
+        expected_report_sha256=expected_report_sha256,
+        expected_trace_files=expected_trace_files,
+        expected_trace_manifest_sha256=expected_trace_manifest_sha256,
+        expected_global_hashes_sha256=expected_global_hashes_sha256,
+        expected_hash_schema_sha256=expected_hash_schema_sha256,
         expected_control_config_sha256=expected_control_config_sha256,
         expected_variant_config_sha256=expected_variant_config_sha256,
         expected_world_size=expected_world_size,
@@ -181,6 +315,14 @@ def configure_matched_control_from_environment(
                 "expected_dataset_id"
             )
     run_id = _required_environment("GWP_MATCHED_CONTROL_RUN_ID")
+    run_nonce = _required_environment("GWP_MATCHED_CONTROL_RUN_NONCE")
+    if evidence_binding is not None and (
+        run_id != evidence_binding["expected_run_id"]
+        or run_nonce != evidence_binding["expected_run_nonce"]
+    ):
+        raise ValueError("runtime run_id/nonce differs from external expectations")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}", run_nonce):
+        raise ValueError("GWP_MATCHED_CONTROL_RUN_NONCE has an invalid audit nonce format")
     selected_variant = os.environ.get(
         "GWP_MATCHED_CONTROL_VARIANT_ID", variant_id
     ).strip()
@@ -254,11 +396,14 @@ def configure_matched_control_from_environment(
         "enabled": True,
         "output_dir": output_dir,
         "run_id": run_id,
+        "run_nonce": run_nonce,
         "variant_id": variant_id,
         "seed": seed,
         "variant_config_sha256": variant_sha256,
         "control_config_sha256": control_sha256,
         "config_hash_scope": CONFIG_HASH_SCOPE,
+        "runtime_rank": runtime_topology["rank"],
+        "runtime_world_size": runtime_topology["world_size"],
     }
     if evidence_binding is not None:
         config["models"]["matched_control_collector"].update(evidence_binding)

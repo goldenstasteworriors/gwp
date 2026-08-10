@@ -5,6 +5,7 @@
   "transform_conversion_verified": false,
   "dataset_id": null,
   "dataset_fingerprint_sha256": null,
+  "source_receipt_sha256": null,
   "norm_stats_sha256": null,
   "hdf5_bundle_sha256": null,
   "source_action_dim": 20,

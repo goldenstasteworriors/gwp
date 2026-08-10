@@ -21,9 +21,14 @@ import numpy as np
 import torch
 
 
-COLLECTOR_VERSION = "matched-control-hash-collector/v1"
+COLLECTOR_VERSION = "matched-control-hash-collector/v2"
 TRACE_VERSION = "wam-matched-control-sample-trace/v1"
 ALLOWED_SEEDS = (6666, 7777, 8888)
+IMPLEMENTED_RUNNER_VARIANTS = (
+    "soft_semantic",
+    "hard_st",
+    "hard_detached",
+)
 REQUIRED_HASHES = (
     "ordered_sample_ids",
     "raw_batch",
@@ -264,9 +269,19 @@ class MatchedControlCollector:
                 f"invalid distributed identity rank={self.rank}, world_size={self.world_size}"
             )
         self.run_id = str(config.get("run_id", "")).strip()
+        self.run_nonce = str(config.get("run_nonce", "")).strip()
         self.variant_id = str(config.get("variant_id", "")).strip()
         safe_run = _safe_name(self.run_id)
+        safe_nonce = _safe_name(self.run_nonce)
         safe_variant = _safe_name(self.variant_id)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}", self.run_nonce):
+            raise MatchedControlError(
+                "run_nonce must be an explicit 16-128 character audit nonce"
+            )
+        if self.variant_id not in IMPLEMENTED_RUNNER_VARIANTS:
+            raise MatchedControlError(
+                f"variant_id is not an implemented runner: {self.variant_id!r}"
+            )
         self.variant_config_sha256 = str(
             config.get("variant_config_sha256", "")
         ).strip()
@@ -300,6 +315,17 @@ class MatchedControlCollector:
             raise MatchedControlError(
                 "runtime world_size differs from the production expectation"
             )
+        configured_runtime_world = config.get("runtime_world_size")
+        configured_runtime_rank = config.get("runtime_rank")
+        if (
+            configured_runtime_world is not None
+            and self.world_size != configured_runtime_world
+        ) or (
+            configured_runtime_rank is not None and self.rank != configured_runtime_rank
+        ):
+            raise MatchedControlError(
+                "trainer rank/world differs from the config-import runtime topology"
+            )
         expected_rank_set = config.get("expected_rank_set")
         if expected_rank_set is not None and (
             not isinstance(expected_rank_set, list)
@@ -324,6 +350,14 @@ class MatchedControlCollector:
             raise MatchedControlError(
                 "runtime collector source SHA differs from the production expectation"
             )
+        expected_run_id = config.get("expected_run_id")
+        expected_run_nonce = config.get("expected_run_nonce")
+        if expected_run_id is not None and self.run_id != expected_run_id:
+            raise MatchedControlError("runtime run_id differs from the production expectation")
+        if expected_run_nonce is not None and self.run_nonce != expected_run_nonce:
+            raise MatchedControlError(
+                "runtime run_nonce differs from the production expectation"
+            )
 
         project_path = Path(project_dir).expanduser().resolve()
         output_dir_value = config.get("output_dir")
@@ -333,7 +367,8 @@ class MatchedControlCollector:
         _ensure_project_output(output_dir, project_path)
         output_dir.mkdir(parents=True, exist_ok=True)
         filename = (
-            f"{safe_run}__{safe_variant}__seed{self.seed}__rank{self.rank:05d}.jsonl"
+            f"{safe_run}__{safe_nonce}__{safe_variant}__seed{self.seed}"
+            f"__rank{self.rank:05d}.jsonl"
         )
         self.output_path = output_dir / filename
         if self.output_path.exists():
@@ -396,6 +431,7 @@ class MatchedControlCollector:
         record = {
             "record_version": COLLECTOR_VERSION,
             "run_id": self.run_id,
+            "run_nonce": self.run_nonce,
             "variant_id": self.variant_id,
             "seed": self.seed,
             "global_step": global_step,
@@ -512,6 +548,11 @@ def _read_variant_records(
                 raise MatchedControlError(f"missing config_hash_scope in {path}:{line_number}")
             if not isinstance(record.get("run_id"), str) or not record["run_id"].strip():
                 raise MatchedControlError(f"missing run_id in {path}:{line_number}")
+            if not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}",
+                str(record.get("run_nonce", "")),
+            ):
+                raise MatchedControlError(f"missing/invalid run_nonce in {path}:{line_number}")
             if not isinstance(record.get("git_commit"), str) or not record[
                 "git_commit"
             ].strip():
@@ -578,6 +619,7 @@ def compare_variant_traces(
         "hash_schema": HASH_SCHEMA,
         "seeds": [],
         "run_id": None,
+        "run_nonce": None,
         "dataset_id": None,
         "dataset_ids": [],
         "variants": sorted(variants),
@@ -590,14 +632,20 @@ def compare_variant_traces(
         "world_size": None,
         "rank_set": None,
         "topology": None,
+        "trace_manifest_sha256": None,
+        "global_hashes_sha256": None,
+        "hash_schema_sha256": canonical_sha256(HASH_SCHEMA),
         "errors": [],
     }
     try:
-        if len(variants) < 2:
-            raise MatchedControlError("comparison requires at least two variants")
+        if set(variants) != set(IMPLEMENTED_RUNNER_VARIANTS):
+            raise MatchedControlError(
+                "comparison variants must equal the implemented runner set: "
+                f"{list(IMPLEMENTED_RUNNER_VARIANTS)}"
+            )
         indexed: dict[str, dict[tuple[int, int, int, int], dict[str, Any]]] = {}
         trace_files: dict[str, list[dict[str, str]]] = {}
-        observed_pairs: set[tuple[str, str]] = set()
+        observed_pairs: set[tuple[str, str, str]] = set()
         for variant, raw_paths in sorted(variants.items()):
             paths: list[Path] = []
             for raw_path in raw_paths:
@@ -606,9 +654,20 @@ def compare_variant_traces(
             if len(deduplicated_paths) != len(paths):
                 raise MatchedControlError(f"duplicate trace file supplied for {variant}")
             paths = deduplicated_paths
-            records, trace_files[variant] = _read_variant_records(paths, variant)
+            records, file_digests = _read_variant_records(paths, variant)
+            trace_files[variant] = [
+                {
+                    "path": os.path.relpath(entry["path"], report_path.parent),
+                    "sha256": entry["sha256"],
+                }
+                for entry in file_digests
+            ]
             run_variant_pairs = {
-                (str(record.get("run_id", "")), str(record.get("variant_id", "")))
+                (
+                    str(record.get("run_id", "")),
+                    str(record.get("run_nonce", "")),
+                    str(record.get("variant_id", "")),
+                )
                 for record in records
             }
             if len(run_variant_pairs) != 1:
@@ -625,9 +684,12 @@ def compare_variant_traces(
                 by_key[key] = record
             indexed[variant] = by_key
 
-        run_ids = {run_id for run_id, _ in observed_pairs}
+        run_ids = {run_id for run_id, _, _ in observed_pairs}
+        run_nonces = {run_nonce for _, run_nonce, _ in observed_pairs}
         if len(run_ids) != 1:
             raise MatchedControlError("run_id differs across variants")
+        if len(run_nonces) != 1:
+            raise MatchedControlError("run_nonce differs across variants")
         baseline_name = sorted(indexed)[0]
         baseline = indexed[baseline_name]
         baseline_keys = set(baseline)
@@ -740,6 +802,7 @@ def compare_variant_traces(
             all_hashes_equal_across_variants=True,
             seeds=observed_seeds,
             run_id=next(iter(run_ids)),
+            run_nonce=next(iter(run_nonces)),
             dataset_id=next(iter(dataset_ids)),
             dataset_ids=sorted(dataset_ids),
             global_hashes=global_hashes,
@@ -754,6 +817,9 @@ def compare_variant_traces(
                 "world_size": report_world_size,
                 "rank_set": report_rank_set,
             },
+            trace_manifest_sha256=canonical_sha256(trace_files),
+            global_hashes_sha256=canonical_sha256(global_hashes),
+            hash_schema_sha256=canonical_sha256(HASH_SCHEMA),
             errors=[],
         )
     except (KeyError, TypeError, ValueError, OSError) as exc:
