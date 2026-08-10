@@ -7,6 +7,7 @@ inventing a finger site, object part, or 3-D surface normal.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -102,6 +103,88 @@ SEGMENT_TARGET_DIM = sum(SEGMENT_FIELD_WIDTHS.values())
 SEGMENT_BINARY_FIELDS = ("presence", "left_censored", "right_censored")
 SEGMENT_CATEGORICAL_FIELDS = ("side", "site", "object_role", "contact_mode")
 SEGMENT_CONTINUOUS_FIELDS = ("start_tau", "end_tau")
+
+CONTACT_SEMANTIC_TRANSPORT_MODES = (
+    "soft",
+    "hard_st",
+    "hard_detached",
+)
+
+
+def contact_transport_capacity_metadata(
+    *,
+    mode: str,
+    time_bins: int,
+    num_queries: int,
+) -> Mapping[str, int | float | str | bool | None]:
+    """Return an auditable upper bound for the action-visible channel.
+
+    Hard transports canonicalize every non-presence field to zero when a
+    query is absent.  For a present segment, uncensored times satisfy
+    ``start <= end``; left-censored segments fix start to zero;
+    right-censored segments fix end to one.  The exact number of valid
+    time/censor states is therefore
+
+    ``time_bins*(time_bins+1)/2 + 2*time_bins + 1``.
+
+    ``soft`` intentionally reports no auditable finite semantic alphabet
+    bound.  This is a statement about semantic identifiability, not a claim
+    that finite-precision machine tensors have mathematically infinite bits.
+    """
+
+    mode = str(mode)
+    if mode not in CONTACT_SEMANTIC_TRANSPORT_MODES:
+        raise ValueError(
+            f"unsupported contact semantic transport mode {mode!r}; "
+            f"expected one of {CONTACT_SEMANTIC_TRANSPORT_MODES}"
+        )
+    time_bins = int(time_bins)
+    num_queries = int(num_queries)
+    if time_bins < 2:
+        raise ValueError(f"time_bins must be at least 2, got {time_bins}")
+    if num_queries < 0:
+        raise ValueError(f"num_queries must be non-negative, got {num_queries}")
+
+    metadata: dict[str, int | float | str | bool | None] = {
+        "mode": mode,
+        "time_bins": time_bins,
+        "num_queries": num_queries,
+        "canonical_absent_state": True,
+    }
+    if mode == "soft":
+        metadata.update(
+            finite_capacity=False,
+            strict_valid_time_censor_states=None,
+            strict_valid_per_segment_states=None,
+            strict_valid_per_segment_bits=None,
+            strict_valid_total_states=None,
+            strict_valid_total_bits=None,
+            unconstrained_per_segment_states_upper_bound=None,
+            unconstrained_per_segment_bits_upper_bound=None,
+            unconstrained_total_bits_upper_bound=None,
+        )
+        return metadata
+
+    categorical_states = 3 * 6 * 4 * 4
+    valid_time_censor_states = time_bins * (time_bins + 1) // 2 + 2 * time_bins + 1
+    strict_per_segment_states = 1 + categorical_states * valid_time_censor_states
+    strict_per_segment_bits = math.log2(strict_per_segment_states)
+    unconstrained_per_segment_states = 1 + categorical_states * 2 * 2 * time_bins**2
+    unconstrained_per_segment_bits = math.log2(unconstrained_per_segment_states)
+    metadata.update(
+        finite_capacity=True,
+        strict_valid_time_censor_states=valid_time_censor_states,
+        strict_valid_per_segment_states=strict_per_segment_states,
+        strict_valid_per_segment_bits=strict_per_segment_bits,
+        strict_valid_total_states=strict_per_segment_states**num_queries,
+        strict_valid_total_bits=strict_per_segment_bits * num_queries,
+        unconstrained_per_segment_states_upper_bound=unconstrained_per_segment_states,
+        unconstrained_per_segment_bits_upper_bound=unconstrained_per_segment_bits,
+        unconstrained_total_bits_upper_bound=(
+            unconstrained_per_segment_bits * num_queries
+        ),
+    )
+    return metadata
 
 
 @dataclass(frozen=True)
