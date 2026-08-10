@@ -61,7 +61,7 @@
 - `track_a/contact_labels_v1_1/formal_dual_annotation_v1_1/` 仍是空白 A/B packet；episode 0 的一个 timing hint 不是 ground truth。
 - 66 段 Ego 数据缺少 subject/session/operator/source object/target object/liquid/batch 的真实分组信息；当前 episode-level split 明确 `strategy_claim_allowed=false`。
 - `track_b/visibility_audit_v0/` 是单人、100 帧、phase-stratified prescreen，不是 IID benchmark，也不是人际一致性结果。
-- `outputs/grab_red_bottle` 是 88 段 `29 body + left Inspire6 + right Inspire6 = 41D` 的旧硬件数据；不能把右侧六指通道压缩或改名为 OmniPicker aperture。
+- `../DiT4DiT_data/grab_red_bottle` 是仓库外、同一 workspace 中的 88 段 `29 body + left Inspire6 + right Inspire6 = 41D` 旧硬件数据；不能把右侧六指通道压缩或改名为 OmniPicker aperture。
 - 仓库没有目标 OmniPicker driver、canonical-to-device 反向标定映射、watchdog 和真实执行器闭环，因此 action output 只能称 canonical25D prediction。
 - `configs/contact_transport_ablation_matrix.json` 中 Q12 direct capacity、aux-only、raw planner hidden、shuffle、delay 仍为 `spec_only` 或 blocked。只有三个 transport runner 有 matched-control collector。
 - 该 matrix 的内部 `canonical_commit` 字段仍记录其最初集成基线 `913811d`，而本 dossier 审计的是 `e62d80d`；正式实验前必须由集成审阅者更新并重新绑定 matrix/config/collector 的完整 SHA，不能用旧字段替新 commit 背书。
