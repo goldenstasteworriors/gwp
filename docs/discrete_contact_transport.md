@@ -28,14 +28,19 @@ low-dimensional routing pilot, not yet a finite-capacity bottleneck.
 - An absent segment has one canonical representation: presence zero and all
   remaining fields zero. This prevents unused fields in padded queries from
   becoming a side channel.
+- Every numeric zero across the complete hard tensor is rewritten to canonical
+  IEEE-754 positive zero before either hard return. Negative zero is not an
+  additional grammar state and therefore does not increase the state count or
+  capacity bound.
 - The action expert receives only the transported 22-D tensor through the
   existing 22-to-action-width encoder. It never receives planner hidden state.
 - All modes reject NaN and positive/negative infinity before transport.
   `hard_st` uses `hard.detach() + (semantic - semantic.detach())`: the
-  parenthesized term is exactly zero in the forward pass, so its bytes equal
-  `hard_detached` instead of retaining float-cancellation residues from the
-  continuous semantic value. The derivative with respect to `semantic`
-  remains the identity straight-through surrogate.
+  parenthesized term is exactly zero in the forward pass, so after the shared
+  positive-zero canonicalization its bytes equal `hard_detached` instead of
+  retaining float-cancellation or signed-zero residues from the continuous
+  semantic value. The derivative with respect to `semantic` remains the
+  identity straight-through surrogate.
 
 Masked oracle values are merged at field level before hard transport. Known
 fields are therefore validated by the same finite grammar as predictions;

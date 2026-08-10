@@ -1075,6 +1075,12 @@ class CasualWorldActionTransformer_MoT(
             field_slice = SEGMENT_FIELD_SLICES[field]
             hard[..., field_slice] = hard[..., field_slice] * presence
 
+        # IEEE-754 distinguishes +0 and -0 at the byte level.  Signed zero is
+        # not a semantic grammar state, so canonicalize every numeric zero in
+        # the complete transported tensor to the positive zero from
+        # ``zeros_like`` before either hard return path.
+        hard = torch.where(hard == 0, torch.zeros_like(hard), hard)
+
         if self.contact_semantic_transport_mode == "hard_st":
             # Subtract the identical semantic tensor before adding the hard
             # value.  This keeps the forward pass bit-exactly on the finite

@@ -100,7 +100,7 @@
         "GWP_CONTACT_TOKENS": "12",
         "models.contact_loss_weight": 0.25
       },
-      "route_definition": "Action cannot attend reference tokens and reads only bit-exact canonical hard 22-D semantics through the 22-to-action-width encoder; non-finite inputs are rejected and action gradients use straight-through identity back to the planner."
+      "route_definition": "Action cannot attend reference tokens and reads only bit-exact canonical hard 22-D semantics through the 22-to-action-width encoder; non-finite inputs are rejected, every numeric zero is canonical positive zero rather than an extra signed-zero state, and action gradients use straight-through identity back to the planner."
     },
     {
       "id": "hard_detached",
