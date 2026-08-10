@@ -77,3 +77,10 @@
   上述字段规则编码。
 - 独立轮 `source_proposal_id`、`parent_segment_ids` 必须为空。proposal/prescreen 不属于证据。
 
+## 数据使用限制
+
+- 隔离视频可能包含可识别的人体、声音或环境，只能用于本次获批的 contact 标注任务。
+- 只使用 coordinator 提供的 packet 与 `media/` 相对路径；不得尝试访问 source 根目录、HDF5、
+  另一标注员目录、proposal、prescreen 或 GT。
+- 不得转发、上传个人云盘、截图、录屏或二次使用媒体。访问到期后删除本地工作副本并向
+  coordinator 确认；发现错误分发或越权访问时立即停止标注并报告。

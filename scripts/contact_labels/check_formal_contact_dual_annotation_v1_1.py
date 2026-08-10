@@ -20,6 +20,9 @@ from pathlib import Path
 from statistics import median
 from typing import Iterable
 
+import h5py
+import numpy as np
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PACKET_ROOT = (
@@ -29,6 +32,8 @@ PACKET_SCHEMA_VERSION = "contact_dual_assignment_packet_v1_1"
 ANNOTATION_SCHEMA_VERSION = "contact_segment_annotation_v1_1"
 DATASET_ID = "ego_pour_liquid_between_beakers"
 FRAME_CLOCK = "processed_action_20hz"
+CANONICAL_COMMIT = "913811dab0a7ee74a0493f19d7bab40225546d99"
+MINIMUM_EPISODES = (43, 50, 51, 58, 34, 38, 9, 54, 36, 53, 12, 0)
 UNKNOWN_PREFIXES = ("UNASSIGNED_", "REPLACE_", "PLACEHOLDER_")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$")
 
@@ -53,9 +58,44 @@ TASK_FIELDS = (
 )
 EVIDENCE_FIELDS = (
     "task_id", "episode_id", "processed_frame", "processed_time_s",
-    "camera_timestamp_ns", "video_frame", "video_time_s", "video_timestamp_us",
-    "sync_error_ms", "video_path", "video_sha256", "processed_hdf5_sha256",
+    "video_frame", "video_time_s", "sync_error_ms", "media_id",
+    "media_relpath", "video_sha256",
 )
+PACKET_FILE_ALLOWLIST = {
+    "ANNOTATION_GUIDE.md",
+    "assignment_receipt.json",
+    "coverage.csv",
+    "identity.json",
+    "segments.csv",
+    "tasks.csv",
+    "timeline_evidence_index.csv",
+}
+IDENTITY_FIELDS = {
+    "packet_schema_version",
+    "packet_id",
+    "annotation_role",
+    "annotator_id",
+    "annotation_session_id",
+    "identity_status",
+    "tasks_sha256",
+    "timeline_evidence_sha256",
+    "coordinator_audit_sha256",
+    "annotation_guide_sha256",
+    "proposal_material_included",
+    "other_annotator_material_included",
+}
+ASSIGNMENT_RECEIPT_FIELDS = {
+    "packet_id",
+    "identity_sha256",
+    "coverage_sha256",
+    "segments_sha256",
+    "tasks_sha256",
+    "timeline_evidence_sha256",
+    "coordinator_audit_sha256",
+    "annotation_guide_sha256",
+    "packet_file_allowlist",
+    "optional_media_relpaths",
+}
 ALLOWED_COVERAGE = {"unknown", "positive_only", "exhaustive"}
 ALLOWED_EVIDENCE = {"rgb_direct", "rgb_temporal", "rgb_depth_temporal", "sensor_confirmed", "unknown"}
 ALLOWED_START = {"observed", "left_censored", "unknown"}
@@ -97,7 +137,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agreement-report", type=Path)
     parser.add_argument("--adjudication-root", type=Path)
     parser.add_argument("--write-report", type=Path)
-    parser.add_argument("--verify-source-hashes", action="store_true")
     return parser.parse_args()
 
 
@@ -124,7 +163,7 @@ def read_csv_exact(path: Path, fields: Iterable[str]) -> list[dict[str, str]]:
 
 def read_identity(path: Path) -> dict:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if value.get("packet_schema_version") != PACKET_SCHEMA_VERSION:
+    if set(value) != IDENTITY_FIELDS or value.get("packet_schema_version") != PACKET_SCHEMA_VERSION:
         fail(f"{path}: packet schema mismatch")
     return value
 
@@ -150,7 +189,7 @@ def validate_iso_utc(value: str, field: str) -> None:
         raise ValueError(f"{field} is not ISO-8601: {value!r}") from exc
 
 
-def validate_sources(root: Path, verify_hashes: bool) -> dict[int, dict[str, str]]:
+def validate_sources(root: Path) -> dict[int, dict[str, str]]:
     path = root / "coordinator" / "source_episode_manifest.csv"
     with path.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -168,7 +207,7 @@ def validate_sources(root: Path, verify_hashes: bool) -> dict[int, dict[str, str
                 fail(f"episode {episode}: missing or resized {kind} source")
             if not re.fullmatch(r"[0-9a-f]{64}", row[hash_field]):
                 fail(f"episode {episode}: missing {kind} SHA-256")
-            if verify_hashes and sha256_file(source_path) != row[hash_field]:
+            if sha256_file(source_path) != row[hash_field]:
                 fail(f"episode {episode}: {kind} SHA-256 mismatch")
         if row["assignment_selected"] == "true":
             depth = Path(row["depth_timestamps_path"])
@@ -176,32 +215,113 @@ def validate_sources(root: Path, verify_hashes: bool) -> dict[int, dict[str, str
                 fail(f"episode {episode}: missing or resized depth timestamp source")
             if not re.fullmatch(r"[0-9a-f]{64}", row["depth_timestamps_sha256"]):
                 fail(f"episode {episode}: selected depth timestamp source lacks SHA-256")
-            if verify_hashes and sha256_file(depth) != row["depth_timestamps_sha256"]:
+            if sha256_file(depth) != row["depth_timestamps_sha256"]:
                 fail(f"episode {episode}: depth timestamp source SHA-256 mismatch")
         result[episode] = row
     return result
+
+
+def validate_coordinator_receipt(root: Path, sources: dict[int, dict[str, str]]) -> dict:
+    audit_path = root / "coordinator" / "audit.json"
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    expected_hashes = {
+        "source_manifest_sha256": root / "coordinator" / "source_episode_manifest.csv",
+        "timeline_evidence_sha256": root / "coordinator" / "timeline_evidence_index.csv",
+        "tasks_sha256": root / "coordinator" / "tasks.csv",
+        "inventory_sha256": root.parent / "episode_inventory.csv",
+        "minimum_proposal_sha256_coordinator_only": root.parent / "minimum_annotation_set.csv",
+    }
+    if (
+        audit.get("packet_schema_version") != PACKET_SCHEMA_VERSION
+        or audit.get("canonical_commit") != CANONICAL_COMMIT
+        or audit.get("episodes_audited") != 66
+        or audit.get("processed_frames_audited")
+        != sum(int(row["processed_frames"]) for row in sources.values())
+        or audit.get("minimum_tasks") != 12
+        or not re.fullmatch(r"[0-9a-f]{64}", str(audit.get("annotation_guide_sha256", "")))
+        or audit.get("proposal_material_copied_to_packets") is not False
+        or audit.get("thumbnail_assets_generated") is not False
+    ):
+        fail("coordinator audit receipt metadata differs")
+    for field, path in expected_hashes.items():
+        if audit.get(field) != sha256_file(path):
+            fail(f"coordinator audit receipt mismatch for {path.name}")
+    first_processed = Path(sources[0]["processed_hdf5_path"])
+    merge_report = first_processed.parent / "merge_report.json"
+    if audit.get("merge_report_sha256") != sha256_file(merge_report):
+        fail("coordinator audit receipt mismatch for merge_report.json")
+    return audit
+
+
+def nearest_video_indices(camera_ns: np.ndarray, color_us: np.ndarray) -> np.ndarray:
+    if camera_ns.ndim != 1 or color_us.ndim != 1 or len(color_us) == 0:
+        fail("source timestamp arrays must be non-empty one-dimensional arrays")
+    if np.any(np.diff(camera_ns) < 0) or np.any(np.diff(color_us) < 0):
+        fail("source timestamp arrays must be monotonic")
+    color_ns = color_us.astype(np.int64) * 1000
+    insertion = np.clip(np.searchsorted(color_ns, camera_ns.astype(np.int64)), 0, len(color_ns) - 1)
+    previous = np.clip(insertion - 1, 0, len(color_ns) - 1)
+    use_previous = np.abs(color_ns[previous] - camera_ns) <= np.abs(color_ns[insertion] - camera_ns)
+    return np.where(use_previous, previous, insertion)
+
+
+def validate_packet_allowlist(packet: Path, tasks: list[dict[str, str]]) -> None:
+    expected_media = {f"media/{row['task_id']}.mp4" for row in tasks}
+    for path in packet.rglob("*"):
+        if path.is_symlink():
+            fail(f"packet files must not be symlinks: {path}")
+        relative = path.relative_to(packet).as_posix()
+        if path.is_dir():
+            if relative != "media":
+                fail(f"unexpected packet directory: {relative}")
+        elif relative not in PACKET_FILE_ALLOWLIST and relative not in expected_media:
+            fail(f"unexpected packet file (possible proposal/GT leak): {relative}")
+    root_files = {path.name for path in packet.iterdir() if path.is_file()}
+    if root_files != PACKET_FILE_ALLOWLIST:
+        fail(f"packet root file allowlist differs: {packet}")
 
 
 def validate_shared_packet(root: Path, sources: dict[int, dict[str, str]]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     packet_a, packet_b = root / "annotator_a", root / "annotator_b"
     tasks_a, tasks_b = packet_a / "tasks.csv", packet_b / "tasks.csv"
     evidence_a, evidence_b = packet_a / "timeline_evidence_index.csv", packet_b / "timeline_evidence_index.csv"
+    guide_a, guide_b = packet_a / "ANNOTATION_GUIDE.md", packet_b / "ANNOTATION_GUIDE.md"
     ensure_independent_files(tasks_a, tasks_b, allow_equal_hash=True)
     ensure_independent_files(evidence_a, evidence_b, allow_equal_hash=True)
-    if tasks_a.read_bytes() != tasks_b.read_bytes() or evidence_a.read_bytes() != evidence_b.read_bytes():
-        fail("A/B must receive byte-identical task coverage and timeline evidence")
+    ensure_independent_files(guide_a, guide_b, allow_equal_hash=True)
+    if (
+        tasks_a.read_bytes() != tasks_b.read_bytes()
+        or evidence_a.read_bytes() != evidence_b.read_bytes()
+        or guide_a.read_bytes() != guide_b.read_bytes()
+    ):
+        fail("A/B must receive byte-identical guide, task coverage, and timeline evidence")
+    audit = json.loads((root / "coordinator" / "audit.json").read_text(encoding="utf-8"))
+    if sha256_file(guide_a) != audit.get("annotation_guide_sha256"):
+        fail("packet annotation guide differs from coordinator audit")
     tasks = read_csv_exact(tasks_a, TASK_FIELDS)
-    if len(tasks) != 12 or len({row["episode_id"] for row in tasks}) != 12:
-        fail("assignment must contain 12 distinct episodes")
+    if (
+        len(tasks) != 12
+        or len({row["episode_id"] for row in tasks}) != 12
+        or len({row["task_id"] for row in tasks}) != 12
+    ):
+        fail("assignment must contain 12 distinct task and episode identities")
+    validate_packet_allowlist(packet_a, tasks)
+    validate_packet_allowlist(packet_b, tasks)
     selected = {episode for episode, row in sources.items() if row["assignment_selected"] == "true"}
-    if {int(row["episode_id"]) for row in tasks} != selected:
+    if (
+        tuple(int(row["episode_id"]) for row in tasks) != MINIMUM_EPISODES
+        or set(MINIMUM_EPISODES) != selected
+    ):
         fail("task episodes disagree with audited selected sources")
-    for row in tasks:
+    for task_index, row in enumerate(tasks):
         episode = int(row["episode_id"])
         if (
-            int(row["coverage_start_frame"]) != 0
+            row["task_id"] != f"contact-min12-{task_index:02d}"
+            or int(row["coverage_start_frame"]) != 0
             or int(row["coverage_end_frame"]) != int(sources[episode]["processed_frames"])
             or row["frame_clock"] != FRAME_CLOCK
+            or float(row["target_fps"]) != 20.0
+            or int(row["context_frames_each_side"]) != 10
             or row["required_coverage_review"] != "full_episode"
         ):
             fail(f"task {row['task_id']}: invalid full-episode coverage")
@@ -215,27 +335,47 @@ def validate_shared_packet(root: Path, sources: dict[int, dict[str, str]]) -> tu
         episode = int(row["episode_id"])
         if episode != int(task_by_id[row["task_id"]]["episode_id"]):
             fail(f"{row['task_id']}: evidence episode mismatch")
-        processed_frame = int(row["processed_frame"])
-        video_frame = int(row["video_frame"])
-        if not 0 <= video_frame < int(sources[episode]["video_frames"]):
-            fail(f"episode {episode}: evidence video frame out of range")
-        if abs(float(row["processed_time_s"]) - processed_frame / 20.0) > 1e-6:
-            fail(f"episode {episode}: processed time/frame mismatch")
-        if abs(float(row["video_time_s"]) - video_frame / float(sources[episode]["video_fps"])) > 1e-6:
-            fail(f"episode {episode}: video time/frame mismatch")
-        if Path(row["video_path"]) != Path(sources[episode]["video_path"]):
-            fail(f"episode {episode}: evidence video path mismatch")
+        task_index = tasks.index(task_by_id[row["task_id"]])
+        if row["media_id"] != f"contact-media-{task_index:02d}":
+            fail(f"episode {episode}: opaque media ID mismatch")
+        if row["media_relpath"] != f"media/{row['task_id']}.mp4":
+            fail(f"episode {episode}: isolated media relative path mismatch")
         if row["video_sha256"] != sources[episode]["video_sha256"]:
             fail(f"episode {episode}: evidence video hash mismatch")
-        if row["processed_hdf5_sha256"] != sources[episode]["processed_hdf5_sha256"]:
-            fail(f"episode {episode}: evidence HDF5 hash mismatch")
     for task_id, rows in by_task.items():
         expected = int(task_by_id[task_id]["coverage_end_frame"])
         frames = [int(row["processed_frame"]) for row in rows]
         if frames != list(range(expected)):
             fail(f"{task_id}: evidence is not a complete ordered processed timeline")
+        episode = int(task_by_id[task_id]["episode_id"])
+        source = sources[episode]
+        with h5py.File(source["processed_hdf5_path"], "r") as handle:
+            camera_ns = np.asarray(handle["camera_timestamp"], dtype=np.int64)
+        with h5py.File(source["depth_timestamps_path"], "r") as handle:
+            color_us = np.asarray(handle["color_system_timestamps_us"], dtype=np.int64)
+        if len(camera_ns) != expected:
+            fail(f"{task_id}: source camera timestamp length differs from task")
+        expected_video = nearest_video_indices(camera_ns, color_us)
+        video_fps = float(source["video_fps"])
+        for processed_frame, row in enumerate(rows):
+            video_frame = int(expected_video[processed_frame])
+            sync_error_ms = abs(
+                int(camera_ns[processed_frame]) - int(color_us[video_frame]) * 1000
+            ) / 1e6
+            if (
+                int(row["video_frame"]) != video_frame
+                or not 0 <= video_frame < int(source["video_frames"])
+                or abs(float(row["processed_time_s"]) - processed_frame / 20.0) > 1e-6
+                or abs(float(row["video_time_s"]) - video_frame / video_fps) > 1e-6
+                or abs(float(row["sync_error_ms"]) - sync_error_ms) > 1e-6
+            ):
+                fail(f"{task_id}: evidence timeline differs from source timestamps")
         if max(float(row["sync_error_ms"]) for row in rows) > 50.0:
             fail(f"{task_id}: severe (>50 ms) timeline sync error")
+        for packet in (packet_a, packet_b):
+            media_path = packet / f"media/{task_id}.mp4"
+            if media_path.exists() and sha256_file(media_path) != source["video_sha256"]:
+                fail(f"{packet}: isolated media content hash mismatch for {task_id}")
     return tasks, evidence
 
 
@@ -245,6 +385,13 @@ def validate_identities(root: Path, phase: str) -> tuple[dict, dict]:
     for identity, expected_role in zip(identities, expected_roles):
         if identity.get("annotation_role") != expected_role:
             fail(f"identity role must be {expected_role}")
+        expected_status = (
+            "must_be_replaced_by_coordinator_before_distribution"
+            if phase == "assignment"
+            else "assigned_by_coordinator"
+        )
+        if identity.get("identity_status") != expected_status:
+            fail(f"{expected_role}: identity_status must be {expected_status!r}")
         for field in ("packet_id", "annotator_id", "annotation_session_id"):
             value = str(identity.get(field, ""))
             if not ID_RE.fullmatch(value):
@@ -253,6 +400,17 @@ def validate_identities(root: Path, phase: str) -> tuple[dict, dict]:
                 fail(f"{expected_role}: coordinator must replace {field} before labeling")
         if identity.get("proposal_material_included") is not False or identity.get("other_annotator_material_included") is not False:
             fail(f"{expected_role}: packet isolation declaration is false")
+        packet = root / f"annotator_{expected_role[-1]}"
+        if (
+            identity.get("tasks_sha256") != sha256_file(packet / "tasks.csv")
+            or identity.get("timeline_evidence_sha256")
+            != sha256_file(packet / "timeline_evidence_index.csv")
+            or identity.get("coordinator_audit_sha256")
+            != sha256_file(root / "coordinator" / "audit.json")
+            or identity.get("annotation_guide_sha256")
+            != sha256_file(packet / "ANNOTATION_GUIDE.md")
+        ):
+            fail(f"{expected_role}: immutable packet receipt differs")
     for field in ("packet_id", "annotator_id", "annotation_session_id"):
         if identities[0][field] == identities[1][field]:
             fail(f"A/B must have distinct {field}")
@@ -269,6 +427,10 @@ def validate_coverages(
     rows = read_csv_exact(path, COVERAGE_FIELDS)
     if len(rows) != len(tasks):
         fail(f"{path}: expected one full-episode coverage row per task")
+    expected_episodes = [row["episode_id"] for row in tasks]
+    actual_episodes = [row["episode_id"] for row in rows]
+    if actual_episodes != expected_episodes or len(set(actual_episodes)) != len(tasks):
+        fail(f"{path}: coverage rows must map one-to-one to the ordered task episodes")
     task_by_episode = {int(row["episode_id"]): row for row in tasks}
     by_id = {}
     for number, row in enumerate(rows, 2):
@@ -293,7 +455,16 @@ def validate_coverages(
         if not fixed:
             fail(f"{path}:{number}: assignment or identity fields drifted")
         if phase == "assignment":
-            if row["review_status"] != "in_progress" or row["coverage_mode"] or row["evidence_scope"] or row["review_timestamp_utc"]:
+            expected_note = (
+                f"task_id={task['task_id']}; no label has been prefilled"
+            )
+            if (
+                row["review_status"] != "in_progress"
+                or row["coverage_mode"]
+                or row["evidence_scope"]
+                or row["review_timestamp_utc"]
+                or row["notes"] != expected_note
+            ):
                 fail(f"{path}:{number}: assignment template contains a prefilled label")
         else:
             if row["review_status"] != "submitted" or row["coverage_mode"] not in ALLOWED_COVERAGE:
@@ -381,14 +552,30 @@ def load_packets(root: Path, phase: str, tasks: list[dict[str, str]]) -> tuple[t
     packet_data = []
     for index, letter in enumerate(("a", "b")):
         packet = root / f"annotator_{letter}"
+        receipt = json.loads((packet / "assignment_receipt.json").read_text(encoding="utf-8"))
+        expected_media = [f"media/{row['task_id']}.mp4" for row in tasks]
+        if (
+            set(receipt) != ASSIGNMENT_RECEIPT_FIELDS
+            or receipt.get("packet_id") != identities[index]["packet_id"]
+            or receipt.get("packet_file_allowlist") != sorted(PACKET_FILE_ALLOWLIST)
+            or receipt.get("optional_media_relpaths") != expected_media
+            or receipt.get("coordinator_audit_sha256")
+            != sha256_file(root / "coordinator" / "audit.json")
+            or receipt.get("annotation_guide_sha256")
+            != sha256_file(packet / "ANNOTATION_GUIDE.md")
+        ):
+            fail(f"{packet}: assignment receipt schema or coordinator binding differs")
+        for name, field in (
+            ("tasks.csv", "tasks_sha256"),
+            ("timeline_evidence_index.csv", "timeline_evidence_sha256"),
+        ):
+            if receipt.get(field) != sha256_file(packet / name):
+                fail(f"{packet}: immutable assignment receipt mismatch for {name}")
         if phase == "assignment":
-            receipt = json.loads((packet / "assignment_receipt.json").read_text(encoding="utf-8"))
             for name, field in (
                 ("identity.json", "identity_sha256"),
                 ("coverage.csv", "coverage_sha256"),
                 ("segments.csv", "segments_sha256"),
-                ("tasks.csv", "tasks_sha256"),
-                ("timeline_evidence_index.csv", "timeline_evidence_sha256"),
             ):
                 if receipt.get(field) != sha256_file(packet / name):
                     fail(f"{packet}: assignment receipt mismatch for {name}")
@@ -399,6 +586,16 @@ def load_packets(root: Path, phase: str, tasks: list[dict[str, str]]) -> tuple[t
         segments = validate_segments(
             packet / "segments.csv", role, identities[index], coverage_by_id, phase
         )
+        segment_counts = {
+            coverage_id: sum(item.coverage_id == coverage_id for item in segments)
+            for coverage_id in coverage_by_id
+        }
+        if phase != "assignment" and any(
+            row["coverage_mode"] == "positive_only"
+            and segment_counts[row["coverage_id"]] == 0
+            for row in coverages
+        ):
+            fail(f"{packet}: positive_only coverage requires at least one submitted segment")
         packet_data.append({"coverages": coverages, "segments": segments})
     ensure_independent_files(root / "annotator_a" / "identity.json", root / "annotator_b" / "identity.json")
     ensure_independent_files(root / "annotator_a" / "coverage.csv", root / "annotator_b" / "coverage.csv")
@@ -407,6 +604,16 @@ def load_packets(root: Path, phase: str, tasks: list[dict[str, str]]) -> tuple[t
         root / "annotator_b" / "segments.csv",
         allow_equal_hash=False,
     )
+    coverage_ids = [
+        {row["coverage_id"] for row in packet["coverages"]}
+        for packet in packet_data
+    ]
+    segment_ids = [
+        {item.segment_id for item in packet["segments"]}
+        for packet in packet_data
+    ]
+    if coverage_ids[0] & coverage_ids[1] or segment_ids[0] & segment_ids[1]:
+        fail("A/B coverage and segment ID namespaces must be disjoint")
     return identities, packet_data
 
 
@@ -595,6 +802,18 @@ def validate_adjudication(root: Path, agreement: dict, identities: tuple[dict, d
         fail("agreement gates failed; adjudication is prohibited")
     identity_path = root / "identity.json"
     identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    if (
+        set(identity)
+        != {
+            "adjudicator_id",
+            "adjudication_session_id",
+            "identity_status",
+            "must_be_distinct_from_annotator_a_and_b",
+        }
+        or identity.get("identity_status") != "assigned_after_agreement_gates_pass"
+        or identity.get("must_be_distinct_from_annotator_a_and_b") is not True
+    ):
+        fail("adjudication identity receipt is incomplete")
     for field in ("adjudicator_id", "adjudication_session_id"):
         value = str(identity.get(field, ""))
         if not ID_RE.fullmatch(value) or value.startswith(UNKNOWN_PREFIXES):
@@ -606,18 +825,32 @@ def validate_adjudication(root: Path, agreement: dict, identities: tuple[dict, d
     coverage_rows = read_csv_exact(root / "coverage.csv", COVERAGE_FIELDS)
     segment_rows = read_csv_exact(root / "segments.csv", SEGMENT_FIELDS)
     task_by_episode = {int(row["episode_id"]): row for row in tasks}
+    if [int(row["episode_id"]) for row in coverage_rows] != [
+        int(row["episode_id"]) for row in tasks
+    ]:
+        fail("adjudication requires one ordered coverage row for every task episode")
     coverage_by_id = {}
-    parent_coverage_ids = {
-        row["coverage_id"]
-        for packet in ("annotator_a", "annotator_b")
-        for row in read_csv_exact(root.parent / packet / "coverage.csv", COVERAGE_FIELDS)
-    }
+    parent_coverages: dict[str, tuple[str, int]] = {}
+    expected_coverage_parents: dict[int, set[str]] = {}
+    for letter in ("a", "b"):
+        rows = read_csv_exact(root.parent / f"annotator_{letter}" / "coverage.csv", COVERAGE_FIELDS)
+        for row in rows:
+            episode = int(row["episode_id"])
+            parent_coverages[row["coverage_id"]] = (letter, episode)
+            expected_coverage_parents.setdefault(episode, set()).add(row["coverage_id"])
     for number, row in enumerate(coverage_rows, 2):
         episode = int(row["episode_id"])
         task = task_by_episode.get(episode)
         parents = {value for value in row["parent_coverage_ids"].split(";") if value}
-        if not task or not parents or not parents <= parent_coverage_ids:
-            fail(f"adjudicated coverage row {number}: invalid task or parent coverage IDs")
+        if (
+            not task
+            or parents != expected_coverage_parents.get(episode)
+            or {parent_coverages[parent][0] for parent in parents} != {"a", "b"}
+            or any(parent_coverages[parent][1] != episode for parent in parents)
+        ):
+            fail(
+                f"adjudicated coverage row {number}: requires exact same-episode A+B parents"
+            )
         if not (
             row["schema_version"] == ANNOTATION_SCHEMA_VERSION
             and row["dataset_id"] == DATASET_ID
@@ -638,17 +871,32 @@ def validate_adjudication(root: Path, agreement: dict, identities: tuple[dict, d
         coverage_by_id[row["coverage_id"]] = row
     if len(coverage_rows) != len(tasks):
         fail("adjudication requires one full-episode coverage row per task")
-    parent_segments = {
-        row["segment_id"]
-        for packet in ("annotator_a", "annotator_b")
-        for row in read_csv_exact(root.parent / packet / "segments.csv", SEGMENT_FIELDS)
-    }
+    parent_segments: dict[str, tuple[str, int]] = {}
+    for letter in ("a", "b"):
+        rows = read_csv_exact(root.parent / f"annotator_{letter}" / "segments.csv", SEGMENT_FIELDS)
+        for row in rows:
+            parent_segments[row["segment_id"]] = (letter, int(row["episode_id"]))
     segment_ids, event_ids = set(), set()
     for number, row in enumerate(segment_rows, 2):
         coverage = coverage_by_id.get(row["coverage_id"])
         parents = {value for value in row["parent_segment_ids"].split(";") if value}
-        if coverage is None or not parents or not parents <= parent_segments:
+        if (
+            coverage is None
+            or int(coverage["episode_id"]) != int(row["episode_id"])
+            or not parents
+            or not parents <= set(parent_segments)
+        ):
             fail(f"adjudicated segment row {number}: missing valid A/B parent segment IDs")
+        episode = int(row["episode_id"])
+        if any(parent_segments[parent][1] != episode for parent in parents):
+            fail(f"adjudicated segment row {number}: parent segment belongs to another episode")
+        parent_sides = {parent_segments[parent][0] for parent in parents}
+        if parent_sides != {"a", "b"}:
+            match = re.search(r"(?:^|;)unilateral_parent_reason=([^;]+)", row["notes"])
+            if match is None or not match.group(1).strip():
+                fail(
+                    f"adjudicated segment row {number}: unilateral parent requires an explicit reason"
+                )
         if coverage["coverage_mode"] == "unknown":
             fail(f"adjudicated segment row {number}: unknown coverage cannot contain a segment")
         if row["source_proposal_id"]:
@@ -694,8 +942,13 @@ def validate_adjudication(root: Path, agreement: dict, identities: tuple[dict, d
 
 def main() -> None:
     args = parse_args()
-    sources = validate_sources(args.packet_root, args.verify_source_hashes)
+    sources = validate_sources(args.packet_root)
+    audit = validate_coordinator_receipt(args.packet_root, sources)
     tasks, evidence = validate_shared_packet(args.packet_root, sources)
+    if audit.get("minimum_tasks") != len(tasks) or audit.get(
+        "minimum_processed_frames"
+    ) != len(evidence):
+        fail("coordinator audit task/timeline counts differ")
     identity_phase = "assignment" if args.phase == "assignment" else "submission"
     identities, packets = load_packets(args.packet_root, identity_phase, tasks)
     result: dict[str, object] = {
@@ -718,6 +971,8 @@ def main() -> None:
     if args.phase in {"agreement", "adjudication"}:
         agreement = agreement_report(tasks, packets)
         result["agreement"] = agreement
+        if not agreement["all_gates_pass"]:
+            result["status"] = "failed"
     else:
         agreement = None
     if args.phase == "adjudication":
@@ -736,6 +991,8 @@ def main() -> None:
         args.write_report.parent.mkdir(parents=True, exist_ok=True)
         args.write_report.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if args.phase == "agreement" and result["status"] == "failed":
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

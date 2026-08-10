@@ -15,7 +15,9 @@ A/B packet。
   SHA-256、视频尺寸/帧率和 merge sync 统计。只有入选 12 段的 depth timestamp sidecar
   计算 SHA-256，因为它们才参与时间轴证据映射。
 - 每个 packet 的 `timeline_evidence_index.csv` 将每个 processed frame 映射到最近的原视频
-  frame，并同时绑定源文件路径和 hash。最大允许同步误差为 50 ms。
+  frame，仅提供 opaque `media_id`、隔离目录相对路径、相对帧/秒和视频 hash。绝对 source
+  路径、原始采集 timestamp、processed HDF5 路径/hash 均只留在 coordinator 区域。最大允许
+  同步误差为 50 ms。
 - 未生成缩略图、contact sheet 或视频副本；不会把私有视觉内容带入 git。
 
 ## 隔离和分发（协调员执行）
@@ -24,18 +26,21 @@ A/B packet。
 
 1. 给 A、B 分配真实且互不相同的 `annotator_id` 和 `annotation_session_id`。
 2. 分别替换 `annotator_a/identity.json` 与 `annotator_b/identity.json`，并同步替换各自
-   `coverage.csv` 的 `annotator_id`。不要改 packet ID、任务表或证据表。
-3. 把 `annotator_a/` 和 `annotator_b/` 复制到两个互不可见的访问控制位置；每人只获得
-   自己的目录，以及 `timeline_evidence_index.csv` 中 12 个 `video_path` 对应 MP4 的
-   **逐文件只读 allowlist**。
-   不要授予 source 根目录浏览权限或 processed HDF5 权限，因为同目录存在 timing 文件，
-   HDF5 也含禁止作为真值依据的 hand status。不要发送 `coordinator/`、`adjudication/`、
-   另一个 packet，或仓库中旧的 proposal/prescreen/timing 文件。
-4. 保存分发时各文件 SHA-256 和访问控制记录。机器检查能拒绝相同路径、硬链接、相同
+   `coverage.csv` 的 `annotator_id`，将 `identity_status` 改为 `assigned_by_coordinator`。不要改
+   packet ID、任务表或证据表。
+3. 把 `annotator_a/` 和 `annotator_b/` 复制到两个互不可见的访问控制位置。协调员把 12 个
+   已核 hash 的 MP4 复制或只读挂载到各自 packet 的 `media/<task_id>.mp4`；禁止使用指向
+   source 根目录的 symlink。每人只能访问自己的 packet 与这些隔离媒体，不能获得 source
+   根目录、processed HDF5、`coordinator/`、`adjudication/`、另一 packet 或仓库权限。
+4. 分发前和收件后都运行 checker。annotator 根目录只允许 receipt 中列出的 7 个文件；可选
+   `media/` 也只允许精确的 12 个 MP4 名称，内容必须匹配 source hash。任何额外文件、目录、
+   symlink、proposal、GT、prescreen 或另一方材料都会被拒绝。
+5. 保存分发时各文件 SHA-256 和访问控制记录。机器检查能拒绝相同路径、硬链接、相同
    annotation hash 和相同身份/session，但**不能证明两个人现实中没有沟通**。
 
-`assignment_receipt.json` 只记录未分发母版的初始 hash。身份或标签开始修改后它不会自动
-更新，正式交付应使用检查器输出作为新 receipt。
+`assignment_receipt.json` 固定母版文件 allowlist、可选媒体 allowlist、coordinator audit、
+tasks 和 timeline hash；assignment 阶段还固定空白 identity/coverage/segments。身份或标签开始
+修改后，immutable receipt 仍必须通过，正式交付另保存 checker 输出作为 submission receipt。
 
 ## 标注动作
 
@@ -65,7 +70,8 @@ python scripts/contact_labels/lookup_contact_timeline_evidence_v1_1.py \
 ```
 
 A 使用 `annotator_a` 路径，B 必须换成自己隔离副本里的 `annotator_b` 路径。输出中的
-`video_time_s` 可直接用于本地播放器定位；不要截取或提交媒体副本到 git。
+`media_relpath` 与 `video_time_s` 可直接用于隔离目录中的本地播放器定位；不要截取或提交
+媒体副本到 git。
 
 ## 校验命令
 
@@ -95,7 +101,8 @@ python scripts/contact_labels/check_formal_contact_dual_annotation_v1_1.py \
 ```
 
 只有报告 `all_gates_pass=true` 才能启动第三人裁决。替换 `adjudication/identity.json` 中的
-真实第三人身份/session，完成裁决表后运行：
+真实第三人身份/session，将 `identity_status` 改为 `assigned_after_agreement_gates_pass`，完成
+裁决表后运行：
 
 ```bash
 python scripts/contact_labels/check_formal_contact_dual_annotation_v1_1.py \
@@ -104,8 +111,9 @@ python scripts/contact_labels/check_formal_contact_dual_annotation_v1_1.py \
   --adjudication-root track_a/contact_labels_v1_1/formal_dual_annotation_v1_1/adjudication
 ```
 
-若需要重新核验所有大源文件 hash，在任一命令末尾添加 `--verify-source-hashes`；默认检查
-存在性、字节数及 manifest 中 hash 形状，避免每次重复读取大文件。
+每次 checker 都会重算全部 66 段 processed HDF5/MP4 以及入选 12 段 timestamp sidecar 的
+SHA-256，并从 source timestamp 数组重新生成 3695 行映射。不存在 size-only hash 复用或仅信任
+CSV 中 sync 数值的快速通道。
 
 ## 质量门槛与 No-Go
 
@@ -113,6 +121,11 @@ python scripts/contact_labels/check_formal_contact_dual_annotation_v1_1.py \
 双方 observed boundary median MAE≤2 processed frames（100 ms）、side/site/object role/contact
 mode 各自至少 2 个可比匹配且 κ≥0.60。低于任一门槛，必须修订定义并独立重标 3 段校准集，
 不能靠裁决“洗掉”系统性低一致性。
+
+`--phase agreement` 在任何 gate 失败时写出 `status=failed` 并以非零状态退出；报告仍保留完整
+指标用于诊断。第三方裁决 coverage 必须精确引用同 episode 的 A+B coverage。裁决 segment 的
+parent 只能来自同 episode；只有单方 parent 时，`notes` 必须写
+`unilateral_parent_reason=<原因>`，明确记录另一方遗漏、不可见或不接受该事件的裁决理由。
 
 即使门槛通过，也只有第三人裁决表能进入现有 sidecar builder。没有两位真实标注者、真实
 独立 session、完整逐帧复核或第三人裁决时，本目录仍是 **No-Go / 非 GT**。66 段缺失的
@@ -123,3 +136,16 @@ subject/session/object/liquid/batch 元数据也继续禁止 OOD 或 strategy cl
 12 段原视频约 3 分钟，但正式逐帧、回看边界、填类别和自检通常需要每位标注者约 2–3
 小时；第三人裁决约 1–1.5 小时；协调员分发、收件和报告约 0.5–1 小时。总计约 5.5–8.5
 人时。若 3 段校准重标或透明/遮挡分歧多，需另加约 1.5–3 人时。
+
+## 隐私、授权与留存
+
+- 分发前，协调员必须记录数据控制者、获批用途和授权/同意或适用的伦理审批编号；没有明确
+  允许人工标注和向指定标注员展示的授权时不得分发。
+- 原视频可能包含可识别的人体、声音、环境或采集时间信息，应按受限人类参与者数据处理。
+  Packet 已移除绝对路径和绝对 timestamp，但协调员仍须完成可识别信息复核与最小化。
+- 使用逐人、最小权限、到期自动撤销的只读访问；记录授权人、标注员、文件 hash、开放/撤销
+  时间和访问日志。禁止下载到个人云盘、转发、二次使用、截图或录屏。
+- 隔离媒体只保留到该轮 submission 验收完成；最长保留期必须写入分发记录。到期后删除所有
+  工作副本并记录销毁确认。CSV、receipt 和审计日志按项目获批期限留存。
+- 发现越权访问、错误分发或可识别信息泄漏时立即撤销访问、停止标注、保全日志并通知数据
+  控制者；完成事件评估和重新授权前不得恢复。

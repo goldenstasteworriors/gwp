@@ -6,7 +6,9 @@
   "annotation_session_id": "UNASSIGNED_SESSION_A",
   "identity_status": "must_be_replaced_by_coordinator_before_distribution",
   "tasks_sha256": "c3e23b5a01d2fd97ddb9cc20a08e275a2349e935d7db5549d753bc22db59434f",
-  "timeline_evidence_sha256": "0e407d8570eb5ea3fce8f8c49121ae41d1649f112ce8538abc027a0ec73750c4",
+  "timeline_evidence_sha256": "3e836ceceebe37b63961aa890c94368e6912aeb7bc33f37f16b7b0c5ae2b0759",
+  "coordinator_audit_sha256": "bce0374d6a7dcec4eb841d831e6e363383158ed3c401ef7904aa661712712844",
+  "annotation_guide_sha256": "34adaa1c199963cade0a61e08fa445c0d78f0a0e2f62acf40dcbfed7fec35fca",
   "proposal_material_included": false,
   "other_annotator_material_included": false
 }
