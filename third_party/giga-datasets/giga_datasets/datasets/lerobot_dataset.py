@@ -13,6 +13,7 @@ import datasets
 import datasets.config as hf_datasets_config
 import lerobot.datasets.lerobot_dataset as _lerobot_dataset_module
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
@@ -238,6 +239,21 @@ def _get_lerobot_total_frames_from_info(root: Path) -> int:
 
 
 def _get_lerobot_episode_lengths_no_hf_cache(root: Path, episodes: Sequence[int]) -> int:
+    legacy_path = root / 'meta' / 'episodes.jsonl'
+    if legacy_path.is_file():
+        lengths = {}
+        with legacy_path.open('r', encoding='utf-8') as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                lengths[int(row['episode_index'])] = int(row['length'])
+        missing = sorted(set(int(index) for index in episodes) - set(lengths))
+        if missing:
+            raise IndexError(f'Episodes missing from {legacy_path}: {missing}')
+        return sum(lengths[int(episode_idx)] for episode_idx in episodes)
+
     from lerobot.datasets.utils import EPISODES_DIR
 
     paths = sorted((root / EPISODES_DIR).glob('*/*.parquet'))
@@ -277,10 +293,57 @@ class _LeRobotDatasetMetadata(_OriginalLeRobotDatasetMetadata):
         )
 
         self.info = load_info(self.root)
-        check_version_compatibility(self.repo_id, self._version, _lerobot_dataset_module.CODEBASE_VERSION)
-        self.tasks = load_tasks(self.root)
-        self.subtasks = load_subtasks(self.root)
-        self.episodes = _load_lerobot_episodes_no_hf_cache(self.root)
+        if str(self.info.get('codebase_version', '')).lower() == 'v2.1':
+            tasks_path = self.root / 'meta' / 'tasks.jsonl'
+            episode_path = self.root / 'meta' / 'episodes.jsonl'
+            task_rows = []
+            with tasks_path.open('r', encoding='utf-8') as file:
+                for line in file:
+                    line = line.strip()
+                    if line:
+                        task_rows.append(json.loads(line))
+            task_rows.sort(key=lambda row: int(row['task_index']))
+            self.tasks = pd.DataFrame(
+                {'task_index': [int(row['task_index']) for row in task_rows]},
+                index=[str(row['task']) for row in task_rows],
+            )
+            self.subtasks = None
+
+            episode_rows = []
+            dataset_from_index = 0
+            with episode_path.open('r', encoding='utf-8') as file:
+                for line in file:
+                    line = line.strip()
+                    if line:
+                        episode_rows.append(json.loads(line))
+            episode_rows.sort(key=lambda row: int(row['episode_index']))
+            expected_indices = list(range(len(episode_rows)))
+            actual_indices = [int(row['episode_index']) for row in episode_rows]
+            if actual_indices != expected_indices:
+                raise ValueError(
+                    f'LeRobot v2.1 episode indices must be contiguous: {actual_indices[:20]}'
+                )
+            for row in episode_rows:
+                length = int(row['length'])
+                row['dataset_from_index'] = dataset_from_index
+                dataset_from_index += length
+                row['dataset_to_index'] = dataset_from_index
+            if dataset_from_index != int(self.info['total_frames']):
+                raise ValueError(
+                    'LeRobot v2.1 episode lengths do not match info.total_frames: '
+                    f'{dataset_from_index} != {self.info["total_frames"]}'
+                )
+            self.episodes = datasets.Dataset.from_list(episode_rows)
+            logging.info('Loaded local LeRobot v2.1 metadata through the read-only compatibility path.')
+        else:
+            check_version_compatibility(
+                self.repo_id,
+                self._version,
+                _lerobot_dataset_module.CODEBASE_VERSION,
+            )
+            self.tasks = load_tasks(self.root)
+            self.subtasks = load_subtasks(self.root)
+            self.episodes = _load_lerobot_episodes_no_hf_cache(self.root)
         self.stats = load_stats(self.root)
 
 

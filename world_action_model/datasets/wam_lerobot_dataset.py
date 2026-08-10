@@ -1,3 +1,4 @@
+import json
 import os
 import pickle
 import re
@@ -219,6 +220,22 @@ class WAMLeRobotDataset(BaseDataset):
                 break
         else:
             return None
+
+        episodes = self.kwargs.get("episodes")
+        episodes_path = os.path.join(self.data_path, "meta", "episodes.jsonl")
+        if episodes is not None and os.path.isfile(episodes_path):
+            lengths = {}
+            with open(episodes_path, "r", encoding="utf-8") as file:
+                for line in file:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    lengths[int(row["episode_index"])] = int(row["length"])
+            missing = sorted(set(int(index) for index in episodes) - set(lengths))
+            if missing:
+                raise IndexError(f"episodes missing from {episodes_path}: {missing}")
+            return sum(lengths[int(index)] for index in episodes)
 
         try:
             return int(info.get('total_frames'))
