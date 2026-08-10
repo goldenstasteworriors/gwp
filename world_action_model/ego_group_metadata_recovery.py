@@ -22,9 +22,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from world_action_model.verified_io import read_verified_bytes, strict_json_loads
+
 
 RECOVERY_AUDIT_VERSION = "ego-group-metadata-recovery-audit/v1"
 SUPPLEMENT_VERSION = "ego-group-metadata-supplement/v1"
+RECEIPT_VERSION = "ego-group-metadata-receipt/v1"
 DATASET_ID = "ego_pour_liquid_between_beakers"
 REQUIRED_GROUP_FIELDS = (
     "subject_id",
@@ -51,6 +54,19 @@ PROVENANCE_RECORD_FIELDS = (
     "evidence_ref",
     "episode_ids",
     "fields",
+)
+PUBLIC_RECEIPT_FIELDS = (
+    "receipt_version",
+    "schema_version",
+    "dataset_id",
+    "supplement_sha256",
+    "recovery_audit_sha256",
+    "source_evidence_sha256",
+    "production_complete",
+    "missing_cell_count",
+    "missing_cells",
+    "unique_group_values",
+    "individual_axes_with_three_groups",
 )
 ALLOWED_PROVENANCE_KINDS = {
     "capture_record",
@@ -82,6 +98,18 @@ UTC_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
 )
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+EXPECTED_EPISODE_COUNT = 66
+FORBIDDEN_INFERRED_EVIDENCE_TERMS = (
+    "appearance",
+    "continuity block",
+    "diagnostic",
+    "episode order",
+    "filename",
+    "inferred",
+    "mtime",
+    "temporal gap",
+    "timestamp gap",
+)
 
 
 class EgoGroupMetadataError(ValueError):
@@ -104,33 +132,13 @@ def source_evidence_sha256(source_evidence: Mapping[str, Any]) -> str:
     return canonical_sha256(portable)
 
 
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _strict_json_load(path: Path) -> Any:
-    def reject_constant(value: str) -> None:
-        raise EgoGroupMetadataError(f"non-finite JSON constant {value!r} in {path}")
-
-    def pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise EgoGroupMetadataError(f"duplicate JSON key {key!r} in {path}")
-            result[key] = value
-        return result
+def _strict_json_load_with_digest(path: Path) -> tuple[Any, str]:
+    """Parse and hash one O_NOFOLLOW-pinned byte snapshot."""
 
     try:
-        return json.loads(
-            path.read_text(encoding="utf-8"),
-            object_pairs_hook=pairs_hook,
-            parse_constant=reject_constant,
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        payload, digest, _ = read_verified_bytes(path)
+        return strict_json_loads(payload, name=str(path)), digest
+    except (OSError, UnicodeError, ValueError) as exc:
         raise EgoGroupMetadataError(f"cannot read strict JSON: {path}") from exc
 
 
@@ -162,9 +170,11 @@ def _parse_utc(value: Any, label: str) -> str:
     return value
 
 
-def load_recovery_audit(path: str | Path) -> dict[str, Any]:
+def _load_recovery_audit_with_digest(
+    path: str | Path,
+) -> tuple[dict[str, Any], str]:
     path = Path(path)
-    audit = _strict_json_load(path)
+    audit, audit_digest = _strict_json_load_with_digest(path)
     if not isinstance(audit, dict):
         raise EgoGroupMetadataError("recovery audit must be a JSON object")
     expected = {
@@ -190,8 +200,12 @@ def load_recovery_audit(path: str | Path) -> dict[str, Any]:
     if digest != source_evidence_sha256(source_evidence):
         raise EgoGroupMetadataError("recovery audit evidence digest mismatch")
     episodes = source_evidence.get("episodes")
-    if not isinstance(episodes, list) or not episodes:
-        raise EgoGroupMetadataError("recovery audit has no episodes")
+    if (
+        not isinstance(episodes, list)
+        or len(episodes) != EXPECTED_EPISODE_COUNT
+        or source_evidence.get("episode_count") != EXPECTED_EPISODE_COUNT
+    ):
+        raise EgoGroupMetadataError("recovery audit must contain exactly 66 episodes")
     seen: set[int] = set()
     for row in episodes:
         episode = row.get("episode_id") if isinstance(row, dict) else None
@@ -200,7 +214,25 @@ def load_recovery_audit(path: str | Path) -> dict[str, Any]:
         if episode in seen:
             raise EgoGroupMetadataError("recovery audit has duplicate episode_id")
         seen.add(episode)
-    return audit
+    if seen != set(range(EXPECTED_EPISODE_COUNT)):
+        raise EgoGroupMetadataError("recovery audit episode IDs must be exactly 0..65")
+    conclusion = audit.get("recovery_conclusion")
+    if (
+        not isinstance(conclusion, dict)
+        or conclusion.get("ood_split_supported") is not False
+        or conclusion.get("production_group_metadata_complete") is not False
+        or conclusion.get("strategy_claim_allowed") is not False
+        or conclusion.get("non_ood_split_boundary_available")
+        != "diagnostic_continuity_block"
+    ):
+        raise EgoGroupMetadataError(
+            "recovery audit must keep inferred continuity diagnostic-only"
+        )
+    return audit, audit_digest
+
+
+def load_recovery_audit(path: str | Path) -> dict[str, Any]:
+    return _load_recovery_audit_with_digest(path)[0]
 
 
 def make_unfilled_supplement(audit: Mapping[str, Any]) -> dict[str, Any]:
@@ -235,8 +267,8 @@ def validate_supplement(
     """
 
     supplement_path = Path(supplement_path)
-    audit = load_recovery_audit(audit_path)
-    supplement = _strict_json_load(supplement_path)
+    audit, audit_digest = _load_recovery_audit_with_digest(audit_path)
+    supplement, supplement_digest = _strict_json_load_with_digest(supplement_path)
     if not isinstance(supplement, dict):
         raise EgoGroupMetadataError("supplement must be a JSON object")
     _require_exact_keys(supplement, SUPPLEMENT_TOP_LEVEL_FIELDS, "supplement")
@@ -311,6 +343,11 @@ def validate_supplement(
             raise EgoGroupMetadataError(
                 "provenance evidence_ref must identify an authoritative source"
             )
+        normalized_ref = " ".join(evidence_ref.lower().replace("_", " ").split())
+        if any(term in normalized_ref for term in FORBIDDEN_INFERRED_EVIDENCE_TERMS):
+            raise EgoGroupMetadataError(
+                "diagnostic/temporal/file-derived evidence cannot authorize production groups"
+            )
         episode_ids = record["episode_ids"]
         fields = record["fields"]
         if (
@@ -381,9 +418,11 @@ def validate_supplement(
             }
         )
     return {
+        "receipt_version": RECEIPT_VERSION,
         "schema_version": SUPPLEMENT_VERSION,
         "dataset_id": DATASET_ID,
-        "supplement_sha256": file_sha256(supplement_path),
+        "supplement_sha256": supplement_digest,
+        "recovery_audit_sha256": audit_digest,
         "source_evidence_sha256": audit["source_evidence_sha256"],
         "production_complete": not incomplete,
         "missing_cell_count": len(missing_cells),

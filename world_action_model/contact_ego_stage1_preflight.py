@@ -43,10 +43,17 @@ from world_action_model.ego_dataset_fingerprint import (
     derive_ego_t5_source_receipt,
 )
 from world_action_model.ego_hand_active_sidecar import (
+    EGO_GRIP_WAM_SOURCE_PATHS,
     EGO_HAND_ACTIVE_SEMANTICS,
     EgoHandActiveSidecarError,
     canonical_sha256 as canonical_hand_active_sha256,
     load_and_validate_hand_active_bundle,
+)
+from world_action_model.ego_group_metadata_recovery import (
+    EgoGroupMetadataError,
+    PUBLIC_RECEIPT_FIELDS,
+    REQUIRED_GROUP_FIELDS,
+    validate_supplement,
 )
 from world_action_model.ego_stage1_gate_bootstrap import (
     EGO_STAGE1_GATE_VERSION,
@@ -237,6 +244,74 @@ def _validate_group_metadata(
             )
         result[int(row["episode_id"])] = row
     return result
+
+
+def _validate_authoritative_group_metadata(
+    *,
+    supplement_path: str | Path,
+    recovery_audit_path: str | Path,
+    receipt_path: str | Path,
+    gate: Mapping,
+    gate_path: Path,
+    dataset_identity: Mapping,
+) -> dict:
+    """Rebuild and bind the production group receipt from authoritative bytes."""
+
+    try:
+        generated = validate_supplement(
+            supplement_path,
+            recovery_audit_path,
+            allow_incomplete=False,
+        )
+    except EgoGroupMetadataError as exc:
+        raise ContactEgoStage1PreflightError(
+            "authoritative group metadata supplement is incomplete or inadmissible"
+        ) from exc
+    if (
+        generated.get("production_complete") is not True
+        or generated.get("missing_cell_count") != 0
+        or generated.get("missing_cells") != []
+    ):
+        raise ContactEgoStage1PreflightError(
+            "authoritative group metadata receipt is not production-complete"
+        )
+    expected_public = {key: generated[key] for key in PUBLIC_RECEIPT_FIELDS}
+    receipt, receipt_digest = _load_json_with_digest(
+        receipt_path,
+        "authoritative group metadata receipt",
+    )
+    if set(receipt) != set(PUBLIC_RECEIPT_FIELDS) or receipt != expected_public:
+        raise ContactEgoStage1PreflightError(
+            "group metadata receipt differs from the revalidated supplement/audit"
+        )
+    entries = gate.get("evidence_reports")
+    report_entry = (
+        entries.get("group_metadata_receipt")
+        if isinstance(entries, Mapping)
+        else None
+    )
+    _, report_receipt, report_digest = _resolve_report(
+        gate_path,
+        report_entry,
+        "group_metadata_receipt",
+    )
+    if report_digest != receipt_digest or report_receipt != receipt:
+        raise ContactEgoStage1PreflightError(
+            "gate group receipt differs from the runtime receipt"
+        )
+    expected_lengths = {
+        int(row["episode_id"]): int(row["length_frames"])
+        for row in generated["inventory_rows"]
+    }
+    if expected_lengths != dict(dataset_identity["episode_lengths"]):
+        raise ContactEgoStage1PreflightError(
+            "group supplement episode IDs/lengths differ from runtime dataset identity"
+        )
+    return {
+        **generated,
+        "receipt_sha256": receipt_digest,
+        "public_receipt": receipt,
+    }
 
 
 def _validate_split_manifest(
@@ -455,7 +530,59 @@ def validate_ego_reviewed_sidecar_bundle(
         "episode_npz_sha256": episode_hashes, "meta_sha256": meta_digest,
         "bundle_sha256": bundle_digest, "split_sha256": split_digest, "meta": meta,
         "source_sha256": source_digests,
+        "inventory_rows": inventory_csv_rows,
+        "split_rows": split_rows,
     }
+
+
+def _validate_group_metadata_runtime_alignment(
+    group_metadata: Mapping,
+    sidecar: Mapping,
+) -> None:
+    """Compare supplement truth with every runtime inventory/split episode row."""
+
+    expected_rows = {
+        int(row["episode_id"]): row
+        for row in group_metadata["inventory_rows"]
+    }
+    actual_inventory = {}
+    for row in sidecar["inventory_rows"]:
+        episode = int(row["episode_id"])
+        actual_inventory[episode] = {
+            "episode_id": episode,
+            "length_frames": int(row["length_frames"]),
+            **{field: row[field] for field in REQUIRED_GROUP_FIELDS},
+            "metadata_status": row["metadata_status"],
+        }
+    if actual_inventory != expected_rows:
+        raise ContactEgoStage1PreflightError(
+            "runtime inventory group fields differ from the authoritative supplement"
+        )
+    actual_split = {
+        int(row["episode_id"]): {
+            "length_frames": int(row["length_frames"]),
+            "metadata_status": row["metadata_status"],
+        }
+        for row in sidecar["split_rows"]
+    }
+    expected_split = {
+        episode: {
+            "length_frames": int(row["length_frames"]),
+            "metadata_status": row["metadata_status"],
+        }
+        for episode, row in expected_rows.items()
+    }
+    if actual_split != expected_split:
+        raise ContactEgoStage1PreflightError(
+            "runtime split episode fields differ from the authoritative supplement"
+        )
+    if sidecar["episode_lengths"] != {
+        episode: int(row["length_frames"])
+        for episode, row in expected_rows.items()
+    }:
+        raise ContactEgoStage1PreflightError(
+            "runtime sidecar episode fields differ from the authoritative supplement"
+        )
 
 
 def _validate_norm(
@@ -509,6 +636,15 @@ def _validate_norm(
             hand_active["statistics"]
         ),
         "hand_active_statistics": hand_active["statistics"],
+        "wam_code_receipt_sha256": hand_active[
+            "wam_code_receipt_sha256"
+        ],
+        "lerobot_runtime_source_sha256": hand_active[
+            "lerobot_runtime_source_receipt"
+        ]["sha256"],
+        "lerobot_runtime_version": hand_active[
+            "lerobot_runtime_source_receipt"
+        ]["version"],
         "grip_normalization_contract": (
             "dimensions_18_19_use_only_corresponding_active_tracker_frames;"
             "inactive_proxy_values_excluded"
@@ -1140,24 +1276,34 @@ def _validate_gate(
     if source_evidence_valid:
         upstream = source_receipt.get("upstream")
         wam = source_receipt.get("wam")
+        runtime_dependencies = source_receipt.get("runtime_dependencies")
+        lerobot_dependency = (
+            runtime_dependencies.get("lerobot_dataset")
+            if isinstance(runtime_dependencies, Mapping)
+            else None
+        )
         claims = source_receipt.get("verified_claims")
         wam_files = wam.get("files") if isinstance(wam, Mapping) else None
-        expected_wam_paths = {
-            "world_action_model/ego_action_schema.py",
-            "world_action_model/ego_hand_active_sidecar.py",
-            "world_action_model/datasets/wam_lerobot_dataset.py",
-            "world_action_model/transforms/wa_transforms_lerobot_pretrain.py",
-            "world_action_model/trainer/wa_casual_trainer_mot.py",
-            "world_action_model/contact_ego_stage1_preflight.py",
-            "world_action_model/ego_stage1_gate_bootstrap.py",
-            "scripts/build_ego_hand_active_sidecars.py",
-            "scripts/compute_ego_wam_norm.py",
-            "scripts/audit_ego_action_grip_evidence.py",
-            "configs/giga_world_policy_0_5_ego_discrete_contact_pretrain.py",
-        }
+        expected_wam_paths = set(EGO_GRIP_WAM_SOURCE_PATHS)
         valid_source_receipt = (
             source_receipt.get("receipt_version")
             == "ego-action-grip-source-receipt/v1"
+            and source_receipt.get("wam_code_receipt_sha256")
+            == expected["ego_action_grip_wam_code_receipt_sha256"]
+            and isinstance(lerobot_dependency, Mapping)
+            and set(lerobot_dependency)
+            == {"module", "version", "sha256", "size_bytes", "path_record_only"}
+            and lerobot_dependency.get("module")
+            == "lerobot.datasets.lerobot_dataset"
+            and lerobot_dependency.get("sha256")
+            == expected["ego_action_grip_lerobot_runtime_source_sha256"]
+            and lerobot_dependency.get("version")
+            == grip.get("lerobot_runtime_version")
+            and isinstance(lerobot_dependency.get("size_bytes"), int)
+            and not isinstance(lerobot_dependency.get("size_bytes"), bool)
+            and lerobot_dependency.get("size_bytes", 0) > 0
+            and isinstance(lerobot_dependency.get("path_record_only"), str)
+            and os.path.isabs(lerobot_dependency["path_record_only"])
             and isinstance(upstream, Mapping)
             and isinstance(upstream.get("git_commit"), str)
             and bool(_GIT_COMMIT_RE.fullmatch(upstream["git_commit"]))
@@ -1193,21 +1339,51 @@ def _validate_gate(
                 logical_path = row.get("logical_path")
                 expected_digest = row.get("runtime_sha256")
                 expected_head = row.get("head_blob_sha256")
+                expected_runtime_size = row.get("runtime_size_bytes")
+                expected_head_size = row.get("head_blob_size_bytes")
                 if (
-                    not isinstance(expected_digest, str)
+                    set(row)
+                    != {
+                        "logical_path",
+                        "git_blob_sha1",
+                        "head_blob_sha256",
+                        "head_blob_size_bytes",
+                        "runtime_sha256",
+                        "runtime_size_bytes",
+                    }
+                    or not isinstance(row.get("git_blob_sha1"), str)
+                    or not _GIT_COMMIT_RE.fullmatch(row["git_blob_sha1"])
+                    or not isinstance(expected_digest, str)
                     or not _SHA256_RE.fullmatch(expected_digest)
                     or expected_digest != expected_head
+                    or isinstance(expected_runtime_size, bool)
+                    or not isinstance(expected_runtime_size, int)
+                    or expected_runtime_size <= 0
+                    or expected_runtime_size != expected_head_size
                 ):
                     valid_source_receipt = False
                     break
                 try:
-                    actual_digest = sha256_file(repository_root / logical_path)
+                    source_path = repository_root / logical_path
+                    actual_digest = sha256_file(source_path)
+                    actual_size = source_path.stat().st_size
+                    actual_head = _head_blob_sha256(source_path)
                 except (OSError, ValueError):
                     valid_source_receipt = False
                     break
-                if actual_digest != expected_digest:
+                if (
+                    actual_digest != expected_digest
+                    or actual_head != expected_head
+                    or actual_size != expected_runtime_size
+                ):
                     valid_source_receipt = False
                     break
+            if (
+                valid_source_receipt
+                and canonical_hand_active_sha256(wam_files)
+                != expected["ego_action_grip_wam_code_receipt_sha256"]
+            ):
+                valid_source_receipt = False
     statistics = grip.get("hand_active_statistics")
     dataset_scope = grip.get("dataset_scope")
     clock_audit = grip.get("delta_and_clock_audit")
@@ -1307,6 +1483,12 @@ def _validate_gate(
         != expected["hand_active_sidecar_bundle_sha256"]
         or grip.get("hand_active_raw_hdf5_bundle_sha256")
         != expected["hand_active_raw_hdf5_bundle_sha256"]
+        or grip.get("wam_code_receipt_sha256")
+        != expected["ego_action_grip_wam_code_receipt_sha256"]
+        or grip.get("lerobot_runtime_source_sha256")
+        != expected["ego_action_grip_lerobot_runtime_source_sha256"]
+        or not isinstance(grip.get("lerobot_runtime_version"), str)
+        or not grip["lerobot_runtime_version"]
         or not valid_statistics
         or canonical_hand_active_sha256(statistics)
         != expected["hand_active_statistics_sha256"]
@@ -1542,6 +1724,9 @@ def validate_ego_stage1_training_preflight(
     sidecar_dir: str | Path,
     coverage_csv: str | Path, segments_csv: str | Path, inventory_csv: str | Path,
     build_config_path: str | Path, split_manifest: str | Path, training_gate_path: str | Path,
+    group_metadata_supplement: str | Path,
+    group_metadata_recovery_audit: str | Path,
+    group_metadata_receipt: str | Path,
 ) -> dict:
     gate_path = Path(os.path.abspath(os.path.expanduser(str(training_gate_path))))
     gate = _load_json(gate_path, "Ego Stage1 training gate")
@@ -1554,6 +1739,14 @@ def validate_ego_stage1_training_preflight(
         _validate_loaded_gate_runtime_topology(gate)
 
     identity = derive_ego_dataset_identity(data_root)
+    group_metadata = _validate_authoritative_group_metadata(
+        supplement_path=group_metadata_supplement,
+        recovery_audit_path=group_metadata_recovery_audit,
+        receipt_path=group_metadata_receipt,
+        gate=gate,
+        gate_path=gate_path,
+        dataset_identity=identity,
+    )
     t5_source = derive_ego_t5_source_receipt(
         t5_embedding_dir,
         episode_indices=list(identity["episode_lengths"]),
@@ -1601,6 +1794,7 @@ def validate_ego_stage1_training_preflight(
         raise ContactEgoStage1PreflightError("sidecar episode IDs/lengths differ from Ego dataset")
     if sidecar["meta"].get("frame_clock") != identity["frame_clock"] or float(sidecar["meta"].get("target_fps", -1)) != identity["fps"]:
         raise ContactEgoStage1PreflightError("sidecar fps/frame clock differs from Ego dataset contract")
+    _validate_group_metadata_runtime_alignment(group_metadata, sidecar)
     expected = {
         "independent_segment_count": sidecar["independent_segment_count"],
         "dataset_fingerprint_sha256": identity["dataset_fingerprint_sha256"],
@@ -1623,6 +1817,19 @@ def validate_ego_stage1_training_preflight(
         "hand_active_statistics_sha256": canonical_hand_active_sha256(
             hand_active["statistics"]
         ),
+        "ego_action_grip_wam_code_receipt_sha256": hand_active[
+            "wam_code_receipt_sha256"
+        ],
+        "ego_action_grip_lerobot_runtime_source_sha256": hand_active[
+            "lerobot_runtime_source_receipt"
+        ]["sha256"],
+        "group_metadata_supplement_sha256": group_metadata[
+            "supplement_sha256"
+        ],
+        "group_metadata_recovery_audit_sha256": group_metadata[
+            "recovery_audit_sha256"
+        ],
+        "group_metadata_receipt_sha256": group_metadata["receipt_sha256"],
         "sidecar_meta_sha256": sidecar["meta_sha256"],
         "sidecar_bundle_sha256": sidecar["bundle_sha256"],
         "split_manifest_sha256": sidecar["split_sha256"],
@@ -1678,6 +1885,8 @@ def validate_ego_stage1_training_preflight(
             "meta_runtime_stat_record_only"
         ],
         "hand_active_statistics": hand_active["statistics"],
+        "group_metadata_dataset_id": group_metadata["dataset_id"],
+        "group_metadata_public_receipt": group_metadata["public_receipt"],
         "dataset_id": identity["dataset_id"], "episode_npz_sha256": sidecar["episode_npz_sha256"],
         "evidence_report_sha256": {
             key: value for key, value in evidence.items() if key != "matched_control_expectations"
@@ -1705,4 +1914,11 @@ def preflight_from_environment() -> dict:
         segments_csv=os.environ["GWP_CONTACT_SEGMENTS_CSV"], inventory_csv=os.environ["GWP_CONTACT_INVENTORY_CSV"],
         build_config_path=os.environ["GWP_CONTACT_BUILD_CONFIG"], split_manifest=os.environ["GWP_CONTACT_SPLIT_MANIFEST"],
         training_gate_path=os.environ["GWP_EGO_STAGE1_TRAINING_GATE"],
+        group_metadata_supplement=os.environ[
+            "GWP_EGO_GROUP_METADATA_SUPPLEMENT"
+        ],
+        group_metadata_recovery_audit=os.environ[
+            "GWP_EGO_GROUP_METADATA_RECOVERY_AUDIT"
+        ],
+        group_metadata_receipt=os.environ["GWP_EGO_GROUP_METADATA_RECEIPT"],
     )

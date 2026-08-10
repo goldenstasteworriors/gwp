@@ -1,5 +1,5 @@
 {
-  "gate_version": "ego-discrete-contact-stage1-training-gate/v5",
+  "gate_version": "ego-discrete-contact-stage1-training-gate/v6",
   "evidence_valid_until_utc": null,
   "training_run_nonce": null,
   "human_adjudicated_sidecar_passed": false,
@@ -26,6 +26,11 @@
     "hand_active_sidecar_bundle_sha256": null,
     "hand_active_raw_hdf5_bundle_sha256": null,
     "hand_active_statistics_sha256": null,
+    "ego_action_grip_wam_code_receipt_sha256": null,
+    "ego_action_grip_lerobot_runtime_source_sha256": null,
+    "group_metadata_supplement_sha256": null,
+    "group_metadata_recovery_audit_sha256": null,
+    "group_metadata_receipt_sha256": null,
     "sidecar_meta_sha256": null,
     "sidecar_bundle_sha256": null,
     "split_manifest_sha256": null,
@@ -37,6 +42,7 @@
   "evidence_reports": {
     "annotation_agreement": {"path": null, "sha256": null},
     "ego_action_grip": {"path": null, "sha256": null},
+    "group_metadata_receipt": {"path": null, "sha256": null},
     "t5_independent_replay": {"path": null, "sha256": null},
     "matched_control_hash_collector": {"path": null, "sha256": null}
   },

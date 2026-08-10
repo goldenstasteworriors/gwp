@@ -290,6 +290,15 @@ def main() -> None:
             "hand_active_statistics_sha256": canonical_sha256(
                 hand_active["statistics"]
             ),
+            "wam_code_receipt_sha256": hand_active[
+                "wam_code_receipt_sha256"
+            ],
+            "lerobot_runtime_source_sha256": hand_active[
+                "lerobot_runtime_source_receipt"
+            ]["sha256"],
+            "lerobot_runtime_version": hand_active[
+                "lerobot_runtime_source_receipt"
+            ]["version"],
             "normalization_valid_sample_count": {
                 "observation.state": state_valid_counts,
                 "action": action_valid_counts,

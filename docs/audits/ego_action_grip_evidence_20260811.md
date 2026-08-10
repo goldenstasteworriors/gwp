@@ -79,6 +79,10 @@ adjacent frames.
 - The dataset sidecar supplies current `[T,2]`, future `[T,48,2]`, and
   record-only adjacent-pair masks. Edge padding is false; it is never
   last-value held.
+- Production derives the action-time mask from equal bool
+  `action_delta_eef_is_pad`/`hand_status_is_pad` source vectors, slices source
+  slot `f`, and requires the remaining `f+1..f+48` horizon to be exactly H=48.
+  This zeros wrist and grip loss together at clamped tail positions.
 - Per-frame action MSE uses grip weights
   `left_active[target]*0.25` and `right_active[target]*0.25`. Wrist dimensions
   0..17 are unchanged, time padding zeros every dimension, and model-padding
@@ -98,6 +102,12 @@ adjacent frames.
   preflight replay also passed.
 
 ## Bound artifacts
+
+The sidecar meta, norm v3 and report carry the same WAM code-manifest digest.
+The manifest includes dataset fingerprinting, verified I/O, the tracked Giga
+LeRobot loader and every grip generation/runtime path. The source receipt also
+binds the installed LeRobot dataset implementation bytes/version as a separate
+runtime dependency; its absolute import path is record-only.
 
 ```text
 dataset_id: ego-processed-sha256:b5308e8a6882e128f324e097c41e817ad1a5230609aa0e20edce8caba2aebd5d

@@ -31,13 +31,13 @@ from world_action_model.ego_dataset_fingerprint import derive_ego_dataset_identi
 from world_action_model.ego_hand_active_sidecar import (  # noqa: E402
     EGO_HAND_ACTIVE_FIELD_ORDER,
     EGO_HAND_ACTIVE_SEMANTICS,
+    current_wam_code_receipt,
     load_and_validate_hand_active_bundle,
     sha256_file,
 )
 from world_action_model.verified_io import (  # noqa: E402
     read_verified_bytes,
     strict_json_loads,
-    verified_head_code_manifest,
 )
 
 
@@ -71,21 +71,6 @@ UPSTREAM_SOURCES = {
         "hand_status: 0.0 = open, 1.0 = close",
     ),
 }
-
-WAM_SOURCES = (
-    "world_action_model/ego_action_schema.py",
-    "world_action_model/ego_hand_active_sidecar.py",
-    "world_action_model/datasets/wam_lerobot_dataset.py",
-    "world_action_model/transforms/wa_transforms_lerobot_pretrain.py",
-    "world_action_model/trainer/wa_casual_trainer_mot.py",
-    "world_action_model/contact_ego_stage1_preflight.py",
-    "world_action_model/ego_stage1_gate_bootstrap.py",
-    "scripts/build_ego_hand_active_sidecars.py",
-    "scripts/compute_ego_wam_norm.py",
-    "scripts/audit_ego_action_grip_evidence.py",
-    "configs/giga_world_policy_0_5_ego_discrete_contact_pretrain.py",
-)
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -297,9 +282,17 @@ def main() -> None:
 
     upstream_root = args.upstream_repo.expanduser().resolve()
     upstream_commit, upstream_files = _source_manifest(upstream_root, UPSTREAM_SOURCES)
-    wam_commit, wam_files = verified_head_code_manifest(REPO_ROOT, WAM_SOURCES)
+    wam_code_receipt = current_wam_code_receipt(REPO_ROOT)
+    wam_commit = wam_code_receipt["git_commit_record_only"]
+    wam_files = wam_code_receipt["files"]
     source_receipt = {
         "receipt_version": SOURCE_RECEIPT_VERSION,
+        "wam_code_receipt_sha256": wam_code_receipt["files_sha256"],
+        "runtime_dependencies": {
+            "lerobot_dataset": hand_active[
+                "lerobot_runtime_source_receipt"
+            ]
+        },
         "upstream": {
             "repository_path_record_only": str(upstream_root),
             "git_commit": upstream_commit,
@@ -352,6 +345,13 @@ def main() -> None:
         "hand_active_raw_hdf5_bundle_sha256": hand_active[
             "raw_hdf5_bundle_sha256"
         ],
+        "wam_code_receipt_sha256": wam_code_receipt["files_sha256"],
+        "lerobot_runtime_source_sha256": hand_active[
+            "lerobot_runtime_source_receipt"
+        ]["sha256"],
+        "lerobot_runtime_version": hand_active[
+            "lerobot_runtime_source_receipt"
+        ]["version"],
         "source_action_dim": 20,
         "model_action_dim": 32,
         "source_hand_status_semantics": EGO_HAND_STATUS_SEMANTICS,

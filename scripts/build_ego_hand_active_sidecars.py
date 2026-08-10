@@ -25,6 +25,8 @@ from world_action_model.ego_hand_active_sidecar import (  # noqa: E402
     _aggregate_statistics,
     build_hand_active_arrays,
     canonical_sha256,
+    current_wam_code_receipt,
+    current_lerobot_runtime_source_receipt,
     deterministic_npz_bytes,
     load_and_validate_hand_active_bundle,
     read_aligned_hand_active,
@@ -65,6 +67,8 @@ def _write_exact(path: Path, payload: bytes, *, overwrite: bool) -> None:
 def main() -> None:
     args = parse_args()
     identity = derive_ego_dataset_identity(args.dataset_root)
+    code_receipt = current_wam_code_receipt(REPO_ROOT)
+    lerobot_receipt = current_lerobot_runtime_source_receipt()
     raw_root = args.raw_hdf5_dir.expanduser().resolve()
     final_root = args.final_hdf5_dir.expanduser().resolve()
     output_root = args.output_dir.expanduser().resolve()
@@ -119,6 +123,9 @@ def main() -> None:
         "dataset_id": identity["dataset_id"],
         "dataset_fingerprint_sha256": identity["dataset_fingerprint_sha256"],
         "source_receipt_sha256": identity["source_receipt_sha256"],
+        "wam_code_receipt_sha256": code_receipt["files_sha256"],
+        "lerobot_runtime_source_sha256": lerobot_receipt["sha256"],
+        "lerobot_runtime_version": lerobot_receipt["version"],
         "frame_clock": identity["frame_clock"],
         "target_fps": identity["fps"],
         "horizon_frames": EGO_HAND_ACTIVE_HORIZON,

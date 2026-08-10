@@ -290,7 +290,7 @@ python -B scripts/verify_ego_t5_replay.py \
 ```
 
 The verifier has no gate argument and cannot modify the source or gate. A
-reviewer must separately place the attestation raw SHA-256 in both the v5
+reviewer must separately place the attestation raw SHA-256 in both the v6
 gate's `artifact_fingerprints.t5_independent_replay_attestation_sha256` and
 `evidence_reports.t5_independent_replay.sha256`, plus its path. The checked-in
 template keeps these values null and every authorization flag false. A v3 gate,
@@ -324,7 +324,11 @@ identity.
 For the production path, action dimensions 18/19 receive weight
 `0.25 * active_at_target` independently for the left/right columns. Dimensions
 0..17 remain unchanged, 20..31 remain padding, and the action-time mask also
-zeros clamped horizon padding. Without the optional validity keys the legacy
+zeros clamped horizon padding. The strict production transform requires the
+loader's bool `action_delta_eef_is_pad` and `hand_status_is_pad` vectors to be
+identical, removes source slot `f` with `chunk_start_offset=1`, and requires the
+result to be exactly H=48; missing, mismatched, non-bool or wrong-length masks
+fail closed. Without the optional validity keys the legacy
 transform behavior is unchanged (0.25 on both grip dimensions); the gated Ego
 entry always configures the strict sidecars. `hand_active` is tracker validity,
 not physical-contact truth.
@@ -351,6 +355,13 @@ held proxy values and clamped targets are excluded. The preflight independently
 replays these masked grip statistics and recomputes LeRobot, T5, HDF5, and
 sidecar hashes, so same-length content replacement is rejected. Absolute
 T5/HDF5 paths are audit records only and do not affect their portable receipts.
+The sidecar meta, norm v3 metadata and reviewed grip report additionally carry
+one shared canonical current-HEAD WAM code-manifest SHA. That manifest covers
+the dataset fingerprint/verified-I/O implementations, WAM dataset/transform/
+trainer/preflight code, the tracked Giga LeRobot wrapper and the generation
+scripts. A separate dependency receipt binds the installed LeRobot
+`_get_query_indices` implementation bytes and version; its absolute path is
+record-only.
 
 ## Sidecar and evidence gates
 
@@ -371,14 +382,23 @@ at `docs/audits/ego_66ep_group_metadata_recovery_20260811.md`. Its recorded
 timestamps expose four diagnostic continuity blocks, but those blocks are not
 session or batch ground truth and cannot unlock this gate. Use the paired JSON
 audit and null supplement template to collect authoritative group identities;
-the supplement validator rejects inferred or placeholder values.
+the supplement validator rejects inferred or placeholder values. Production
+additionally requires `GWP_EGO_GROUP_METADATA_SUPPLEMENT`,
+`GWP_EGO_GROUP_METADATA_RECOVERY_AUDIT`, and
+`GWP_EGO_GROUP_METADATA_RECEIPT`. The v6 gate independently pins all three raw
+SHA-256 values and the receipt report. Full preflight rebuilds the receipt with
+`allow_incomplete=False`, then compares episode ID, length, all seven group
+fields and status against the runtime inventory, split and re-encoded sidecar.
+The checked-in blank has 66×7=462 missing cells and can never authorize a run;
+timestamp continuity blocks remain diagnostic-only.
 
 The checked-in templates are deliberately all false/null. Authorization also
 requires artifact-bound A/B agreement, Ego action/grip evidence, matched-control
 collector evidence, and separate `allow_server_training` and
 `allow_5b_training` decisions. No true gate example is provided.
 
-Gate v5 additionally requires a reviewer-authored
+Gate v6 extends the v5 grip and v4 independent-T5 bindings and additionally
+requires a reviewer-authored
 `evidence_valid_until_utc` and a 16-128 character `training_run_nonce` that
 must exactly equal `GWP_EGO_TRAINING_RUN_NONCE`. Expiry is a launch-admission
 deadline: it does not terminate an already admitted run. This is bounded

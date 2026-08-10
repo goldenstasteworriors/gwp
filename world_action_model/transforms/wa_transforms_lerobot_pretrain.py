@@ -16,6 +16,7 @@ from world_action_model.ego_action_schema import (
     dual_eef_pose_to_state,
     ego_grip_loss_weight_multiplier,
 )
+from world_action_model.ego_hand_active_sidecar import build_future_action_time_mask
 from world_action_model.asymmetric_action_schema import ASYMMETRIC_SCHEMA_ID
 from world_action_model.matched_control_hashes import (
     SAMPLE_AUGMENTATION_KEY,
@@ -500,6 +501,12 @@ class WALeRobotTransformsPretrain(WATransforms):
                                 "hand_active_transition_pair": data_dict[
                                     self.ego_hand_active_transition_pair_key
                                 ],
+                                "delta_is_pad": data_dict[
+                                    f"{self.ego_dual_eef_cfg.get('delta_key', 'action_delta_eef')}_is_pad"
+                                ],
+                                "hand_status_is_pad": data_dict[
+                                    f"{self.ego_dual_eef_cfg.get('hand_status_key', 'hand_status')}_is_pad"
+                                ],
                             }
                             if self.ego_hand_active_future_key is not None
                             else {}
@@ -625,6 +632,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         action_is_precomputed_delta = False
         ego_grip_active_mask = None
         ego_grip_transition_pair_mask = None
+        ego_source_time_mask = None
         if self.ego_dual_eef_cfg is not None:
             cfg = self.ego_dual_eef_cfg
             pose_key = str(cfg.get("pose_key", "action_eef"))
@@ -643,6 +651,23 @@ class WALeRobotTransformsPretrain(WATransforms):
             if chunk_start_offset < 0:
                 raise ValueError("ego_dual_eef_cfg.chunk_start_offset must be non-negative")
             state_hand_status = hand_status[0] if hand_status.ndim == 2 else hand_status
+            if self.ego_hand_active_future_key is not None:
+                delta_pad_key = f"{delta_key}_is_pad"
+                hand_pad_key = f"{hand_status_key}_is_pad"
+                if delta_pad_key not in data_dict or hand_pad_key not in data_dict:
+                    raise KeyError(
+                        "production Ego action chunks require both source pad masks: "
+                        f"{delta_pad_key}, {hand_pad_key}"
+                    )
+                ego_source_time_mask = torch.from_numpy(
+                    build_future_action_time_mask(
+                        data_dict[delta_pad_key],
+                        data_dict[hand_pad_key],
+                        source_frames=int(delta.shape[0]),
+                        chunk_start_offset=chunk_start_offset,
+                        expected_future_frames=int(self.num_frames),
+                    )
+                )
             if chunk_start_offset:
                 if delta.ndim != 2 or hand_status.ndim != 2:
                     raise ValueError(
@@ -654,6 +679,10 @@ class WALeRobotTransformsPretrain(WATransforms):
             action = torch.from_numpy(dual_eef_delta_to_action(delta, hand_status))
             action_is_precomputed_delta = True
             if self.ego_hand_active_future_key is not None:
+                if ego_source_time_mask.numel() != int(action.shape[0]):
+                    raise ValueError(
+                        "Ego f+1 pad mask does not align to the future action chunk"
+                    )
                 if self.ego_hand_active_future_key not in data_dict:
                     raise KeyError(
                         f"missing required Ego hand-active mask: {self.ego_hand_active_future_key}"
@@ -702,7 +731,18 @@ class WALeRobotTransformsPretrain(WATransforms):
             state = state[:1]
 
         source_time_mask = data_dict.get("action_time_mask", data_dict.get("action_loss_mask"))
-        if source_time_mask is None:
+        if ego_source_time_mask is not None:
+            if source_time_mask is not None:
+                explicit_time_mask = torch.as_tensor(
+                    source_time_mask,
+                    dtype=torch.bool,
+                ).flatten()
+                if not torch.equal(explicit_time_mask.cpu(), ego_source_time_mask.cpu()):
+                    raise ValueError(
+                        "explicit Ego action_time_mask differs from source pad masks"
+                    )
+            source_time_mask = ego_source_time_mask
+        elif source_time_mask is None:
             is_pad = data_dict.get(f"{self.action_key}_is_pad", data_dict.get("action_is_pad"))
             if is_pad is not None:
                 source_time_mask = ~torch.as_tensor(is_pad, dtype=torch.bool)

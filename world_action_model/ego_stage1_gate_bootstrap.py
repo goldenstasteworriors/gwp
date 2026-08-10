@@ -15,7 +15,7 @@ import re
 from world_action_model.verified_io import read_verified_bytes, strict_json_loads
 
 
-EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v5"
+EGO_STAGE1_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v6"
 EGO_STAGE1_REQUIRED_ENV_PATHS = (
     "GWP_EGO_DATA_PATH",
     "GWP_EGO_NORM_STATS_PATH",
@@ -28,6 +28,9 @@ EGO_STAGE1_REQUIRED_ENV_PATHS = (
     "GWP_CONTACT_INVENTORY_CSV",
     "GWP_CONTACT_BUILD_CONFIG",
     "GWP_CONTACT_SPLIT_MANIFEST",
+    "GWP_EGO_GROUP_METADATA_SUPPLEMENT",
+    "GWP_EGO_GROUP_METADATA_RECOVERY_AUDIT",
+    "GWP_EGO_GROUP_METADATA_RECEIPT",
     "GWP_EGO_STAGE1_TRAINING_GATE",
     "GWP_EGO_TRAINING_RUN_NONCE",
 )
@@ -46,6 +49,13 @@ _UTC_DEADLINE_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GROUP_METADATA_GATE_PATHS = {
+    "group_metadata_supplement_sha256": "GWP_EGO_GROUP_METADATA_SUPPLEMENT",
+    "group_metadata_recovery_audit_sha256": (
+        "GWP_EGO_GROUP_METADATA_RECOVERY_AUDIT"
+    ),
+    "group_metadata_receipt_sha256": "GWP_EGO_GROUP_METADATA_RECEIPT",
+}
 
 
 class EgoStage1BootstrapError(ValueError):
@@ -88,6 +98,46 @@ def _load_gate(path: str) -> dict:
     if not isinstance(payload, dict):
         raise EgoStage1BootstrapError("Ego Stage1 training gate must be a JSON object")
     return payload
+
+
+def _validate_group_metadata_gate_binding_from_environment(gate: dict) -> None:
+    """Bind the three authoritative group artifacts before heavy imports."""
+
+    fingerprints = gate.get("artifact_fingerprints")
+    reports = gate.get("evidence_reports")
+    if not isinstance(fingerprints, dict):
+        raise EgoStage1BootstrapError("training gate lacks artifact fingerprints")
+    receipt_report = (
+        reports.get("group_metadata_receipt")
+        if isinstance(reports, dict)
+        else None
+    )
+    receipt_sha = fingerprints.get("group_metadata_receipt_sha256")
+    if (
+        not isinstance(receipt_report, dict)
+        or set(receipt_report) != {"path", "sha256"}
+        or not isinstance(receipt_report.get("path"), str)
+        or not receipt_report["path"]
+        or receipt_report.get("sha256") != receipt_sha
+    ):
+        raise EgoStage1BootstrapError(
+            "training gate lacks reviewer-bound group metadata receipt"
+        )
+    for fingerprint_name, environment_name in _GROUP_METADATA_GATE_PATHS.items():
+        expected = fingerprints.get(fingerprint_name)
+        if not isinstance(expected, str) or not _SHA256_RE.fullmatch(expected):
+            raise EgoStage1BootstrapError(
+                f"training gate lacks {fingerprint_name}"
+            )
+        try:
+            read_verified_bytes(
+                os.environ[environment_name].strip(),
+                expected_sha256=expected,
+            )
+        except (KeyError, OSError, ValueError) as exc:
+            raise EgoStage1BootstrapError(
+                f"runtime {environment_name} differs from the reviewer-bound SHA"
+            ) from exc
 
 
 def validate_ego_stage1_gate_freshness_and_training_nonce(
@@ -158,6 +208,7 @@ def minimal_ego_stage1_admission_precheck_from_environment() -> bool:
         training_run_nonce=os.environ["GWP_EGO_TRAINING_RUN_NONCE"].strip(),
     )
     _validate_independent_replay_gate_binding(gate)
+    _validate_group_metadata_gate_binding_from_environment(gate)
     t5_text = os.environ.get("GWP_T5_EMBEDDING_DIR", "").strip()
     if not t5_text:
         t5_text = str(Path(os.environ["GWP_EGO_DATA_PATH"]) / "t5_embedding")

@@ -9,6 +9,8 @@ separate from both the proxy value and the physical-contact labels.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
+import importlib.util
 import io
 import json
 import os
@@ -27,6 +29,7 @@ from world_action_model.verified_io import (
     hash_verified_regular_file,
     read_verified_bytes,
     strict_json_loads,
+    verified_head_code_manifest,
 )
 
 
@@ -40,6 +43,23 @@ EGO_HAND_ACTIVE_KEYS = (
     "ego_hand_active_current",
     "ego_hand_active_future",
     "ego_hand_active_transition_pair",
+)
+EGO_GRIP_WAM_SOURCE_PATHS = (
+    "world_action_model/ego_action_schema.py",
+    "world_action_model/ego_dataset_fingerprint.py",
+    "world_action_model/ego_hand_active_sidecar.py",
+    "world_action_model/verified_io.py",
+    "world_action_model/datasets/wam_lerobot_dataset.py",
+    "world_action_model/transforms/wa_transforms_lerobot_pretrain.py",
+    "world_action_model/trainer/wa_casual_trainer_mot.py",
+    "world_action_model/contact_ego_stage1_preflight.py",
+    "world_action_model/ego_stage1_gate_bootstrap.py",
+    "world_action_model/ego_group_metadata_recovery.py",
+    "third_party/giga-datasets/giga_datasets/datasets/lerobot_dataset.py",
+    "scripts/build_ego_hand_active_sidecars.py",
+    "scripts/compute_ego_wam_norm.py",
+    "scripts/audit_ego_action_grip_evidence.py",
+    "configs/giga_world_policy_0_5_ego_discrete_contact_pretrain.py",
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -57,6 +77,49 @@ def canonical_sha256(value: object) -> str:
             ensure_ascii=False,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def current_wam_code_receipt(
+    repository_root: str | Path | None = None,
+) -> dict:
+    """Return a path-independent receipt for exact current-HEAD WAM code bytes."""
+
+    root = (
+        Path(__file__).absolute().parents[1]
+        if repository_root is None
+        else Path(repository_root)
+    )
+    commit, files = verified_head_code_manifest(root, EGO_GRIP_WAM_SOURCE_PATHS)
+    return {
+        "git_commit_record_only": commit,
+        "files": files,
+        "files_sha256": canonical_sha256(files),
+    }
+
+
+def current_lerobot_runtime_source_receipt() -> dict:
+    """Hash the external LeRobot implementation used by the tracked wrapper."""
+
+    spec = importlib.util.find_spec("lerobot.datasets.lerobot_dataset")
+    if spec is None or not isinstance(spec.origin, str):
+        raise EgoHandActiveSidecarError(
+            "cannot resolve the runtime LeRobot dataset implementation"
+        )
+    source_path = Path(os.path.abspath(spec.origin))
+    try:
+        digest, runtime_stat = hash_verified_regular_file(source_path)
+        version = importlib.metadata.version("lerobot")
+    except (OSError, ValueError, importlib.metadata.PackageNotFoundError) as exc:
+        raise EgoHandActiveSidecarError(
+            "cannot verify the runtime LeRobot dataset implementation"
+        ) from exc
+    return {
+        "module": "lerobot.datasets.lerobot_dataset",
+        "version": version,
+        "sha256": digest,
+        "size_bytes": runtime_stat["size_bytes"],
+        "path_record_only": str(source_path),
+    }
 
 
 def sha256_file(path: str | Path) -> str:
@@ -98,6 +161,45 @@ def build_hand_active_arrays(
         "ego_hand_active_future": future,
         "ego_hand_active_transition_pair": pair,
     }
+
+
+def build_future_action_time_mask(
+    delta_is_pad: np.ndarray,
+    hand_status_is_pad: np.ndarray,
+    *,
+    source_frames: int,
+    chunk_start_offset: int,
+    expected_future_frames: int,
+) -> np.ndarray:
+    """Strictly derive the H-frame f+offset mask from paired loader padding."""
+
+    delta_pad = np.asarray(delta_is_pad)
+    hand_pad = np.asarray(hand_status_is_pad)
+    if (
+        delta_pad.dtype != np.bool_
+        or hand_pad.dtype != np.bool_
+        or delta_pad.shape != (source_frames,)
+        or hand_pad.shape != (source_frames,)
+        or not np.array_equal(delta_pad, hand_pad)
+    ):
+        raise EgoHandActiveSidecarError(
+            "delta/hand-status pad masks must be equal 1-D bool source chunks"
+        )
+    if (
+        isinstance(chunk_start_offset, bool)
+        or not isinstance(chunk_start_offset, int)
+        or chunk_start_offset < 0
+        or isinstance(expected_future_frames, bool)
+        or not isinstance(expected_future_frames, int)
+        or expected_future_frames <= 0
+    ):
+        raise EgoHandActiveSidecarError("invalid future action padding contract")
+    future = np.logical_not(delta_pad[chunk_start_offset:])
+    if future.shape != (expected_future_frames,):
+        raise EgoHandActiveSidecarError(
+            "source padding does not produce the exact required future horizon"
+        )
+    return future
 
 
 def validate_hand_active_arrays(
@@ -475,6 +577,19 @@ def load_and_validate_hand_active_bundle(
     for key, value in fixed.items():
         if meta.get(key) != value:
             raise EgoHandActiveSidecarError(f"hand-active meta binding differs: {key}")
+    code_receipt = current_wam_code_receipt()
+    lerobot_receipt = current_lerobot_runtime_source_receipt()
+    if meta.get("wam_code_receipt_sha256") != code_receipt["files_sha256"]:
+        raise EgoHandActiveSidecarError(
+            "hand-active sidecar WAM source-code receipt differs from current HEAD"
+        )
+    if (
+        meta.get("lerobot_runtime_source_sha256") != lerobot_receipt["sha256"]
+        or meta.get("lerobot_runtime_version") != lerobot_receipt["version"]
+    ):
+        raise EgoHandActiveSidecarError(
+            "hand-active sidecar LeRobot runtime receipt differs"
+        )
     episode_hashes = meta.get("episode_npz_sha256")
     raw_hashes = meta.get("raw_hdf5_sha256")
     final_hashes = meta.get("final_hdf5_sha256")
@@ -542,5 +657,7 @@ def load_and_validate_hand_active_bundle(
         "raw_hdf5_bundle_sha256": meta["raw_hdf5_bundle_sha256"],
         "final_hdf5_bundle_sha256": meta["final_hdf5_bundle_sha256"],
         "statistics": statistics,
+        "wam_code_receipt_sha256": code_receipt["files_sha256"],
+        "lerobot_runtime_source_receipt": lerobot_receipt,
         "arrays": loaded_arrays,
     }

@@ -116,5 +116,10 @@ python scripts/contact_labels/validate_ego_group_metadata_supplement.py \
 ```
 
 填完且提供 provenance/attestation 后，去掉 `--allow-incomplete-template` 并显式指定
-`--inventory-output`。校验器会拒绝空值、`unknown/same/default/TBD` 等占位符、缺失
+`--inventory-output` 和 `--receipt-output`。校验器会拒绝空值、
+`unknown/same/default/TBD` 等占位符、缺失
 provenance、推断类 provenance、部分 attestation、episode 集不一致和 audit 绑定不一致。
+空模板精确包含 462 个缺失单元。Production Stage1 还会以 training-gate v6
+分别绑定 supplement、recovery-audit、receipt 三份原始字节 SHA，并将 receipt 导出的
+episode/length/七个 group 字段/status 与运行时 inventory、split 和 sidecar 逐项复核；
+仅有时间连续性诊断或手写 `group_metadata_complete=true` 均不能绕过。
