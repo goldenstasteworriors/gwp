@@ -89,6 +89,10 @@ dataset.update(
     t5_runtime_source_receipt=preflight_receipt[
         "t5_runtime_source_receipt_record_only"
     ],
+    verified_private_cache_parent=os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", ".gwp_stage1_private_hf_cache")
+    ),
+    verified_training_run_nonce=preflight_receipt["training_run_nonce"],
     contact_sidecar_dir=os.environ["GWP_CONTACT_SIDECAR_DIR"],
     contact_sidecar_pattern="episode_{episode_index:06d}.npz",
     contact_sidecar_strict=True,

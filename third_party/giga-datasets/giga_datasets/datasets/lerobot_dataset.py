@@ -1,15 +1,17 @@
 import json
 import contextvars
 import errno
-import fcntl
 import hashlib
 import logging
 import os
 import re
+import secrets
 import shutil
+import stat
 import time
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -27,6 +29,7 @@ import torchvision
 from filelock import FileLock, Timeout
 from datasets.info import DatasetInfo
 from datasets.naming import filenames_for_dataset_split
+from datasets.packaged_modules.parquet.parquet import Parquet, ParquetConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset as _LeRobotDataset
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata as _OriginalLeRobotDatasetMetadata
 from lerobot.datasets.utils import (
@@ -39,7 +42,6 @@ from PIL import Image
 from typing_extensions import override
 
 from world_action_model.verified_io import (
-    hash_verified_regular_file,
     open_verified_regular_fd,
     read_verified_bytes,
     stat_identity,
@@ -56,13 +58,40 @@ VideoKeySpec = str | Sequence[str]
 _VERIFIED_METADATA_CONTEXT = contextvars.ContextVar(
     "gwp_verified_lerobot_metadata", default=None
 )
-_VERIFIED_CACHE_ATTESTATION_VERSION = "gwp-verified-hf-parquet-cache/v1"
-_VERIFIED_CACHE_ATTESTATION_NAME = "gwp_cache_attestation.json"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_TRAINING_NONCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}$")
 _VERIFIED_STAT_KEYS = {
     "device", "inode", "mode", "size_bytes", "mtime_ns", "ctime_ns"
 }
-_VERIFIED_SOURCE_FD_BASE = 16384
+
+
+@dataclass
+class _VerifiedParquetConfig(ParquetConfig):
+    verified_identity: str | None = None
+
+    def create_config_id(self, config_kwargs: dict, custom_features=None) -> str:
+        identity = config_kwargs.get("verified_identity")
+        if not isinstance(identity, str) or not _SHA256_RE.fullmatch(identity):
+            raise ValueError("verified parquet builder identity must be SHA-256")
+        # The actual data_files remain dynamic /proc/self/fd paths so the
+        # builder reads pinned source inodes.  They intentionally do not enter
+        # this stable, content/config-derived builder key.
+        return f"verified-{identity}"
+
+
+class _VerifiedParquetBuilder(Parquet):
+    BUILDER_CONFIG_CLASS = _VerifiedParquetConfig
+
+
+def _is_file_descriptor_exhaustion(error: BaseException) -> bool:
+    seen = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and current.errno in {errno.EMFILE, errno.ENFILE}:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -339,103 +368,150 @@ def _strict_pinned_json(entry: Mapping[str, object]) -> dict:
     return payload
 
 
-def _verified_cache_file_manifest(builder_cache_dir: Path) -> list[dict[str, object]]:
-    if builder_cache_dir.is_symlink() or not builder_cache_dir.is_dir():
-        raise ValueError("verified HF builder cache must be a real directory")
-    manifest = []
-    for path in sorted(builder_cache_dir.rglob("*")):
-        if path.is_symlink():
-            raise ValueError(f"verified HF cache contains a symlink: {path}")
-        if path.is_dir():
-            continue
-        digest, runtime_stat = hash_verified_regular_file(path)
-        manifest.append(
-            {
-                "path": path.relative_to(builder_cache_dir).as_posix(),
-                "size_bytes": runtime_stat["size_bytes"],
-                "sha256": digest,
-            }
-        )
-    if not manifest:
-        raise ValueError("verified HF builder cache is empty")
-    return manifest
+def _open_secure_absolute_directory(path: Path, *, create: bool) -> tuple[int, dict]:
+    """Open an absolute directory without following a symlink component."""
 
-
-def _write_verified_cache_attestation(
-    path: Path, *, source_tag: str, builder_cache_dir: Path
-) -> None:
-    if os.path.lexists(path):
-        raise ValueError("refusing to overwrite an existing HF cache attestation")
-    payload = {
-        "attestation_version": _VERIFIED_CACHE_ATTESTATION_VERSION,
-        "source_manifest_content_sha256": source_tag,
-        "cache_files": _verified_cache_file_manifest(builder_cache_dir),
-    }
-    encoded = (
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        + "\n"
-    ).encode("utf-8")
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.new")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    absolute = path.expanduser().absolute()
+    if not absolute.is_absolute():
+        raise ValueError("private HF cache parent must be absolute")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    current_fd = os.open(os.path.sep, flags)
     try:
-        fd = os.open(temporary, flags, 0o600)
-        try:
-            written = 0
-            while written < len(encoded):
-                written += os.write(fd, encoded[written:])
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(temporary, path)
+        for part in absolute.parts[1:]:
+            try:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    # Another rank may have atomically created this shared
+                    # parent component; the no-follow open below is still the
+                    # authority and rejects non-directories/symlinks.
+                    pass
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        runtime_stat = stat_identity(os.fstat(current_fd))
+        if not stat.S_ISDIR(runtime_stat["mode"]):
+            raise ValueError("private HF cache parent is not a directory")
+        return current_fd, runtime_stat
     except Exception:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        os.close(current_fd)
         raise
 
 
-def _validate_verified_cache_attestation(
-    path: Path, *, source_tag: str, builder_cache_dir: Path
-) -> dict[str, object]:
-    payload_bytes, _, _ = read_verified_bytes(path)
-    payload = strict_json_loads(payload_bytes, name="verified HF cache attestation")
-    cache_files = payload.get("cache_files") if isinstance(payload, dict) else None
+def _secure_clear_directory_fd(directory_fd: int) -> None:
+    """Remove only entries reached through an already-pinned directory FD."""
+
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    for name in os.listdir(directory_fd):
+        entry_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(entry_stat.st_mode):
+            child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+            try:
+                _secure_clear_directory_fd(child_fd)
+            finally:
+                os.close(child_fd)
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            os.unlink(name, dir_fd=directory_fd)
+
+
+def _open_verified_regular_fd_at(
+    root_fd: int, relative_path: str
+) -> tuple[int, str, dict]:
+    """Open/hash a regular descendant without following any path component."""
+
+    relative = Path(relative_path)
     if (
-        not isinstance(payload, dict)
-        or set(payload)
-        != {
-            "attestation_version",
-            "source_manifest_content_sha256",
-            "cache_files",
-        }
-        or payload.get("attestation_version")
-        != _VERIFIED_CACHE_ATTESTATION_VERSION
-        or payload.get("source_manifest_content_sha256") != source_tag
-        or not isinstance(cache_files, list)
-        or not cache_files
-        or any(
-            not isinstance(entry, dict)
-            or set(entry) != {"path", "size_bytes", "sha256"}
-            or not isinstance(entry["path"], str)
-            or not entry["path"]
-            or Path(entry["path"]).is_absolute()
-            or ".." in Path(entry["path"]).parts
-            or Path(entry["path"]).as_posix() != entry["path"]
-            or isinstance(entry["size_bytes"], bool)
-            or not isinstance(entry["size_bytes"], int)
-            or entry["size_bytes"] < 0
-            or not isinstance(entry["sha256"], str)
-            or not _SHA256_RE.fullmatch(entry["sha256"])
-            for entry in cache_files
-        )
-        or len({entry["path"] for entry in cache_files}) != len(cache_files)
-        or cache_files != _verified_cache_file_manifest(builder_cache_dir)
+        not relative_path
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or relative.as_posix() != relative_path
     ):
-        raise ValueError("verified HF cache attestation/content differs")
-    return payload
+        raise ValueError("invalid private-cache relative path")
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+        file_flags |= os.O_NOFOLLOW
+    directory_fd = os.dup(root_fd)
+    try:
+        for part in relative.parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        name = relative.parts[-1]
+        path_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        fd = os.open(name, file_flags, dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or (path_stat.st_dev, path_stat.st_ino)
+            != (before.st_dev, before.st_ino)
+        ):
+            raise ValueError("private Arrow cache entry is not a pinned regular file")
+        digest = hashlib.sha256()
+        os.lseek(fd, 0, os.SEEK_SET)
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+        after = os.fstat(fd)
+        if stat_identity(before) != stat_identity(after):
+            raise ValueError("private Arrow cache changed while hashing")
+        os.lseek(fd, 0, os.SEEK_SET)
+        return fd, digest.hexdigest(), stat_identity(after)
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _stat_regular_at(root_fd: int, relative_path: str) -> dict:
+    relative = Path(relative_path)
+    if (
+        not relative_path
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or relative.as_posix() != relative_path
+    ):
+        raise ValueError("invalid private-cache relative path")
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    directory_fd = os.dup(root_fd)
+    try:
+        for part in relative.parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        path_stat = os.stat(
+            relative.parts[-1],
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise ValueError("private Arrow pathname is not a regular file")
+        return stat_identity(path_stat)
+    finally:
+        os.close(directory_fd)
 
 
 class _LeRobotDatasetMetadata(_OriginalLeRobotDatasetMetadata):
@@ -890,6 +966,8 @@ class FastLeRobotDataset(_LeRobotDataset):
         repack_transform: dict | None = None,
         decode_video_keys: VideoKeySpec | None = None,
         verified_source_receipt: list[dict] | None = None,
+        verified_private_cache_parent: str | Path | None = None,
+        verified_training_run_nonce: str | None = None,
     ):
         self._verified_source_entries: dict[str, dict] = {}
         self._verified_source_fds: list[int] = []
@@ -899,10 +977,33 @@ class FastLeRobotDataset(_LeRobotDataset):
         self._verified_pid = os.getpid()
         self._verified_cache_entries: dict[str, dict] = {}
         self._verified_cache_fds: list[int] = []
-        self._verified_cache_pid = os.getpid()
+        self._verified_dataset_pid: int | None = None
+        self._verified_private_cache_parent = (
+            None
+            if verified_private_cache_parent is None
+            else Path(verified_private_cache_parent).expanduser().absolute()
+        )
+        self._verified_training_run_nonce = verified_training_run_nonce
+        self._verified_private_parent_fd: int | None = None
+        self._verified_private_parent_stat: dict | None = None
+        self._verified_private_cache_fd: int | None = None
+        self._verified_private_cache_stat: dict | None = None
+        self._verified_private_cache_leaf: str | None = None
+        self._verified_private_cache_owner_pid: int | None = None
         token = None
         try:
             if verified_source_receipt is not None:
+                if (
+                    self._verified_private_cache_parent is None
+                    or not isinstance(self._verified_training_run_nonce, str)
+                    or not _TRAINING_NONCE_RE.fullmatch(
+                        self._verified_training_run_nonce
+                    )
+                ):
+                    raise ValueError(
+                        "verified source loading requires an explicit private-cache parent "
+                        "and training run nonce"
+                    )
                 self._prepare_verified_sources(root, verified_source_receipt)
                 metadata_entries = {
                     logical: entry
@@ -923,8 +1024,12 @@ class FastLeRobotDataset(_LeRobotDataset):
                 video_backend=video_backend,
             )
             self._assert_verified_sources_unchanged()
-        except Exception:
+        except Exception as exc:
             self.close_verified_sources()
+            if _is_file_descriptor_exhaustion(exc):
+                raise ValueError(
+                    "insufficient file-descriptor capacity for verified LeRobot sources/cache"
+                ) from exc
             raise
         finally:
             if token is not None:
@@ -1058,53 +1163,6 @@ class FastLeRobotDataset(_LeRobotDataset):
         self._verified_cache_tag = hashlib.sha256(
             json.dumps(tag_payload, separators=(",", ":"), ensure_ascii=True).encode()
         ).hexdigest()
-        self._adopt_stable_source_fds(
-            [(entry, entry["fd"]) for entry in self._verified_source_entries.values()]
-        )
-
-    def _adopt_stable_source_fds(self, raw_entries: list[tuple[dict, int]]) -> None:
-        ordered = sorted(raw_entries, key=lambda item: item[0]["logical_path"])
-        stable_entries = []
-        try:
-            for index, (entry, raw_fd) in enumerate(ordered):
-                target_fd = _VERIFIED_SOURCE_FD_BASE + index
-                try:
-                    os.fstat(target_fd)
-                except OSError as exc:
-                    if exc.errno != errno.EBADF:
-                        raise
-                else:
-                    raise ValueError(
-                        f"reserved verified-source fd is occupied: {target_fd}"
-                    )
-                command = getattr(fcntl, "F_DUPFD_CLOEXEC", fcntl.F_DUPFD)
-                stable_fd = fcntl.fcntl(raw_fd, command, target_fd)
-                if stable_fd != target_fd:
-                    os.close(stable_fd)
-                    raise ValueError("cannot allocate deterministic verified-source fd")
-                os.set_inheritable(stable_fd, False)
-                stable_entries.append((entry, stable_fd))
-        except Exception:
-            for _, stable_fd in stable_entries:
-                os.close(stable_fd)
-            raise
-        for _, raw_fd in raw_entries:
-            os.close(raw_fd)
-        for entry, stable_fd in stable_entries:
-            entry["fd"] = stable_fd
-            entry["pinned_path"] = Path(f"/proc/self/fd/{stable_fd}")
-        self._verified_source_fds = [fd for _, fd in stable_entries]
-        self._verified_parquet_paths = [
-            entry["pinned_path"]
-            for entry in sorted(
-                (
-                    value
-                    for value in self._verified_source_entries.values()
-                    if value["logical_role"] == "parquet"
-                ),
-                key=lambda value: value["logical_path"],
-            )
-        ]
 
     def _assert_verified_sources_unchanged(self) -> None:
         if self._verified_source_entries and self._verified_pid != os.getpid():
@@ -1127,7 +1185,6 @@ class FastLeRobotDataset(_LeRobotDataset):
                 # close the serialized integer values: the child may have
                 # independently reused those numbers for unrelated resources.
                 reopened_fds = []
-                reopened_entries = []
                 try:
                     for entry in self._verified_source_entries.values():
                         new_fd, _, _ = open_verified_regular_fd(
@@ -1136,8 +1193,8 @@ class FastLeRobotDataset(_LeRobotDataset):
                             expected_stat=entry["stat"],
                         )
                         reopened_fds.append(new_fd)
-                        reopened_entries.append((entry, new_fd))
-                    self._adopt_stable_source_fds(reopened_entries)
+                        entry["fd"] = new_fd
+                        entry["pinned_path"] = Path(f"/proc/self/fd/{new_fd}")
                 except Exception:
                     for fd in reopened_fds:
                         try:
@@ -1145,6 +1202,18 @@ class FastLeRobotDataset(_LeRobotDataset):
                         except OSError:
                             pass
                     raise
+                self._verified_source_fds = reopened_fds
+                self._verified_parquet_paths = [
+                    entry["pinned_path"]
+                    for entry in sorted(
+                        (
+                            value
+                            for value in self._verified_source_entries.values()
+                            if value["logical_role"] == "parquet"
+                        ),
+                        key=lambda value: value["logical_path"],
+                    )
+                ]
                 self._verified_pid = os.getpid()
         for entry in self._verified_source_entries.values():
             if stat_identity(os.fstat(entry["fd"])) != entry["stat"]:
@@ -1155,8 +1224,17 @@ class FastLeRobotDataset(_LeRobotDataset):
     def _ensure_verified_process(self) -> None:
         if self._verified_source_entries and self._verified_pid != os.getpid():
             self._assert_verified_sources_unchanged()
-        if self._verified_cache_entries and self._verified_cache_pid != os.getpid():
-            self._reopen_verified_cache_for_process()
+        if (
+            self._verified_source_entries
+            and self._verified_dataset_pid != os.getpid()
+        ):
+            # A fork/spawn worker must never consume the creating process's
+            # private cache or inherited Arrow mmap.  It retains/reopens only
+            # the verified source FDs, then force-builds its own unpredictable
+            # cache and maps the newly pinned Arrow descriptors.
+            self._release_private_cache(delete_owned=False)
+            self.hf_dataset = None
+            self.hf_dataset = self.load_hf_dataset()
 
     @staticmethod
     def _assert_verified_entry_unchanged(entry: Mapping[str, object]) -> None:
@@ -1188,80 +1266,224 @@ class FastLeRobotDataset(_LeRobotDataset):
                         f"verified image column contains path-only/empty images: {key}"
                     )
 
-    def _pin_verified_cache_files(
-        self, attestation_path: Path, builder_cache_dir: Path
-    ) -> None:
-        payload = _validate_verified_cache_attestation(
-            attestation_path,
-            source_tag=self._verified_cache_tag,
-            builder_cache_dir=builder_cache_dir,
+    @staticmethod
+    def _directory_binding(file_stat: os.stat_result) -> dict[str, int]:
+        return {
+            "device": int(file_stat.st_dev),
+            "inode": int(file_stat.st_ino),
+            "mode": int(file_stat.st_mode),
+            "uid": int(file_stat.st_uid),
+        }
+
+    def _create_private_cache(self) -> str:
+        if self._verified_private_cache_parent is None:
+            raise ValueError("verified private-cache parent is missing")
+        if self._verified_private_cache_fd is not None:
+            raise ValueError("verified private cache is already open")
+        parent_fd, _ = _open_secure_absolute_directory(
+            self._verified_private_cache_parent,
+            create=True,
         )
+        parent_stat = os.fstat(parent_fd)
+        if (
+            parent_stat.st_uid != os.geteuid()
+            or stat.S_IMODE(parent_stat.st_mode) != 0o700
+        ):
+            os.close(parent_fd)
+            raise ValueError(
+                "verified private-cache parent must be owned by this user and mode 0700"
+            )
+        rank_text = os.environ.get("RANK", "unranked")
+        if rank_text != "unranked" and not re.fullmatch(
+            r"[0-9]+", rank_text, flags=re.ASCII
+        ):
+            os.close(parent_fd)
+            raise ValueError("RANK must be canonical ASCII decimal for private cache")
+        nonce_tag = hashlib.sha256(
+            self._verified_training_run_nonce.encode("utf-8")
+        ).hexdigest()[:16]
+        cache_fd = None
+        leaf = None
+        try:
+            for _ in range(32):
+                candidate = (
+                    f"run-{nonce_tag}-rank-{rank_text}-pid-{os.getpid()}-"
+                    f"{secrets.token_hex(16)}"
+                )
+                try:
+                    os.mkdir(candidate, mode=0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    continue
+                leaf = candidate
+                break
+            if leaf is None:
+                raise ValueError("cannot allocate unpredictable private HF cache")
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            cache_fd = os.open(leaf, flags, dir_fd=parent_fd)
+            os.fchmod(cache_fd, 0o700)
+            cache_stat = os.fstat(cache_fd)
+            if (
+                cache_stat.st_uid != os.geteuid()
+                or stat.S_IMODE(cache_stat.st_mode) != 0o700
+            ):
+                raise ValueError("private HF cache is not owned mode 0700")
+            self._verified_private_parent_fd = parent_fd
+            self._verified_private_parent_stat = self._directory_binding(
+                os.fstat(parent_fd)
+            )
+            self._verified_private_cache_fd = cache_fd
+            self._verified_private_cache_stat = self._directory_binding(cache_stat)
+            self._verified_private_cache_leaf = leaf
+            self._verified_private_cache_owner_pid = os.getpid()
+            self._assert_private_cache_directory_bound()
+            return f"/proc/self/fd/{cache_fd}"
+        except Exception:
+            if cache_fd is not None:
+                try:
+                    _secure_clear_directory_fd(cache_fd)
+                except Exception:
+                    pass
+                finally:
+                    os.close(cache_fd)
+            if leaf is not None:
+                try:
+                    os.rmdir(leaf, dir_fd=parent_fd)
+                except OSError:
+                    pass
+            os.close(parent_fd)
+            raise
+
+    def _assert_private_cache_directory_bound(self) -> None:
+        parent_fd = self._verified_private_parent_fd
+        cache_fd = self._verified_private_cache_fd
+        leaf = self._verified_private_cache_leaf
+        if parent_fd is None or cache_fd is None or leaf is None:
+            raise ValueError("verified private HF cache is not pinned")
+        verified_parent_fd, _ = _open_secure_absolute_directory(
+            self._verified_private_cache_parent,
+            create=False,
+        )
+        try:
+            parent_path_binding = self._directory_binding(
+                os.fstat(verified_parent_fd)
+            )
+        finally:
+            os.close(verified_parent_fd)
+        leaf_path_stat = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            self._directory_binding(os.fstat(parent_fd))
+            != self._verified_private_parent_stat
+            or parent_path_binding != self._verified_private_parent_stat
+            or self._directory_binding(os.fstat(cache_fd))
+            != self._verified_private_cache_stat
+            or self._directory_binding(leaf_path_stat)
+            != self._verified_private_cache_stat
+            or not stat.S_ISDIR(leaf_path_stat.st_mode)
+        ):
+            raise ValueError("verified private HF cache directory binding changed")
+
+    def _open_pinned_arrow_dataset(
+        self, reader, builder_cache_dir: Path
+    ) -> datasets.Dataset:
+        split_name = str(reader.split)
+        split_info = reader.builder.info.splits[split_name]
+        arrow_paths = [
+            Path(path)
+            for path in filenames_for_dataset_split(
+                str(builder_cache_dir),
+                dataset_name=reader.builder.dataset_name,
+                split=split_name,
+                filetype_suffix="arrow",
+                shard_lengths=split_info.shard_lengths,
+            )
+        ]
+        if not arrow_paths:
+            raise ValueError("private HF build produced no Arrow files")
         entries = {}
         fds = []
+        parts = []
+        private_root = f"/proc/self/fd/{self._verified_private_cache_fd}"
         try:
-            for receipt in payload["cache_files"]:
-                cache_path = builder_cache_dir / receipt["path"]
-                fd, digest, runtime_stat = open_verified_regular_fd(
-                    cache_path,
-                    expected_sha256=receipt["sha256"],
+            for index, arrow_path in enumerate(arrow_paths):
+                relative_path = os.path.relpath(str(arrow_path), private_root)
+                fd, digest, runtime_stat = _open_verified_regular_fd_at(
+                    self._verified_private_cache_fd,
+                    Path(relative_path).as_posix(),
                 )
-                if runtime_stat["size_bytes"] != receipt["size_bytes"]:
-                    os.close(fd)
-                    raise ValueError("verified HF cache size differs from attestation")
                 fds.append(fd)
-                entries[receipt["path"]] = {
-                    "path": str(cache_path.absolute()),
+                pinned_path = f"/proc/self/fd/{fd}"
+                entry = {
+                    "logical_path": f"arrow/{index:06d}",
+                    "relative_path": Path(relative_path).as_posix(),
+                    "build_path_record_only": str(arrow_path),
+                    "pinned_path": pinned_path,
                     "sha256": digest,
                     "stat": runtime_stat,
                     "fd": fd,
                 }
+                entries[entry["logical_path"]] = entry
+                before = stat_identity(os.fstat(fd))
+                part = datasets.Dataset.from_file(
+                    pinned_path,
+                    info=reader.builder.info,
+                    split=reader.split,
+                    in_memory=False,
+                )
+                if stat_identity(os.fstat(fd)) != before:
+                    raise ValueError("private Arrow inode changed while mmap opened")
+                parts.append(part)
+            result = (
+                parts[0]
+                if len(parts) == 1
+                else datasets.concatenate_datasets(
+                    parts,
+                    info=reader.builder.info,
+                    split=reader.split,
+                )
+            )
+            actual_mmap_paths = {
+                item.get("filename") for item in result.cache_files
+            }
+            expected_mmap_paths = {
+                entry["pinned_path"] for entry in entries.values()
+            }
+            if actual_mmap_paths != expected_mmap_paths:
+                raise ValueError(
+                    "HF Dataset is not mmap-backed by the pinned private Arrow FDs"
+                )
         except Exception:
             for fd in fds:
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             raise
-        self.close_verified_cache_sources()
         self._verified_cache_entries = entries
         self._verified_cache_fds = fds
-        self._verified_cache_pid = os.getpid()
-
-    def _reopen_verified_cache_for_process(self) -> None:
-        inherited_fds_valid = True
-        for entry in self._verified_cache_entries.values():
-            try:
-                inherited_fds_valid = (
-                    stat_identity(os.fstat(entry["fd"])) == entry["stat"]
-                )
-            except (OSError, TypeError):
-                inherited_fds_valid = False
-            if not inherited_fds_valid:
-                break
-        if inherited_fds_valid:
-            self._verified_cache_pid = os.getpid()
-            return
-        reopened_fds = []
-        reopened_entries = []
-        try:
-            for entry in self._verified_cache_entries.values():
-                fd, _, _ = open_verified_regular_fd(
-                    entry["path"],
-                    expected_sha256=entry["sha256"],
-                    expected_stat=entry["stat"],
-                )
-                reopened_fds.append(fd)
-                reopened_entries.append((entry, fd))
-        except Exception:
-            for fd in reopened_fds:
-                os.close(fd)
-            raise
-        for entry, fd in reopened_entries:
-            entry["fd"] = fd
-        self._verified_cache_fds = reopened_fds
-        self._verified_cache_pid = os.getpid()
+        self._verified_dataset_pid = os.getpid()
+        return result
 
     def _assert_verified_cache_unchanged(self) -> None:
+        if self._verified_source_entries:
+            self._assert_private_cache_directory_bound()
         for entry in self._verified_cache_entries.values():
-            if stat_identity(os.fstat(entry["fd"])) != entry["stat"]:
-                raise ValueError("verified HF cache changed during training read")
+            if (
+                stat_identity(os.fstat(entry["fd"])) != entry["stat"]
+                or _stat_regular_at(
+                    self._verified_private_cache_fd,
+                    entry["relative_path"],
+                )
+                != entry["stat"]
+            ):
+                raise ValueError(
+                    "pinned private Arrow mmap source changed during training read"
+                )
 
     def __getstate__(self):
         state = dict(self.__dict__)
@@ -1277,12 +1499,16 @@ class FastLeRobotDataset(_LeRobotDataset):
             for key, entry in self._verified_video_entries.items()
         }
         state["_verified_pid"] = None
-        state["_verified_cache_entries"] = {
-            logical: {**entry, "fd": None}
-            for logical, entry in self._verified_cache_entries.items()
-        }
+        state["hf_dataset"] = None
+        state["_verified_cache_entries"] = {}
         state["_verified_cache_fds"] = []
-        state["_verified_cache_pid"] = None
+        state["_verified_dataset_pid"] = None
+        state["_verified_private_parent_fd"] = None
+        state["_verified_private_parent_stat"] = None
+        state["_verified_private_cache_fd"] = None
+        state["_verified_private_cache_stat"] = None
+        state["_verified_private_cache_leaf"] = None
+        state["_verified_private_cache_owner_pid"] = None
         return state
 
     def __setstate__(self, state):
@@ -1295,15 +1521,53 @@ class FastLeRobotDataset(_LeRobotDataset):
             except OSError:
                 pass
         self._verified_source_fds = []
-        self.close_verified_cache_sources()
+        self._release_private_cache(delete_owned=True)
 
-    def close_verified_cache_sources(self) -> None:
+    def _release_private_cache(self, *, delete_owned: bool) -> None:
         for fd in getattr(self, "_verified_cache_fds", []):
             try:
                 os.close(fd)
             except OSError:
                 pass
         self._verified_cache_fds = []
+        self._verified_cache_entries = {}
+        parent_fd = getattr(self, "_verified_private_parent_fd", None)
+        cache_fd = getattr(self, "_verified_private_cache_fd", None)
+        leaf = getattr(self, "_verified_private_cache_leaf", None)
+        owner_pid = getattr(self, "_verified_private_cache_owner_pid", None)
+        should_delete = (
+            delete_owned
+            and owner_pid == os.getpid()
+            and parent_fd is not None
+            and cache_fd is not None
+            and leaf is not None
+        )
+        if should_delete:
+            try:
+                self._assert_private_cache_directory_bound()
+                _secure_clear_directory_fd(cache_fd)
+                os.close(cache_fd)
+                cache_fd = None
+                os.rmdir(leaf, dir_fd=parent_fd)
+            except Exception as exc:
+                logging.error("cannot safely remove owned private HF cache: %s", exc)
+        if cache_fd is not None:
+            try:
+                os.close(cache_fd)
+            except OSError:
+                pass
+        if parent_fd is not None:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+        self._verified_private_parent_fd = None
+        self._verified_private_parent_stat = None
+        self._verified_private_cache_fd = None
+        self._verified_private_cache_stat = None
+        self._verified_private_cache_leaf = None
+        self._verified_private_cache_owner_pid = None
+        self._verified_dataset_pid = None
 
     def __del__(self):
         self.close_verified_sources()
@@ -1330,18 +1594,80 @@ class FastLeRobotDataset(_LeRobotDataset):
             raise FileNotFoundError(f'Provided directory does not contain any parquet file: {self.root / "data"}')
 
         filters = pa_ds.field('episode_index').isin(self.episodes) if self.episodes is not None else None
-        cache_dir = os.environ.get('HF_DATASETS_CACHE') or os.path.expanduser('~/.cache/huggingface/datasets')
-        if self._verified_cache_tag is not None:
-            cache_dir = os.path.join(
-                cache_dir, 'gwp_verified_parquet', self._verified_cache_tag
-            )
-        verified_attestation_path = Path(cache_dir) / _VERIFIED_CACHE_ATTESTATION_NAME
         parquet_paths = [str(path) for path in paths]
         builder_cache_dir: str | None = None
 
+        if self._verified_cache_tag is not None:
+            try:
+                cache_dir = self._create_private_cache()
+            except Exception as exc:
+                if _is_file_descriptor_exhaustion(exc):
+                    raise ValueError(
+                        "insufficient file-descriptor capacity for private HF cache"
+                    ) from exc
+                raise ValueError("cannot create verified private HF cache") from exc
+            try:
+                builder_identity_payload = {
+                    "source_manifest_content_sha256": self._verified_cache_tag,
+                    "columns": list(features),
+                    "features": features.to_dict(),
+                    "episodes": None if self.episodes is None else list(self.episodes),
+                }
+                builder_identity = hashlib.sha256(
+                    json.dumps(
+                        builder_identity_payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+                self._assert_private_cache_directory_bound()
+                self._assert_verified_sources_unchanged()
+                reader = ParquetDatasetReader(
+                    parquet_paths,
+                    filters=filters,
+                    features=features,
+                    columns=list(features),
+                    cache_dir=cache_dir,
+                )
+                reader.builder = _VerifiedParquetBuilder(
+                    cache_dir=cache_dir,
+                    dataset_name="parquet",
+                    data_files={str(reader.split): parquet_paths},
+                    features=features,
+                    hash=reader.builder.hash,
+                    filters=filters,
+                    columns=list(features),
+                    verified_identity=builder_identity,
+                )
+                builder_cache_dir = reader.builder.cache_dir
+                # This directory was just unpredictably and exclusively made
+                # for this PID.  No shared cache or colocated attestation can
+                # authorize its contents; every verified load is rebuilt.
+                reader.builder.download_and_prepare(
+                    download_mode=datasets.DownloadMode.FORCE_REDOWNLOAD,
+                )
+                self._assert_private_cache_directory_bound()
+                self._assert_verified_sources_unchanged()
+                hf_dataset = self._open_pinned_arrow_dataset(
+                    reader,
+                    Path(builder_cache_dir),
+                )
+                self._assert_verified_cache_unchanged()
+            except Exception as exc:
+                self._release_private_cache(delete_owned=True)
+                if _is_file_descriptor_exhaustion(exc):
+                    raise ValueError(
+                        "insufficient file-descriptor capacity for pinned Arrow cache"
+                    ) from exc
+                raise ValueError(
+                    "verified private HF build/mmap admission failed"
+                ) from exc
+        else:
+            cache_dir = os.environ.get('HF_DATASETS_CACHE') or os.path.expanduser('~/.cache/huggingface/datasets')
+
         def load_from_parquet() -> datasets.Dataset:
             nonlocal builder_cache_dir
-            self._assert_verified_sources_unchanged()
             reader = ParquetDatasetReader(
                 parquet_paths,
                 filters=filters,
@@ -1350,45 +1676,7 @@ class FastLeRobotDataset(_LeRobotDataset):
                 cache_dir=cache_dir,
             )
             builder_cache_dir = reader.builder.cache_dir
-            if self._verified_cache_tag is None:
-                result = reader.read()
-            else:
-                builder_path = Path(builder_cache_dir)
-                if os.path.lexists(verified_attestation_path):
-                    _validate_verified_cache_attestation(
-                        verified_attestation_path,
-                        source_tag=self._verified_cache_tag,
-                        builder_cache_dir=builder_path,
-                    )
-                    result = reader.read()
-                    self._pin_verified_cache_files(
-                        verified_attestation_path,
-                        builder_path,
-                    )
-                else:
-                    # A content-keyed namespace is not trusted merely because it
-                    # exists. Its first admitted use is a forced source rebuild;
-                    # subsequent ranks verify every cache byte before and after
-                    # the Arrow dataset opens it.
-                    reader.builder.download_and_prepare(
-                        download_mode=datasets.DownloadMode.FORCE_REDOWNLOAD,
-                    )
-                    result = reader.builder.as_dataset(
-                        split=reader.split,
-                        verification_mode=None,
-                        in_memory=reader.keep_in_memory,
-                    )
-                    _write_verified_cache_attestation(
-                        verified_attestation_path,
-                        source_tag=self._verified_cache_tag,
-                        builder_cache_dir=builder_path,
-                    )
-                    self._pin_verified_cache_files(
-                        verified_attestation_path,
-                        builder_path,
-                    )
-            self._assert_verified_sources_unchanged()
-            return result
+            return reader.read()
 
         def load_from_parquet_with_retry() -> datasets.Dataset:
             attempts = max(1, _get_env_int('GIGA_LEROBOT_HF_CACHE_LOAD_ATTEMPTS', 10))
@@ -1419,7 +1707,7 @@ class FastLeRobotDataset(_LeRobotDataset):
                     time.sleep(delay_s)
             raise RuntimeError('Unreachable HF parquet cache retry state.')
 
-        if self._verified_cache_tag is not None or _get_env_bool('GIGA_LEROBOT_LOCK_HF_CACHE', True):
+        if self._verified_cache_tag is None and _get_env_bool('GIGA_LEROBOT_LOCK_HF_CACHE', True):
             cache_path = Path(cache_dir)
             cache_path.mkdir(parents=True, exist_ok=True)
             if cache_path.is_symlink() or not cache_path.is_dir():
@@ -1427,11 +1715,13 @@ class FastLeRobotDataset(_LeRobotDataset):
             lock_path = cache_path / 'giga_lerobot_from_parquet.lock'
             with FileLock(str(lock_path)):
                 hf_dataset = load_from_parquet_with_retry()
-        else:
+        elif self._verified_cache_tag is None:
             hf_dataset = load_from_parquet_with_retry()
 
         if self._verified_source_entries:
+            self._assert_verified_cache_unchanged()
             self._validate_verified_embedded_images(hf_dataset)
+            self._assert_verified_cache_unchanged()
         hf_dataset.set_transform(hf_transform_to_torch)
         return hf_dataset
 
