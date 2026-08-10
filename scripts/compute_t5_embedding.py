@@ -409,8 +409,10 @@ def main() -> None:
         raise ValueError("WAN path not provided. Use --wan_path or set WAN_PATH/WAN_ROOT.")
 
     encoder = None
+    embedding_cache: Dict[str, Any] = {}
     total_updated = 0
     total_skipped = 0
+    total_cache_hits = 0
 
     for repo_id, root in _iter_root_specs(args.repo_id, args.root, args.root_list):
         dataset_root = _resolve_dataset_root(repo_id, root)
@@ -424,6 +426,7 @@ def main() -> None:
 
         updated = 0
         skipped = 0
+        cache_hits = 0
         would_update = 0
         examples = []
 
@@ -460,7 +463,12 @@ def main() -> None:
                     wan_code_path=args.wan_code_path,
                 )
 
-            emb = _encode_t5(encoder, instr, device=device)
+            if instr in embedding_cache:
+                emb = embedding_cache[instr]
+                cache_hits += 1
+            else:
+                emb = _encode_t5(encoder, instr, device=device)
+                embedding_cache[instr] = emb
             torch.save(emb, abs_pt)
             ep["t5_embedding_path"] = rel
             updated += 1
@@ -489,11 +497,18 @@ def main() -> None:
             else:
                 _write_jsonlines_atomic(episodes_path, episodes)
 
-        print(f"Done root={dataset_root}. updated={updated}, skipped={skipped}.")
+        print(
+            f"Done root={dataset_root}. updated={updated}, skipped={skipped}, "
+            f"instruction_cache_hits={cache_hits}."
+        )
         total_updated += updated
         total_skipped += skipped
+        total_cache_hits += cache_hits
 
-    print(f"Done all roots. updated={total_updated}, skipped={total_skipped}.")
+    print(
+        f"Done all roots. updated={total_updated}, skipped={total_skipped}, "
+        f"instruction_cache_hits={total_cache_hits}."
+    )
 
 
 if __name__ == "__main__":
