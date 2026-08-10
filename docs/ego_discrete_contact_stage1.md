@@ -366,6 +366,13 @@ target object/liquid/batch metadata must be complete and real. Episode-only
 diagnostic splits, `ood_eligible=false`, `strategy_claim_allowed=false`, v0
 sidecars, proposal labels and the episode-0 prescreen are hard failures.
 
+The historical 66-episode dataset has a reproducible, read-only recovery audit
+at `docs/audits/ego_66ep_group_metadata_recovery_20260811.md`. Its recorded
+timestamps expose four diagnostic continuity blocks, but those blocks are not
+session or batch ground truth and cannot unlock this gate. Use the paired JSON
+audit and null supplement template to collect authoritative group identities;
+the supplement validator rejects inferred or placeholder values.
+
 The checked-in templates are deliberately all false/null. Authorization also
 requires artifact-bound A/B agreement, Ego action/grip evidence, matched-control
 collector evidence, and separate `allow_server_training` and
