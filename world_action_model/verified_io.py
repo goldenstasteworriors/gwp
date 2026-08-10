@@ -6,6 +6,8 @@ import hashlib
 import json
 import math
 import os
+import signal
+from contextlib import contextmanager
 from pathlib import Path
 import stat
 from typing import Any, Mapping
@@ -13,6 +15,19 @@ from typing import Any, Mapping
 
 class VerifiedIOError(ValueError):
     pass
+
+
+@contextmanager
+def blocked_sigint():
+    """Block SIGINT in this POSIX thread during a short FD transfer."""
+
+    if not hasattr(signal, "pthread_sigmask"):
+        raise RuntimeError("verified FD ownership requires POSIX pthread_sigmask")
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def reject_json_constant(value: str) -> None:
@@ -69,11 +84,15 @@ def _open_regular_fd(
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    fd = None
     try:
-        fd = os.open(absolute, flags)
-    except OSError as exc:
-        raise VerifiedIOError(f"cannot safely open verified source: {absolute}") from exc
-    try:
+        with blocked_sigint():
+            try:
+                fd = os.open(absolute, flags)
+            except OSError as exc:
+                raise VerifiedIOError(
+                    f"cannot safely open verified source: {absolute}"
+                ) from exc
         before = os.fstat(fd)
         if stat_identity(before) != stat_identity(before_open):
             raise VerifiedIOError(f"verified source changed during open: {absolute}")
@@ -81,18 +100,20 @@ def _open_regular_fd(
             raise VerifiedIOError(f"verified source stat receipt differs: {absolute}")
         result_fd = fd
         if fd_owner is not None:
-            fd_owner.adopt_fd(fd)
-            fd = None
+            with blocked_sigint():
+                fd_owner.adopt_fd(fd)
+                fd = None
         return result_fd, absolute, stat_identity(before)
     except BaseException:
         if fd is not None and (
             fd_owner is None or not fd_owner.owns_fd(fd)
         ):
-            old_fd, fd = fd, None
-            try:
-                os.close(old_fd)
-            except OSError:
-                pass
+            with blocked_sigint():
+                old_fd, fd = fd, None
+                try:
+                    os.close(old_fd)
+                except OSError:
+                    pass
         raise
 
 
@@ -130,12 +151,14 @@ def open_verified_regular_fd(
 ) -> tuple[int, str, dict[str, int]]:
     """Open once with no-follow, hash that fd, and return it pinned at offset 0."""
 
-    fd, absolute, identity = _open_regular_fd(
-        path,
-        expected_stat=expected_stat,
-        fd_owner=fd_owner,
-    )
+    fd = None
     try:
+        with blocked_sigint():
+            fd, absolute, identity = _open_regular_fd(
+                path,
+                expected_stat=expected_stat,
+                fd_owner=fd_owner,
+            )
         _, actual_sha256 = _read_and_hash_fd(
             fd,
             absolute=absolute,
@@ -146,12 +169,15 @@ def open_verified_regular_fd(
             raise VerifiedIOError(f"verified source content SHA differs: {absolute}")
         return fd, actual_sha256, identity
     except BaseException:
-        if fd_owner is None or not fd_owner.owns_fd(fd):
-            old_fd, fd = fd, None
-            try:
-                os.close(old_fd)
-            except OSError:
-                pass
+        if fd is not None and (
+            fd_owner is None or not fd_owner.owns_fd(fd)
+        ):
+            with blocked_sigint():
+                old_fd, fd = fd, None
+                try:
+                    os.close(old_fd)
+                except OSError:
+                    pass
         raise
 
 
@@ -161,13 +187,23 @@ def hash_verified_regular_file(
     expected_sha256: str | None = None,
     expected_stat: Mapping[str, int] | None = None,
 ) -> tuple[str, dict[str, int]]:
-    fd, digest, identity = open_verified_regular_fd(
-        path,
-        expected_sha256=expected_sha256,
-        expected_stat=expected_stat,
-    )
-    os.close(fd)
-    return digest, identity
+    fd = None
+    try:
+        with blocked_sigint():
+            fd, digest, identity = open_verified_regular_fd(
+                path,
+                expected_sha256=expected_sha256,
+                expected_stat=expected_stat,
+            )
+        return digest, identity
+    finally:
+        if fd is not None:
+            with blocked_sigint():
+                old_fd, fd = fd, None
+                try:
+                    os.close(old_fd)
+                except OSError:
+                    pass
 
 
 def read_verified_bytes(
@@ -176,8 +212,12 @@ def read_verified_bytes(
     expected_sha256: str | None = None,
     expected_stat: Mapping[str, int] | None = None,
 ) -> tuple[bytes, str, dict[str, int]]:
-    fd, absolute, identity = _open_regular_fd(path, expected_stat=expected_stat)
+    fd = None
     try:
+        with blocked_sigint():
+            fd, absolute, identity = _open_regular_fd(
+                path, expected_stat=expected_stat
+            )
         payload, digest = _read_and_hash_fd(
             fd,
             absolute=absolute,
@@ -188,4 +228,10 @@ def read_verified_bytes(
             raise VerifiedIOError(f"verified source content SHA differs: {absolute}")
         return payload, digest, identity
     finally:
-        os.close(fd)
+        if fd is not None:
+            with blocked_sigint():
+                old_fd, fd = fd, None
+                try:
+                    os.close(old_fd)
+                except OSError:
+                    pass
