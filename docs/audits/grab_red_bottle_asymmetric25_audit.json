@@ -1,0 +1,60 @@
+{
+  "audit_version": "grab-red-bottle-asymmetric25-audit/v1",
+  "audited_at": "2026-08-10",
+  "source_path": "/home/ykj/project/SONICMJ/GR00T-WholeBodyControl/outputs/grab_red_bottle",
+  "disposition": "audit_only_no_go_for_asymmetric25_conversion",
+  "repository_observed": {
+    "episodes": 88,
+    "parquet_files": 88,
+    "video_files": 88,
+    "frames": 40901,
+    "fps_declared": 50,
+    "timestamp_dt_s": {
+      "min": 0.019998550415039062,
+      "median": 0.019999980926513672,
+      "max": 0.020000457763671875,
+      "non_increasing_count": 0
+    },
+    "features": {
+      "observation.state": 41,
+      "observation.eef_state": 14,
+      "action.wbc": 41,
+      "teleop.left_hand": 6,
+      "teleop.right_hand": 6
+    },
+    "wbc_body_joint_names": [
+      "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+      "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+      "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+      "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+      "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+      "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+      "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+      "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+      "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint"
+    ],
+    "left_hand_channel_names": [
+      "left_hand_little", "left_hand_ring", "left_hand_middle", "left_hand_index",
+      "left_hand_thumb_bend", "left_hand_thumb_rotate"
+    ],
+    "right_hand_channel_names": [
+      "right_hand_little", "right_hand_ring", "right_hand_middle", "right_hand_index",
+      "right_hand_thumb_bend", "right_hand_thumb_rotate"
+    ],
+    "right_hand_observed_ranges_approx": {
+      "little": [0.198, 1.0],
+      "ring": [0.198, 1.0],
+      "middle": [0.198, 1.0],
+      "index": [0.198, 1.0],
+      "thumb_bend": [0.997, 1.0],
+      "thumb_rotate": [0.0, 0.0]
+    }
+  },
+  "not_proven_by_dataset": [
+    "RH56DFTP mounted serial, driver, firmware, raw/normalized state and command affine mappings",
+    "OmniPicker presence, serial, aperture state/command endpoint, direction, zero and limits",
+    "wrist parent/child frames and rotation convention for the target mounted end effectors",
+    "hardware clock origin, state-action/camera skew and measured command latency",
+    "robot-verified safety limits and emergency-stop/watchdog behavior"
+  ]
+}

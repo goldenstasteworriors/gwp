@@ -40,6 +40,16 @@ from world_action_model.asymmetric_action_schema import (
     LEGACY_SCHEMA_ID,
     pack_asymmetric_physical,
 )
+from world_action_model.asymmetric_hardware_manifest import (
+    calibration_capture_sha256,
+    canonicalize_hand_signal,
+    hand_channels,
+    load_hardware_manifest,
+    validate_asymmetric_action,
+    validate_episode_timing,
+    validate_manifest_against_source_info,
+    validate_manifest_capture_binding,
+)
 
 
 STATE_NAMES = [
@@ -103,64 +113,30 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Required for asymmetric25; declares named RH56DFTP and OmniPicker source channels.",
     )
+    parser.add_argument(
+        "--calibration-capture",
+        type=Path,
+        default=None,
+        help="Required for asymmetric25; proves calibration digest, devices and verification level.",
+    )
     return parser.parse_args()
 
 
-def _feature_names(info: dict, key: str) -> list[str]:
-    feature = info.get("features", {}).get(key)
-    if not isinstance(feature, dict):
-        raise KeyError(f"source metadata is missing features[{key!r}]")
-    names = feature.get("names")
-    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
-        raise ValueError(f"features[{key!r}].names must be an explicit string list")
-    return names
-
-
-def _load_asymmetric_manifest(path: Path | None, info: dict) -> dict:
+def _load_asymmetric_manifest(
+    path: Path | None,
+    calibration_capture_path: Path | None,
+    info: dict,
+) -> dict:
     if path is None:
         raise ValueError("--hardware-manifest is required with --action-schema asymmetric25")
-    payload = json.loads(path.resolve().read_text(encoding="utf-8"))
-    if payload.get("action_schema_id") != ASYMMETRIC_SCHEMA_ID:
-        raise ValueError(
-            f"hardware manifest action_schema_id must be {ASYMMETRIC_SCHEMA_ID!r}"
-        )
-
-    state_names = _feature_names(info, "observation.state")
-    action_names = _feature_names(info, "action.wbc")
-    left_state_names = payload.get("left_rh56_state_names")
-    left_action_names = payload.get("left_rh56_action_names")
-    right_state_name = payload.get("right_omnipicker_state_name")
-    right_action_name = payload.get("right_omnipicker_action_name")
-    if not isinstance(left_state_names, list) or len(left_state_names) != 6:
-        raise ValueError("hardware manifest left_rh56_state_names must contain six names")
-    if not isinstance(left_action_names, list) or len(left_action_names) != 6:
-        raise ValueError("hardware manifest left_rh56_action_names must contain six names")
-    if not isinstance(right_state_name, str) or not isinstance(right_action_name, str):
-        raise ValueError("hardware manifest must name the OmniPicker state and action channels")
-
-    right_text = f"{right_state_name} {right_action_name}".lower()
-    if not any(marker in right_text for marker in ("omnipicker", "aperture", "jaw", "gripper_width")):
-        raise ValueError(
-            "OmniPicker channels must be explicitly named as OmniPicker/aperture/jaw/gripper_width; "
-            "legacy finger joints are not accepted"
-        )
-    legacy_markers = ("little", "ring", "middle", "index", "thumb")
-    if any(marker in right_text for marker in legacy_markers):
-        raise ValueError("legacy right-hand finger channels cannot declare an OmniPicker aperture")
-
-    def indices(names: list[str], requested: list[str] | tuple[str, ...], field: str) -> list[int]:
-        missing = [name for name in requested if name not in names]
-        if missing:
-            raise KeyError(f"{field} channels are absent from source metadata: {missing}")
-        return [names.index(name) for name in requested]
-
-    return {
-        "left_state_indices": indices(state_names, left_state_names, "left RH56 state"),
-        "left_action_indices": indices(action_names, left_action_names, "left RH56 action"),
-        "right_state_index": indices(state_names, [right_state_name], "right OmniPicker state")[0],
-        "right_action_index": indices(action_names, [right_action_name], "right OmniPicker action")[0],
-        "manifest": payload,
-    }
+    if calibration_capture_path is None:
+        raise ValueError("--calibration-capture is required with --action-schema asymmetric25")
+    manifest = load_hardware_manifest(path, mode="training")
+    capture = json.loads(calibration_capture_path.resolve().read_text(encoding="utf-8"))
+    validate_manifest_capture_binding(manifest, capture)
+    layout = validate_manifest_against_source_info(manifest, info)
+    layout["calibration_capture_sha256"] = calibration_capture_sha256(capture)
+    return layout
 
 
 def rot6d(matrix: np.ndarray) -> np.ndarray:
@@ -213,9 +189,16 @@ def convert_episode(
     if action_schema not in {"legacy30", "asymmetric25"}:
         raise ValueError(f"unsupported action_schema={action_schema!r}")
     frame = pd.read_parquet(source)
-    observed_eef = np.stack(frame["observation.eef_state"]).astype(np.float64)
-    observed_state = np.stack(frame["observation.state"]).astype(np.float64)
-    wbc_action = np.stack(frame["action.wbc"]).astype(np.float64)
+    wrist_key = (
+        "observation.eef_state"
+        if asymmetric_layout is None
+        else asymmetric_layout["wrist_state_feature"]
+    )
+    observed_eef = np.stack(frame[wrist_key]).astype(np.float64)
+    state_key = "observation.state" if asymmetric_layout is None else asymmetric_layout["state_feature"]
+    command_key = "action.wbc" if asymmetric_layout is None else asymmetric_layout["command_feature"]
+    observed_state = np.stack(frame[state_key]).astype(np.float64)
+    wbc_action = np.stack(frame[command_key]).astype(np.float64)
     if len(frame) == 0:
         raise ValueError(f"empty episode: {source}")
 
@@ -235,11 +218,30 @@ def convert_episode(
     else:
         if asymmetric_layout is None:
             raise ValueError("asymmetric25 conversion requires a validated hardware layout")
+        manifest = asymmetric_layout["manifest"]
+        validate_episode_timing(
+            frame[asymmetric_layout["timestamp_feature"]].to_numpy(),
+            manifest,
+            name=source.name,
+        )
+        left_channels, right_channel = hand_channels(manifest)
+        left_state = canonicalize_hand_signal(
+            observed_state[:, asymmetric_layout["left_state_indices"]],
+            left_channels,
+            signal="state",
+            name="left RH56 state",
+        )
+        right_state = canonicalize_hand_signal(
+            observed_state[:, [asymmetric_layout["right_state_index"]]],
+            [right_channel],
+            signal="state",
+            name="right OmniPicker state",
+        )
         state = pack_asymmetric_physical(
             state[:, :9],
             state[:, 9:18],
-            observed_state[:, asymmetric_layout["left_state_indices"]],
-            observed_state[:, asymmetric_layout["right_state_index"]],
+            left_state,
+            right_state,
             name="asymmetric state",
         )
 
@@ -262,17 +264,32 @@ def convert_episode(
 
     if action_schema == "asymmetric25":
         assert asymmetric_layout is not None
+        manifest = asymmetric_layout["manifest"]
+        left_channels, right_channel = hand_channels(manifest)
         # Wrist commands stay local relative transforms. Hand commands are
         # absolute normalized actuator/aperture targets, matching the human
         # grip-target semantics instead of inventing a six-channel right hand.
         target_indices = np.minimum(np.arange(len(frame)) + 1, len(frame) - 1)
+        left_target = canonicalize_hand_signal(
+            wbc_action[target_indices][:, asymmetric_layout["left_action_indices"]],
+            left_channels,
+            signal="command",
+            name="left RH56 command",
+        )
+        right_target = canonicalize_hand_signal(
+            wbc_action[target_indices][:, [asymmetric_layout["right_action_index"]]],
+            [right_channel],
+            signal="command",
+            name="right OmniPicker command",
+        )
         action = pack_asymmetric_physical(
             action[:, :9],
             action[:, 9:18],
-            wbc_action[target_indices][:, asymmetric_layout["left_action_indices"]],
-            wbc_action[target_indices, asymmetric_layout["right_action_index"]],
+            left_target,
+            right_target,
             name="asymmetric action",
         )
+        validate_asymmetric_action(action, manifest, name=f"{source.name} action")
 
     keep = ["timestamp", "frame_index", "episode_index", "index", "task_index"]
     converted = frame[keep].copy()
@@ -292,14 +309,15 @@ def main() -> None:
         raise FileExistsError(f"Output already exists: {output_root}")
     info_path = source_root / "meta" / "info.json"
     info = json.loads(info_path.read_text(encoding="utf-8"))
-    source_names = list(info["features"]["action.wbc"]["names"])
-    if args.action_schema == "legacy30" and len(source_names) != 41:
-        raise ValueError(f"Expected 41-D Inspire action, found {len(source_names)}")
     asymmetric_layout = (
-        _load_asymmetric_manifest(args.hardware_manifest, info)
+        _load_asymmetric_manifest(args.hardware_manifest, args.calibration_capture, info)
         if args.action_schema == "asymmetric25"
         else None
     )
+    command_key = "action.wbc" if asymmetric_layout is None else asymmetric_layout["command_feature"]
+    source_names = list(info["features"][command_key]["names"])
+    if args.action_schema == "legacy30" and len(source_names) != 41:
+        raise ValueError(f"Expected 41-D Inspire action, found {len(source_names)}")
 
     robot_model = load_robot_model(sonic_root)
     (output_root / "meta").mkdir(parents=True)
@@ -412,6 +430,10 @@ def main() -> None:
     info["chunks_size"] = max(len(parquet_paths), 1)
     if asymmetric_layout is not None:
         info["asymmetric_hardware_manifest"] = asymmetric_layout["manifest"]
+        info["hardware_contract_sha256"] = asymmetric_layout["hardware_contract_sha256"]
+        info["calibration_capture_sha256"] = asymmetric_layout[
+            "calibration_capture_sha256"
+        ]
     (output_root / "meta" / "info.json").write_text(
         json.dumps(info, indent=4) + "\n",
         encoding="utf-8",

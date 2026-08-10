@@ -42,8 +42,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from world_action_model.asymmetric_action_schema import (
-    ASYMMETRIC_ACTION_DIM,
     ASYMMETRIC_SCHEMA_ID,
+)
+from world_action_model.asymmetric_hardware_manifest import (
+    hardware_contract_sha256,
+    validate_converted_dataset_info,
 )
 
 try:
@@ -89,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def validate_dataset_schema(root: Path, action_schema_id: str) -> None:
+def validate_dataset_schema(root: Path, action_schema_id: str) -> dict | None:
     info_path = root / "meta" / "info.json"
     info = json.loads(info_path.read_text(encoding="utf-8"))
     actual = info.get("action_schema_id")
@@ -98,13 +101,23 @@ def validate_dataset_schema(root: Path, action_schema_id: str) -> None:
             f"{root} action_schema_id={actual!r}; expected {action_schema_id!r}"
         )
     if action_schema_id == ASYMMETRIC_SCHEMA_ID:
-        for key in ("observation.state", "action"):
-            shape = info.get("features", {}).get(key, {}).get("shape")
-            if shape != [ASYMMETRIC_ACTION_DIM]:
-                raise ValueError(
-                    f"{root} features[{key!r}].shape={shape!r}; expected "
-                    f"[{ASYMMETRIC_ACTION_DIM}]. Legacy 30-D data cannot be used here."
-                )
+        manifest = info.get("asymmetric_hardware_manifest")
+        if not isinstance(manifest, dict):
+            raise ValueError(f"{root} is missing an embedded asymmetric_hardware_manifest")
+        validate_converted_dataset_info(info, manifest)
+        capture_digest = info.get("calibration_capture_sha256")
+        if capture_digest != manifest["calibration"]["capture_sha256"]:
+            raise ValueError(
+                f"{root} calibration capture digest is missing or inconsistent"
+            )
+        return {
+            "hardware_contract_sha256": hardware_contract_sha256(manifest),
+            "calibration_capture_sha256": capture_digest,
+            "calibration_verification_level": manifest["calibration"][
+                "verification_level"
+            ],
+        }
+    return None
 
 
 class OnlineMoments:
@@ -424,6 +437,11 @@ def main() -> None:
     mask14 = np.asarray(mask_values, dtype=bool)
     mask = np.zeros(dim, dtype=bool)
     mask[:min(dim, len(mask14))] = mask14[:dim]
+    if args.action_schema_id == ASYMMETRIC_SCHEMA_ID and mask.any():
+        raise ValueError(
+            "asymmetric25 actions already contain relative wrist transforms and absolute "
+            "hand targets; use --delta-mask none"
+        )
     offsets = np.arange(horizon, dtype=np.int64)
 
     s_mom, a_mom = OnlineMoments(dim), OnlineMoments(dim)
@@ -434,9 +452,17 @@ def main() -> None:
     n_actions = 0
     n_episodes = 0
     roots_meta = []
+    asymmetric_contract = None
     for root in roots:
         if args.action_schema_id is not None:
-            validate_dataset_schema(root, args.action_schema_id)
+            contract = validate_dataset_schema(root, args.action_schema_id)
+            if contract is not None:
+                if asymmetric_contract is None:
+                    asymmetric_contract = contract
+                elif contract != asymmetric_contract:
+                    raise ValueError(
+                        "asymmetric data roots use different hardware or calibration contracts"
+                    )
         check_delta_alignment(root, mask, strict=args.strict_align)
         eps, r_states, r_actions = process_root(
             root, dim=dim, offsets=offsets, mask=mask, dtype=dtype,
@@ -478,6 +504,8 @@ def main() -> None:
         }
         if args.action_schema_id is not None:
             result["metadata"]["action_schema_id"] = args.action_schema_id
+        if asymmetric_contract is not None:
+            result["metadata"].update(asymmetric_contract)
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)

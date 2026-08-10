@@ -11,9 +11,12 @@ from torchvision.transforms import functional as F
 
 from world_action_model.transforms.wa_transforms import WATransforms
 from world_action_model.ego_action_schema import (
+    CANONICAL_OPEN_FRACTION_SEMANTICS,
+    convert_hand_status_semantics,
     dual_eef_delta_to_action,
     dual_eef_pose_to_state,
 )
+from world_action_model.asymmetric_action_schema import ASYMMETRIC_SCHEMA_ID
 
 
 @TRANSFORMS.register
@@ -39,8 +42,11 @@ class WALeRobotTransformsPretrain(WATransforms):
         state_key="observation.state",
         action_key="action",
         ego_dual_eef_cfg=None,
+        ego_grip_semantics=None,
         require_exact_effective_dim=False,
         expected_action_schema_id=None,
+        expected_hardware_contract_sha256=None,
+        expected_calibration_capture_sha256=None,
         ego_grip_proxy_weight=0.25,
         task_key="task",
         emit_action_denorm_scale=False,
@@ -118,10 +124,33 @@ class WALeRobotTransformsPretrain(WATransforms):
         self.ego_dual_eef_cfg = (
             None if ego_dual_eef_cfg is None else dict(ego_dual_eef_cfg)
         )
+        self.ego_grip_semantics = (
+            None if ego_grip_semantics is None else str(ego_grip_semantics)
+        )
         self.require_exact_effective_dim = bool(require_exact_effective_dim)
         self.expected_action_schema_id = (
             None if expected_action_schema_id is None else str(expected_action_schema_id)
         )
+        self.expected_hardware_contract_sha256 = (
+            None
+            if expected_hardware_contract_sha256 is None
+            else str(expected_hardware_contract_sha256)
+        )
+        self.expected_calibration_capture_sha256 = (
+            None
+            if expected_calibration_capture_sha256 is None
+            else str(expected_calibration_capture_sha256)
+        )
+        if self.ego_grip_semantics is not None and self.ego_dual_eef_cfg is None:
+            raise ValueError("ego_grip_semantics requires ego_dual_eef_cfg")
+        if (
+            self.ego_dual_eef_cfg is not None
+            and self.expected_action_schema_id == ASYMMETRIC_SCHEMA_ID
+            and self.ego_grip_semantics is None
+        ):
+            raise ValueError(
+                "cross-embodiment asymmetric25 input requires explicit ego_grip_semantics"
+            )
         self.ego_grip_proxy_weight = float(ego_grip_proxy_weight)
         if not 0.0 <= self.ego_grip_proxy_weight <= 1.0:
             raise ValueError("ego_grip_proxy_weight must be in [0, 1]")
@@ -134,6 +163,18 @@ class WALeRobotTransformsPretrain(WATransforms):
                         f"normalization stats {json_path} action_schema_id={schema_id!r}; "
                         f"expected {self.expected_action_schema_id!r}"
                     )
+                if self.expected_hardware_contract_sha256 is not None:
+                    actual = metadata.get("hardware_contract_sha256")
+                    if actual != self.expected_hardware_contract_sha256:
+                        raise ValueError(
+                            f"normalization stats {json_path} hardware contract digest differs"
+                        )
+                if self.expected_calibration_capture_sha256 is not None:
+                    actual = metadata.get("calibration_capture_sha256")
+                    if actual != self.expected_calibration_capture_sha256:
+                        raise ValueError(
+                            f"normalization stats {json_path} calibration capture digest differs"
+                        )
         self.task_key = task_key
         self.emit_action_denorm_scale = bool(emit_action_denorm_scale)
         self.max_prompt_len = int(max_prompt_len)
@@ -379,6 +420,12 @@ class WALeRobotTransformsPretrain(WATransforms):
             pose = np.asarray(data_dict[pose_key], dtype=np.float32)
             delta = np.asarray(data_dict[delta_key], dtype=np.float32)
             hand_status = np.asarray(data_dict[hand_status_key], dtype=np.float32)
+            if self.ego_grip_semantics is not None:
+                hand_status = convert_hand_status_semantics(
+                    hand_status,
+                    source_semantics=self.ego_grip_semantics,
+                    target_semantics=CANONICAL_OPEN_FRACTION_SEMANTICS,
+                )
             chunk_start_offset = int(cfg.get("chunk_start_offset", 0))
             if chunk_start_offset < 0:
                 raise ValueError("ego_dual_eef_cfg.chunk_start_offset must be non-negative")

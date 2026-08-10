@@ -1,0 +1,26 @@
+{
+  "$schema": "../../schemas/asymmetric25_calibration_capture.schema.json",
+  "$comment": "INCOMPLETE TEMPLATE: record measured summaries only; do not embed raw trajectories or images.",
+  "capture_version": "asymmetric25-calibration-capture/v1",
+  "verification_level": "documentation_only",
+  "capture_id": null,
+  "captured_at_utc": null,
+  "operator": null,
+  "source_revision": null,
+  "devices": {
+    "left_rh56dftp_serial": null,
+    "right_omnipicker_serial": null
+  },
+  "measurements": {
+    "hardware": {"verified": false, "method": null, "sample_count": null, "result": null},
+    "wrists": {"verified": false, "method": null, "sample_count": null, "result": null},
+    "wbc": {"verified": false, "method": null, "sample_count": null, "result": null},
+    "timing": {"verified": false, "method": null, "sample_count": null, "result": null},
+    "safety": {"verified": false, "method": null, "sample_count": null, "result": null}
+  },
+  "approval": {
+    "approved": false,
+    "approved_by": null,
+    "approved_at_utc": null
+  }
+}
