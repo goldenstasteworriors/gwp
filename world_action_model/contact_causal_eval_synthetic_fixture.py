@@ -1303,7 +1303,7 @@ def _build_t5_and_runtime(
     root.mkdir(parents=True)
     for episode in SYNTHETIC_EPISODE_IDS:
         torch.save(
-            torch.full((1, 2, 4), float(episode), dtype=torch.float32),
+            torch.full((2, 4096), float(episode), dtype=torch.float32),
             root / f"episode_{episode:06d}.pt",
         )
     runtime = build_robot_runtime_source_receipts_v1(
