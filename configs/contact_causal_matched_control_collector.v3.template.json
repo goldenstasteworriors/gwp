@@ -8,6 +8,7 @@
   "run_id": null,
   "run_nonce": null,
   "output_dir": null,
+  "write_report": false,
   "stable_contract": null,
   "route_local_contract": null,
   "initial_parameter_tensors_sha256": null,

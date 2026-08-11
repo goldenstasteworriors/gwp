@@ -80,6 +80,12 @@ class WAMLeRobotDataset(BaseDataset):
         contact_sidecar_require_reviewed_v1_1: bool = False,
         contact_sidecar_expected_meta_sha256: str | None = None,
         contact_sidecar_expected_episode_sha256: dict[str, str] | None = None,
+        contact_label_origin: str | None = None,
+        contact_human_adjudicated_only: bool = False,
+        action_contact_ground_truth: bool = False,
+        hand_active_contact_ground_truth: bool = False,
+        grip_contact_ground_truth: bool = False,
+        other_proxy_contact_ground_truth: bool = False,
         ego_hand_active_sidecar_dir: str | None = None,
         ego_hand_active_sidecar_pattern: str = "episode_{episode_index:06d}.npz",
         ego_hand_active_sidecar_cache_size: int = 8,
@@ -92,6 +98,7 @@ class WAMLeRobotDataset(BaseDataset):
         verified_training_run_nonce: str | None = None,
         matched_control_identity: bool = False,
         matched_control_dataset_id: str | None = None,
+        matched_control_dataset_info_sha256: str | None = None,
         production_episode_filter_receipt: dict | None = None,
         production_episode_filter_receipt_sha256: str | None = None,
         meta_name: str | None = None,
@@ -196,6 +203,22 @@ class WAMLeRobotDataset(BaseDataset):
         self.contact_sidecar_expected_episode_sha256 = dict(
             contact_sidecar_expected_episode_sha256 or {}
         )
+        self.contact_label_origin = contact_label_origin
+        self.contact_human_adjudicated_only = bool(contact_human_adjudicated_only)
+        proxy_flags = {
+            "action": action_contact_ground_truth,
+            "hand_active": hand_active_contact_ground_truth,
+            "grip": grip_contact_ground_truth,
+            "other": other_proxy_contact_ground_truth,
+        }
+        if self.contact_human_adjudicated_only and (
+            self.contact_label_origin
+            not in {"human_adjudicated", "human_adjudicated_robot_native"}
+            or any(value is not False for value in proxy_flags.values())
+        ):
+            raise ValueError(
+                "human-adjudicated contact forbids action/hand_active/grip/proxy ground truth"
+            )
         self.ego_hand_active_sidecar_dir = (
             None
             if ego_hand_active_sidecar_dir is None
@@ -222,6 +245,10 @@ class WAMLeRobotDataset(BaseDataset):
         )
         if not self.matched_control_dataset_id:
             self.matched_control_dataset_id = None
+        self.matched_control_dataset_info_sha256 = (
+            None if matched_control_dataset_info_sha256 is None
+            else str(matched_control_dataset_info_sha256)
+        )
         if self.matched_control_identity:
             info_path = os.path.join(self.data_path, "meta", "info.json")
             info_receipt = next(
@@ -233,9 +260,10 @@ class WAMLeRobotDataset(BaseDataset):
                 None,
             )
             try:
-                info_bytes, _, _ = read_verified_bytes(
+                info_bytes, info_sha256, _ = read_verified_bytes(
                     info_path,
-                    expected_sha256=(info_receipt or {}).get("sha256"),
+                    expected_sha256=(info_receipt or {}).get("sha256")
+                    or self.matched_control_dataset_info_sha256,
                     expected_stat=(info_receipt or {}).get("stat"),
                 )
                 info_payload = strict_json_loads(info_bytes, name="LeRobot info")
@@ -244,6 +272,15 @@ class WAMLeRobotDataset(BaseDataset):
                     "matched-control identity cannot verify dataset metadata"
                 ) from exc
             metadata_value = info_payload.get("dataset_id")
+            if (
+                not isinstance(self.matched_control_dataset_info_sha256, str)
+                or not _SHA256_RE.fullmatch(self.matched_control_dataset_info_sha256)
+                or self.matched_control_dataset_info_sha256 == "0" * 64
+                or info_sha256 != self.matched_control_dataset_info_sha256
+            ):
+                raise ValueError(
+                    "matched-control identity requires preflight-bound dataset info SHA"
+                )
             metadata_dataset_id = (
                 metadata_value.strip() if isinstance(metadata_value, str) else ""
             )
@@ -290,9 +327,12 @@ class WAMLeRobotDataset(BaseDataset):
             if (
                 not isinstance(self.contact_sidecar_expected_meta_sha256, str)
                 or not _SHA256_RE.fullmatch(self.contact_sidecar_expected_meta_sha256)
+                or self.contact_sidecar_expected_meta_sha256 == "0" * 64
                 or not self.contact_sidecar_expected_episode_sha256
                 or any(
-                    not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
+                    not isinstance(value, str)
+                    or not _SHA256_RE.fullmatch(value)
+                    or value == "0" * 64
                     for value in self.contact_sidecar_expected_episode_sha256.values()
                 )
             ):
@@ -323,6 +363,12 @@ class WAMLeRobotDataset(BaseDataset):
                 }
             ):
                 raise ValueError("contact sidecar meta is not reviewed contact_segment_v1_1")
+            if self.contact_human_adjudicated_only and (
+                meta["annotation_contract"]["label_origin"] != "human_adjudicated"
+                or meta["annotation_contract"]["automatic_or_proposal_ground_truth"]
+                is not False
+            ):
+                raise ValueError("reviewed contact sidecar contains proxy-derived labels")
         if self.ego_hand_active_sidecar_dir is not None:
             if (
                 not self.ego_hand_active_sidecar_strict

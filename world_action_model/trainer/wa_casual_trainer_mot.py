@@ -304,6 +304,9 @@ class CasualWATrainerMoT(Trainer):
         self.ego_contact_precursor_objective = model_config.get(
             "ego_contact_precursor_objective"
         )
+        self.ego_contact_precursor_evidence_base = model_config.get(
+            "ego_contact_precursor_evidence_base"
+        )
         transformer_config = model_config.get("transformer", {})
         self.contact_causal_route = str(
             model_config.get(
@@ -458,8 +461,12 @@ class CasualWATrainerMoT(Trainer):
                 != PREFLIGHT_RECEIPT_VERSION
                 or causal_sha256_json(self.causal_preflight_receipt)
                 != self.causal_preflight_receipt_sha256
-                or self.causal_preflight_receipt.get("causal_route_id")
-                != self.production_causal_route_id
+                or self.causal_preflight_receipt.get("route_set")
+                != [
+                    "aux_only_direct_q12",
+                    "equal_bit_unstructured_hard_st",
+                    "hard_st_semantic",
+                ]
                 or self.causal_preflight_receipt.get("training_data_receipt_sha256")
                 != self.causal_training_data_receipt_sha256
                 or not isinstance(self.causal_checkpoint_receipt_base, dict)
@@ -826,6 +833,23 @@ class CasualWATrainerMoT(Trainer):
             self.ego_contact_precursor_parameter_partition = (
                 freeze_precursor_action_path(transformer)
             )
+            from world_action_model.contact_causal_production import (
+                model_parameter_and_buffer_digests,
+                named_tensor_digest,
+            )
+
+            self._ego_precursor_root_parameter_sha256 = (
+                model_parameter_and_buffer_digests(transformer)[0]
+            )
+            named_parameters = dict(transformer.named_parameters())
+            self._ego_precursor_frozen_root_sha256 = named_tensor_digest(
+                [
+                    (name, named_parameters[name])
+                    for name in self.ego_contact_precursor_parameter_partition[
+                        "frozen_parameter_names"
+                    ]
+                ]
+            )
         if model_config.get("enable_gradient_checkpointing", True):
             transformer.enable_gradient_checkpointing()
 
@@ -835,7 +859,9 @@ class CasualWATrainerMoT(Trainer):
         self.load_checkpoint(checkpoint, list(model.values()), strict=strict)
         if self.production_matrix_id:
             from world_action_model.contact_causal_production import (
+                DIRECT_UNUSED_PARAMETER_NAMES,
                 model_parameter_and_buffer_digests,
+                named_tensor_digest,
             )
 
             parameter_sha256, _ = model_parameter_and_buffer_digests(transformer)
@@ -849,6 +875,32 @@ class CasualWATrainerMoT(Trainer):
                 ).get("step0_parameter_tensor_sha256")
             ):
                 raise ValueError("causal Stage2 initial tensors differ from the precursor")
+            self._causal_seen_gradient_names = set()
+            for parameter_name, parameter in transformer.named_parameters():
+                if parameter.requires_grad:
+                    parameter.register_hook(
+                        lambda gradient, name=parameter_name: (
+                            self._causal_seen_gradient_names.add(name) or gradient
+                        )
+                    )
+            expected_unused = (
+                list(DIRECT_UNUSED_PARAMETER_NAMES)
+                if self.production_causal_route_id == "aux_only_direct_q12"
+                else []
+            )
+            actual_unused = sorted(
+                name
+                for name, _ in transformer.named_parameters()
+                if name.startswith("contact_condition_encoder.")
+            )
+            if expected_unused and actual_unused != expected_unused:
+                raise ValueError("causal direct model-derived unused set differs")
+            self._causal_unused_step0_sha256 = named_tensor_digest(
+                [
+                    (name, dict(transformer.named_parameters())[name])
+                    for name in expected_unused
+                ]
+            )
         model = ModuleDict(model)
         model.train()
         return model
@@ -990,6 +1042,7 @@ class CasualWATrainerMoT(Trainer):
             write_json_exclusive,
         )
         from world_action_model.contact_causal_production import (
+            build_live_training_state_receipts,
             build_checkpoint_training_receipt_v5,
             model_parameter_and_buffer_digests,
             write_canonical_json_exclusive,
@@ -1010,6 +1063,18 @@ class CasualWATrainerMoT(Trainer):
         parameter_sha256, buffer_sha256 = model_parameter_and_buffer_digests(
             transformer
         )
+        topology, reachability = build_live_training_state_receipts(
+            model=transformer,
+            optimizers=self.optimizers,
+            schedulers=self.schedulers,
+            route=self.production_causal_route_id,
+            checkpoint_step=step,
+            step0_parameter_tensor_sha256=self._causal_initial_parameter_sha256,
+            observed_gradient_parameter_names=(
+                [] if step == 0 else sorted(self._causal_seen_gradient_names)
+            ),
+            unused_step0_tensor_sha256=self._causal_unused_step0_sha256,
+        )
         if step == 0:
             parent_sha256 = self.causal_precursor_binding["parameter_tensor_sha256"]
         else:
@@ -1028,6 +1093,8 @@ class CasualWATrainerMoT(Trainer):
             config_sha256=config_sha256,
             whole_bundle_sha256=bundle_manifest["bundle_sha256"],
             parent_checkpoint_weight_sha256=parent_sha256,
+            parameter_topology=topology,
+            gradient_reachability_receipt=reachability,
         )
         write_canonical_json_exclusive(
             artifact_dir / "checkpoint_training_receipt.json", receipt
@@ -1083,6 +1150,48 @@ class CasualWATrainerMoT(Trainer):
         if should_save and is_production_evidence_step:
             self._verify_production_training_source()
         super().save_checkpoint_step()
+        if (
+            should_save
+            and self.ego_contact_precursor_objective is not None
+            and self.cur_step
+            == self.ego_contact_precursor_objective["fixed_save_step"]
+        ):
+            output_dir = Path(self.model_dir) / (
+                f"checkpoint_epoch_{self.cur_epoch}_step_{self.cur_step}"
+            )
+            self.accelerator.wait_for_everyone()
+            if self.is_main_process:
+                from world_action_model.contact_causal_production import (
+                    write_canonical_json_exclusive,
+                )
+                from world_action_model.contact_ego_causal_precursor import (
+                    build_live_precursor_receipt,
+                )
+
+                receipt, bundle_manifest = build_live_precursor_receipt(
+                    model=self.accelerator.unwrap_model(self.models[0])[
+                        "transformer"
+                    ],
+                    checkpoint_dir=output_dir / "transformer",
+                    parameter_partition=self.ego_contact_precursor_parameter_partition,
+                    objective_contract=self.ego_contact_precursor_objective,
+                    evidence_base=self.ego_contact_precursor_evidence_base,
+                    root_parameter_tensor_sha256=(
+                        self._ego_precursor_root_parameter_sha256
+                    ),
+                    frozen_root_tensor_sha256=(
+                        self._ego_precursor_frozen_root_sha256
+                    ),
+                )
+                write_canonical_json_exclusive(
+                    output_dir / "ego_contact_causal_precursor_bundle_manifest.json",
+                    bundle_manifest,
+                )
+                write_canonical_json_exclusive(
+                    output_dir / "ego_contact_causal_precursor_receipt.json",
+                    receipt,
+                )
+            self.accelerator.wait_for_everyone()
         if should_save and is_production_evidence_step:
             output_dir = self._production_checkpoint_dir(self.cur_step)
             self.accelerator.wait_for_everyone()

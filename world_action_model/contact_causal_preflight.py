@@ -8,6 +8,7 @@ matrix and never auto-detects or translates a legacy gate.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
@@ -33,7 +34,7 @@ from world_action_model.contact_causal_production import (
     validate_dataset_supervision_coverage,
     validate_deadline,
 )
-from world_action_model.verified_io import hash_verified_regular_file
+from world_action_model.verified_io import hash_verified_regular_file, read_verified_bytes
 
 
 REQUIRED_GATE_FLAGS = (
@@ -93,7 +94,12 @@ def _exact(value: object, keys: set[str], name: str) -> dict[str, Any]:
 
 
 def _sha(value: object, name: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or value == "0" * 64
+        or any(c not in "0123456789abcdef" for c in value)
+    ):
         raise CausalProductionError(f"{name} must be lowercase SHA-256")
     return value
 
@@ -106,6 +112,18 @@ def _identity(value: object, name: str) -> str:
     ):
         raise CausalProductionError(f"{name} must be a 16-128 character identity")
     return value
+
+
+def _reviewed_utc(value: object, name: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise CausalProductionError(f"{name} must be canonical UTC")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise CausalProductionError(f"{name} is invalid") from exc
+    if parsed.utcoffset() != timezone.utc.utcoffset(None):
+        raise CausalProductionError(f"{name} must be UTC")
+    return parsed
 
 
 def _validate_identity_maps(gate: Mapping[str, Any]) -> None:
@@ -144,7 +162,9 @@ def validate_robot_gate_review_v2(value: object, *, gate: Mapping[str, Any]) -> 
             "acceptance_run_id",
             "acceptance_run_nonce",
             "evidence_valid_until_utc",
+            "reviewed_at_utc",
             "reviewed_gate_contract_sha256",
+            "reviewed_code_blob_sha256",
             "current_head_source_tree_sha256",
             "hardware_contract_sha256",
             "dataset_tree_sha256",
@@ -200,9 +220,27 @@ def validate_robot_gate_review_v2(value: object, *, gate: Mapping[str, Any]) -> 
     gate_ids = set(gate["training_run_id_by_route"].values()) | set(
         gate["training_run_nonce_by_route"].values()
     )
+    gate_ids.add(gate["reviewed_by"])
     if len(set(review_ids)) != 4 or set(review_ids) & gate_ids:
         raise CausalProductionError("gate reviewer identity namespace overlaps training")
     validate_deadline(review["evidence_valid_until_utc"])
+    reviewed_at = _reviewed_utc(review["reviewed_at_utc"], "gate reviewed_at_utc")
+    expiry = _reviewed_utc(
+        review["evidence_valid_until_utc"], "gate evidence_valid_until_utc"
+    )
+    if reviewed_at > datetime.now(timezone.utc) or reviewed_at >= expiry:
+        raise CausalProductionError("gate reviewer timestamp is future/after expiry")
+    code_blobs = review["reviewed_code_blob_sha256"]
+    from world_action_model.contact_causal_gate_bootstrap import (
+        ROBOT_BOOTSTRAP_CODE_PATHS,
+    )
+
+    if not isinstance(code_blobs, dict) or set(code_blobs) != set(
+        ROBOT_BOOTSTRAP_CODE_PATHS
+    ):
+        raise CausalProductionError("causal Robot review code blob schema differs")
+    for path, digest in code_blobs.items():
+        _sha(digest, f"causal Robot reviewed code blob {path}")
     return review
 
 
@@ -257,9 +295,20 @@ def validate_robot_gate_v3(
         raise CausalProductionError(f"causal Robot gate flags are not explicitly true: {failed}")
     validate_deadline(gate["evidence_valid_until_utc"])
     _identity(gate["reviewed_by"], "causal Robot gate reviewer")
-    if not isinstance(gate["reviewed_at_utc"], str) or not gate["reviewed_at_utc"].endswith("Z"):
-        raise CausalProductionError("causal Robot reviewed_at_utc must be UTC")
+    gate_reviewed_at = _reviewed_utc(
+        gate["reviewed_at_utc"], "causal Robot reviewed_at_utc"
+    )
+    gate_expiry = _reviewed_utc(
+        gate["evidence_valid_until_utc"], "causal Robot evidence_valid_until_utc"
+    )
+    if gate_reviewed_at > datetime.now(timezone.utc) or gate_reviewed_at >= gate_expiry:
+        raise CausalProductionError("causal Robot gate timestamp is future/after expiry")
     _validate_identity_maps(gate)
+    route_identities = set(gate["training_run_id_by_route"].values()) | set(
+        gate["training_run_nonce_by_route"].values()
+    )
+    if gate["reviewed_by"] in route_identities:
+        raise CausalProductionError("causal Robot gate reviewer overlaps route identity")
     fingerprints = _exact(
         gate["artifact_fingerprints"], set(FINGERPRINT_KEYS), "causal Robot fingerprints"
     )
@@ -515,7 +564,6 @@ def build_preflight_receipt_v2(
         "status": "artifact_consistency_passed_with_explicit_external_gates",
         "matrix_schema_version": MATRIX_SCHEMA_VERSION,
         "matrix_id": MATRIX_ID,
-        "causal_route_id": route,
         "route_set": list(CAUSAL_ROUTES),
         "precursor_id": PRECURSOR_ID,
         "git_commit": current_head,
@@ -555,7 +603,6 @@ def validate_preflight_receipt_v2(
             "status",
             "matrix_schema_version",
             "matrix_id",
-            "causal_route_id",
             "route_set",
             "precursor_id",
             "git_commit",
@@ -576,7 +623,6 @@ def validate_preflight_receipt_v2(
     )
     import re
 
-    route = ensure_exact_causal_route(receipt["causal_route_id"])
     if (
         receipt["receipt_version"] != PREFLIGHT_RECEIPT_VERSION
         or receipt["status"]
@@ -595,7 +641,6 @@ def validate_preflight_receipt_v2(
         or receipt["benefit_claimed"] is not False
     ):
         raise CausalProductionError("causal Robot preflight identity differs")
-    del route
     for name in (
         "current_head_source_tree_sha256",
         "training_gate_sha256",
@@ -654,13 +699,40 @@ def verify_gate_fingerprint_paths(
             raise CausalProductionError(f"gate artifact bytes changed: {name}")
 
 
-def load_robot_gate_from_environment() -> tuple[dict[str, Any], str, Path]:
+def load_robot_gate_from_environment(
+    *, bootstrap_receipt: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], str, Path]:
     path_text = os.environ.get("GWP_CONTACT_CAUSAL_TRAINING_GATE", "").strip()
     if not path_text:
         raise CausalProductionError("causal Robot config requires an explicit v3 gate path")
     path = Path(path_text).expanduser().absolute()
-    gate, digest, _ = strict_json_file(path, name="causal Robot training gate")
+    gate, digest, payload = strict_json_file(path, name="causal Robot training gate")
+    if bootstrap_receipt is not None and (
+        bootstrap_receipt.get("bootstrap_version")
+        != "contact-asym25-causal-stdlib-bootstrap/v1"
+        or bootstrap_receipt.get("gate_bytes") != payload
+        or bootstrap_receipt.get("gate_sha256") != digest
+        or bootstrap_receipt.get("gate") != gate
+        or bootstrap_receipt.get("route")
+        != os.environ.get("GWP_CONTACT_CAUSAL_ROUTE", "").strip()
+    ):
+        raise CausalProductionError(
+            "heavy Robot preflight did not replay the stdlib-verified gate bytes"
+        )
     validate_robot_gate_v3(gate, gate_path=path, load_external_review=True)
+    if bootstrap_receipt is not None:
+        review_path = Path(bootstrap_receipt.get("review_path", ""))
+        try:
+            review_bytes, review_sha, _ = read_verified_bytes(
+                review_path, expected_sha256=bootstrap_receipt["review_sha256"]
+            )
+        except (OSError, ValueError) as exc:
+            raise CausalProductionError("cannot replay Robot reviewer acceptance bytes") from exc
+        if (
+            review_bytes != bootstrap_receipt.get("review_bytes")
+            or review_sha != bootstrap_receipt.get("review_sha256")
+        ):
+            raise CausalProductionError("Robot reviewer acceptance changed after bootstrap")
     route = ensure_exact_causal_route(os.environ.get("GWP_CONTACT_CAUSAL_ROUTE", "").strip())
     if os.environ.get("GWP_CONTACT_CAUSAL_MATRIX_ID", "").strip() != MATRIX_ID:
         raise CausalProductionError("runtime causal matrix ID differs")
@@ -674,3 +746,100 @@ def load_robot_gate_from_environment() -> tuple[dict[str, Any], str, Path]:
     ):
         raise CausalProductionError("runtime run identity differs from causal Robot gate")
     return gate, digest, path
+
+
+def replay_hardened_contact_asym25_v2_from_environment(
+    *, causal_gate: Mapping[str, Any], causal_gate_sha256: str, route: str,
+) -> dict[str, Any]:
+    """Compose v3 admission with the complete, unchanged hardened v2 replay.
+
+    The legacy module remains byte-identical.  This adapter calls its public
+    validator explicitly so the new causal route selector is never mistaken
+    for a legacy matched-control alias.
+    """
+
+    from world_action_model.contact_asym25_preflight import (
+        ContactAsym25PreflightError,
+        validate_contact_asym25_training_preflight,
+    )
+
+    required = (
+        "GWP_SONIC_DATA_PATH", "GWP_NORM_STATS_PATH",
+        "GWP_ASYMMETRIC_HARDWARE_MANIFEST",
+        "GWP_ASYMMETRIC_CALIBRATION_CAPTURE", "GWP_CONTACT_SIDECAR_DIR",
+        "GWP_CONTACT_COVERAGE_CSV", "GWP_CONTACT_SEGMENTS_CSV",
+        "GWP_CONTACT_INVENTORY_CSV", "GWP_CONTACT_BUILD_CONFIG",
+        "GWP_CONTACT_SPLIT_MANIFEST", "GWP_CONTACT_ASYM25_TRAINING_GATE",
+    )
+    missing = [name for name in required if not os.environ.get(name, "").strip()]
+    if missing:
+        raise CausalProductionError(
+            f"causal Robot v3 requires hardened v2 source paths: {missing}"
+        )
+    ensure_exact_causal_route(route)
+    seed_text = os.environ.get("GWP_CONTACT_SPLIT_SEED", "").strip()
+    try:
+        split_seed = int(seed_text)
+    except ValueError as exc:
+        raise CausalProductionError("causal Robot split seed is invalid") from exc
+    if str(split_seed) != seed_text or split_seed not in SEEDS:
+        raise CausalProductionError("causal Robot split seed must be exact 6666/7777/8888")
+    run_id = os.environ.get("GWP_CONTACT_TRAINING_RUN_ID", "").strip()
+    run_nonce = os.environ.get("GWP_CONTACT_TRAINING_RUN_NONCE", "").strip()
+    try:
+        receipt = validate_contact_asym25_training_preflight(
+            data_root=os.environ["GWP_SONIC_DATA_PATH"],
+            norm_stats_path=os.environ["GWP_NORM_STATS_PATH"],
+            hardware_manifest_path=os.environ["GWP_ASYMMETRIC_HARDWARE_MANIFEST"],
+            calibration_capture_path=os.environ["GWP_ASYMMETRIC_CALIBRATION_CAPTURE"],
+            sidecar_dir=os.environ["GWP_CONTACT_SIDECAR_DIR"],
+            coverage_csv=os.environ["GWP_CONTACT_COVERAGE_CSV"],
+            segments_csv=os.environ["GWP_CONTACT_SEGMENTS_CSV"],
+            inventory_csv=os.environ["GWP_CONTACT_INVENTORY_CSV"],
+            build_config_path=os.environ["GWP_CONTACT_BUILD_CONFIG"],
+            split_manifest=os.environ["GWP_CONTACT_SPLIT_MANIFEST"],
+            training_gate_path=os.environ["GWP_CONTACT_ASYM25_TRAINING_GATE"],
+            split_seed=split_seed,
+            training_run_id=run_id,
+            training_run_nonce=run_nonce,
+            matched_control_variant_id="hard_st",
+        )
+    except ContactAsym25PreflightError as exc:
+        raise CausalProductionError("hardened contact_asym25 v2 replay failed") from exc
+    fingerprints = causal_gate["artifact_fingerprints"]
+    mirrors = {
+        "dataset_info_sha256": "dataset_info_sha256",
+        "episode_metadata_sha256": "episode_metadata_sha256",
+        "hardware_contract_sha256": "hardware_contract_sha256",
+        "calibration_capture_sha256": "calibration_capture_sha256",
+        "train_only_norm_sha256": "norm_stats_sha256",
+        "sidecar_meta_sha256": "sidecar_meta_sha256",
+        "sidecar_bundle_sha256": "sidecar_bundle_sha256",
+        "split_manifest_sha256": "split_manifest_sha256",
+        "coverage_csv_sha256": "coverage_csv_sha256",
+        "segments_csv_sha256": "segments_csv_sha256",
+        "inventory_csv_sha256": "inventory_csv_sha256",
+        "build_config_sha256": "build_config_sha256",
+    }
+    if any(receipt.get(old_name) != fingerprints[new_name] for new_name, old_name in mirrors.items()):
+        raise CausalProductionError("causal v3 gate differs from hardened v2 replay")
+    dataset_tree = receipt.get("norm_source_tree_receipt")
+    if (
+        not isinstance(dataset_tree, dict)
+        or dataset_tree.get("tree_sha256") != fingerprints["dataset_tree_sha256"]
+    ):
+        raise CausalProductionError("causal v3 dataset tree differs from hardened v2 replay")
+    if (
+        receipt.get("dataset_id") is None
+        or receipt.get("split_seed") != split_seed
+        or receipt.get("training_run_id", run_id) != run_id
+        or receipt.get("training_run_nonce", run_nonce) != run_nonce
+    ):
+        raise CausalProductionError("causal v3 runtime identity differs from hardened v2")
+    return {
+        "receipt_version": "contact-asym25-causal-hardened-source-replay/v1",
+        "causal_gate_sha256": _sha(causal_gate_sha256, "causal Robot gate"),
+        "causal_route_id": route,
+        "legacy_preflight_receipt": receipt,
+        "legacy_preflight_receipt_sha256": sha256_json(receipt),
+    }

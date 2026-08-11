@@ -8,12 +8,18 @@
   "checkpoint_step": null,
   "training_receipt_sha256": null,
   "checkpoint_file_sha256": null,
+  "checkpoint_tensor_manifest_sha256": null,
+  "checkpoint_path_record_only": null,
+  "robot_gate_sha256": null,
+  "gate_reviewer_acceptance_sha256": null,
+  "current_head_source_receipt_sha256": null,
   "reviewer_identity": null,
   "reviewer_attestation_nonce": null,
   "acceptance_run_id": null,
   "acceptance_run_nonce": null,
   "reviewed_current_head_sha256": null,
   "reviewed_source_tree_sha256": null,
+  "reviewed_at_utc": null,
   "evidence_valid_until_utc": null,
   "oracle_used": false
 }

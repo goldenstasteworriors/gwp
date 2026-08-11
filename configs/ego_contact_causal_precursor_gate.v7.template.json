@@ -2,6 +2,8 @@
   "gate_version": "ego-discrete-contact-stage1-training-gate/v7",
   "precursor_id": null,
   "evidence_valid_until_utc": null,
+  "expected_git_commit": null,
+  "training_run_id": null,
   "training_run_nonce": null,
   "human_adjudicated_contact_labels_passed": false,
   "dual_annotation_agreement_passed": false,
@@ -17,6 +19,7 @@
   "fixed_save_step": null,
   "objective_contract": null,
   "artifact_fingerprints": {
+    "runtime_environment_sha256": null,
     "dataset_fingerprint_sha256": null,
     "dataset_source_tree_sha256": null,
     "episode_metadata_sha256": null,
@@ -35,12 +38,14 @@
     "current_head_source_tree_sha256": null,
     "precursor_contract_sha256": null
   },
+  "episode_npz_sha256": null,
   "evidence_reports": {
     "annotation_agreement": {"path": null, "sha256": null},
     "group_metadata_receipt": {"path": null, "sha256": null},
     "t5_independent_replay": {"path": null, "sha256": null},
     "parameter_freeze_review": {"path": null, "sha256": null},
-    "fixed_save_step_registration": {"path": null, "sha256": null}
+    "fixed_save_step_registration": {"path": null, "sha256": null},
+    "external_reviewer_acceptance": {"path": null, "sha256": null}
   },
   "reviewed_by": null,
   "reviewed_at_utc": null,

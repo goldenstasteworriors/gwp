@@ -7,6 +7,7 @@ v2.  The legacy collector remains exact to soft/hard-ST/detached transports.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ from world_action_model.contact_causal_production import (
     ROUTE_LOCAL_JSON_POINTERS,
     SEEDS,
     canonicalize_exact_pointers,
+    build_production_route_receipt,
     ensure_exact_causal_route,
     ensure_not_project_tmp,
     sha256_json,
@@ -40,6 +42,45 @@ from world_action_model.verified_io import read_verified_bytes, strict_json_load
 
 
 TRACE_VERSION = "contact-causal-matched-trace/v3"
+STABLE_CONTRACT_VERSION = "contact-causal-matched-stable-contract/v3"
+STABLE_CONTRACT_KEYS = {
+    "stable_contract_version", "code", "config", "dataset", "hardware",
+    "normalization", "precursor", "labels", "topology", "source_receipts",
+}
+STABLE_RECEIPT_KEYS = {
+    "code": {"git_commit", "source_tree_sha256", "collector_source_sha256"},
+    "config": {
+        "matrix_manifest_sha256", "control_config_sha256",
+        "transform_config_sha256", "optimizer_config_sha256",
+        "scheduler_config_sha256",
+    },
+    "dataset": {
+        "dataset_id", "dataset_tree_sha256", "dataset_info_sha256",
+        "episode_metadata_sha256", "split_manifest_sha256",
+        "ordered_window_manifest_sha256",
+    },
+    "hardware": {
+        "hardware_schema_id", "hardware_contract_sha256",
+        "calibration_capture_sha256",
+    },
+    "normalization": {"train_only_norm_sha256"},
+    "precursor": {
+        "precursor_receipt_bytes_sha256", "precursor_bundle_sha256",
+        "initial_parameter_tensors_sha256",
+    },
+    "labels": {
+        "sidecar_meta_sha256", "sidecar_bundle_sha256",
+        "contact_coverage_sha256", "contact_target_stream_sha256",
+        "contact_mask_stream_sha256", "contact_confidence_stream_sha256",
+        "action_target_stream_sha256", "action_mask_stream_sha256",
+        "prompt_t5_stream_sha256",
+    },
+    "topology": {"world_size", "rank_set"},
+    "source_receipts": {
+        "training_data_receipt_sha256", "preflight_receipt_sha256",
+        "coverage_receipt_sha256", "current_head_source_receipt_sha256",
+    },
+}
 COLLECTOR_CONFIG_KEYS = {
     "collector_version",
     "enabled",
@@ -50,6 +91,7 @@ COLLECTOR_CONFIG_KEYS = {
     "run_id",
     "run_nonce",
     "output_dir",
+    "write_report",
     "stable_contract",
     "route_local_contract",
     "initial_parameter_tensors_sha256",
@@ -66,6 +108,15 @@ COLLECTOR_CONFIG_KEYS = {
     "benefit_claimed",
 }
 REQUIRED_HASHES = (
+    "code_receipt",
+    "config_receipt",
+    "dataset_receipt",
+    "hardware_receipt",
+    "normalization_receipt",
+    "precursor_receipt",
+    "labels_receipt",
+    "topology_receipt",
+    "source_receipts",
     "ordered_sample_ids",
     "raw_batch",
     "augmentation_parameters",
@@ -116,6 +167,12 @@ class CausalMatchedControlCollector:
             or not 0 <= rank < world_size
         ):
             raise CausalProductionError("causal collector runtime topology is invalid")
+        stable_topology = config["stable_contract"]["topology"]
+        if (
+            stable_topology["world_size"] != world_size
+            or stable_topology["rank_set"] != list(range(world_size))
+        ):
+            raise CausalProductionError("collector runtime differs from stable topology receipt")
         self.run_id = config.get("run_id")
         self.run_nonce = config.get("run_nonce")
         self.stable_contract = config.get("stable_contract")
@@ -129,15 +186,18 @@ class CausalMatchedControlCollector:
         self.precursor_receipt_bytes_sha256 = config.get(
             "precursor_receipt_bytes_sha256"
         )
-        output_dir = ensure_not_project_tmp(
-            config.get("output_dir", ""), project_root=project_dir
-        )
-        output_dir.mkdir(parents=True, exist_ok=True)
-        safe = f"{self.run_id}__{self.run_nonce}__{self.route}__seed{self.seed}__rank{rank:05d}.jsonl"
-        self.output_path = output_dir / safe
-        if self.output_path.exists():
-            raise FileExistsError("refusing to mix causal matched-control traces")
-        self.output_path.touch(exist_ok=False)
+        self.write_report = config["write_report"]
+        self.output_path = None
+        self._output_fd = None
+        if self.write_report:
+            output_dir = ensure_not_project_tmp(
+                config.get("output_dir", ""), project_root=project_dir
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            safe = f"{self.run_id}__{self.run_nonce}__{self.route}__seed{self.seed}__rank{rank:05d}.jsonl"
+            self.output_path = output_dir / safe
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            self._output_fd = os.open(self.output_path, flags, 0o600)
         self._micro_steps: dict[int, int] = {}
 
     @staticmethod
@@ -172,6 +232,12 @@ class CausalMatchedControlCollector:
         raw_hashes = batch_dict.get(SAMPLE_RAW_HASH_KEY)
         if not isinstance(raw_hashes, (list, tuple)) or not raw_hashes:
             raise CausalProductionError("causal collector batch lacks raw input hashes")
+        if (
+            len(raw_hashes) != len(identities)
+            or len(augmentation) != len(identities)
+            or any(_sha(item, "causal raw batch") != item for item in raw_hashes)
+        ):
+            raise CausalProductionError("causal collector batch trace lengths/hashes differ")
         required_batch = (
             "contact_target",
             "contact_loss_mask",
@@ -223,14 +289,23 @@ class CausalMatchedControlCollector:
                 self.precursor_receipt_bytes_sha256
             ),
         )
-        with self.output_path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False)
-            )
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        if self.write_report:
+            payload = json.dumps(
+                record, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8") + b"\n"
+            offset = 0
+            while offset < len(payload):
+                written = os.write(self._output_fd, payload[offset:])
+                if written <= 0:
+                    raise OSError("short write for causal collector trace")
+                offset += written
+            os.fsync(self._output_fd)
         return record
+
+    def close(self) -> None:
+        if self._output_fd is not None:
+            os.close(self._output_fd)
+            self._output_fd = None
 
 
 def _exact(value: object, keys: set[str], name: str) -> dict[str, Any]:
@@ -240,9 +315,224 @@ def _exact(value: object, keys: set[str], name: str) -> dict[str, Any]:
 
 
 def _sha(value: object, name: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or value == "0" * 64
+        or any(c not in "0123456789abcdef" for c in value)
+    ):
         raise CausalProductionError(f"{name} must be lowercase SHA-256")
     return value
+
+
+def validate_stable_contract_v3(value: object) -> dict[str, Any]:
+    contract = _exact(value, STABLE_CONTRACT_KEYS, "causal collector stable contract")
+    if contract["stable_contract_version"] != STABLE_CONTRACT_VERSION:
+        raise CausalProductionError("causal collector stable contract version differs")
+    for section, keys in STABLE_RECEIPT_KEYS.items():
+        payload = _exact(contract[section], keys, f"stable contract {section}")
+        if section == "dataset":
+            if not isinstance(payload["dataset_id"], str) or not payload["dataset_id"]:
+                raise CausalProductionError("stable dataset identity is missing")
+        elif section == "hardware":
+            if (
+                payload["hardware_schema_id"]
+                != "sonic_g1_rh56dftp6_omnipicker1_v1"
+            ):
+                raise CausalProductionError("stable target-hardware identity differs")
+        elif section == "topology":
+            world = payload["world_size"]
+            ranks = payload["rank_set"]
+            if (
+                isinstance(world, bool) or not isinstance(world, int) or world <= 0
+                or not isinstance(ranks, list) or ranks != list(range(world))
+            ):
+                raise CausalProductionError("stable collector topology differs")
+            continue
+        elif section == "code":
+            import re
+
+            if not isinstance(payload["git_commit"], str) or not re.fullmatch(
+                r"[0-9a-f]{40}", payload["git_commit"]
+            ):
+                raise CausalProductionError("stable code receipt lacks current HEAD")
+        for name, item in payload.items():
+            if name.endswith("_sha256"):
+                _sha(item, f"stable {section} {name}")
+    return contract
+
+
+def stable_receipt_hashes_v3(value: object) -> dict[str, str]:
+    contract = validate_stable_contract_v3(value)
+    return {
+        ("source_receipts" if section == "source_receipts" else f"{section}_receipt"):
+        sha256_json(contract[section])
+        for section in STABLE_RECEIPT_KEYS
+    }
+
+
+def runtime_control_config_receipts_v3(
+    training_config: Mapping[str, Any], *, route: str
+) -> dict[str, str]:
+    """Hash the live route-neutral control, transform, optimizer and scheduler.
+
+    Only the versioned causal-route leaves and evidence objects that are
+    validated independently are removed.  Any future training-control field is
+    therefore stable by default and changes the control digest.
+    """
+
+    route = ensure_exact_causal_route(route)
+    if not isinstance(training_config, Mapping):
+        raise CausalProductionError("collector runtime training config is missing")
+    value = deepcopy(dict(training_config))
+    value.pop("project_dir", None)
+    value.pop("contact_causal_main_integration", None)
+    models = value.get("models")
+    if not isinstance(models, dict):
+        raise CausalProductionError("collector runtime model config is missing")
+    for name in (
+        "causal_training_data_receipt", "causal_preflight_receipt",
+        "causal_checkpoint_receipt_base", "matched_control_collector",
+    ):
+        models.pop(name, None)
+    for name in (
+        "contact_causal_route", "production_causal_route_id",
+    ):
+        if name not in models:
+            raise CausalProductionError(f"collector control lacks route leaf: {name}")
+        models[name] = "__CAUSAL_ROUTE_LOCAL__"
+    transformer = models.get("transformer")
+    if not isinstance(transformer, dict):
+        raise CausalProductionError("collector runtime transformer config is missing")
+    route_leaves = {
+        "contact_causal_route": route,
+        "contact_bottleneck": route != "aux_only_direct_q12",
+        "contact_semantic_bottleneck": route != "aux_only_direct_q12",
+    }
+    for name, expected in route_leaves.items():
+        if transformer.get(name) != expected:
+            raise CausalProductionError(f"collector transformer route leaf differs: {name}")
+        transformer[name] = "__CAUSAL_ROUTE_LOCAL__"
+    required = ("dataloaders", "train", "optimizers", "schedulers", "models")
+    if any(name not in value for name in required):
+        raise CausalProductionError("collector runtime control config is incomplete")
+    control = {name: value[name] for name in sorted(value)}
+    train_loader = value["dataloaders"].get("train")
+    if not isinstance(train_loader, dict) or not isinstance(
+        train_loader.get("transform"), dict
+    ):
+        raise CausalProductionError("collector runtime transform config is missing")
+    return {
+        "control_config_sha256": sha256_json(control),
+        "transform_config_sha256": sha256_json(train_loader["transform"]),
+        "optimizer_config_sha256": sha256_json(value["optimizers"]),
+        "scheduler_config_sha256": sha256_json(value["schedulers"]),
+    }
+
+
+def validate_collector_runtime_bindings_v3(
+    config: Mapping[str, Any], *, training_config: Mapping[str, Any],
+    matrix_manifest_sha256: str, training_data_receipt: Mapping[str, Any],
+    training_data_receipt_sha256: str, preflight_receipt_sha256: str,
+    coverage_receipt_sha256: str, precursor_binding: Mapping[str, Any],
+    sidecar_meta_sha256: str, source_tree_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recompute every stable source section from the admitted live inputs."""
+
+    config = validate_collector_config_v3(config)
+    stable = config["stable_contract"]
+    route = config["causal_route_id"]
+    for name, value in (
+        ("matrix manifest", matrix_manifest_sha256),
+        ("training-data receipt", training_data_receipt_sha256),
+        ("preflight receipt", preflight_receipt_sha256),
+        ("coverage receipt", coverage_receipt_sha256),
+        ("sidecar meta", sidecar_meta_sha256),
+    ):
+        _sha(value, name)
+    source_sha = sha256_json(source_tree_receipt)
+    source_files = source_tree_receipt.get("source_files")
+    if not isinstance(source_files, list):
+        raise CausalProductionError("collector current-HEAD source receipt is incomplete")
+    collector_rows = [
+        row for row in source_files
+        if isinstance(row, dict)
+        and row.get("logical_path")
+        == "world_action_model/contact_causal_matched_control.py"
+    ]
+    if len(collector_rows) != 1:
+        raise CausalProductionError("collector source is absent from current-HEAD receipt")
+    collector_source_sha = collector_rows[0].get("runtime_sha256")
+    _sha(collector_source_sha, "runtime collector source")
+    expected_sections = {
+        "code": {
+            "git_commit": source_tree_receipt.get("git_commit"),
+            "source_tree_sha256": source_sha,
+            "collector_source_sha256": collector_source_sha,
+        },
+        "config": {
+            "matrix_manifest_sha256": matrix_manifest_sha256,
+            **runtime_control_config_receipts_v3(training_config, route=route),
+        },
+        "dataset": {
+            "dataset_id": training_data_receipt.get("dataset_id"),
+            "dataset_tree_sha256": training_data_receipt.get("dataset_tree_sha256"),
+            "dataset_info_sha256": training_data_receipt.get("dataset_info_sha256"),
+            "episode_metadata_sha256": training_data_receipt.get(
+                "episode_metadata_sha256"
+            ),
+            "split_manifest_sha256": training_data_receipt.get(
+                "split_manifest_sha256"
+            ),
+            "ordered_window_manifest_sha256": training_data_receipt.get(
+                "ordered_window_manifest_sha256"
+            ),
+        },
+        "hardware": {
+            "hardware_schema_id": training_data_receipt.get("hardware_schema_id"),
+            "hardware_contract_sha256": training_data_receipt.get(
+                "hardware_contract_sha256"
+            ),
+            "calibration_capture_sha256": training_data_receipt.get(
+                "calibration_capture_sha256"
+            ),
+        },
+        "normalization": {
+            "train_only_norm_sha256": training_data_receipt.get(
+                "train_only_norm_sha256"
+            )
+        },
+        "precursor": {
+            "precursor_receipt_bytes_sha256": precursor_binding.get(
+                "receipt_bytes_sha256"
+            ),
+            "precursor_bundle_sha256": precursor_binding.get("bundle_sha256"),
+            "initial_parameter_tensors_sha256": precursor_binding.get(
+                "parameter_tensor_sha256"
+            ),
+        },
+        "source_receipts": {
+            "training_data_receipt_sha256": training_data_receipt_sha256,
+            "preflight_receipt_sha256": preflight_receipt_sha256,
+            "coverage_receipt_sha256": coverage_receipt_sha256,
+            "current_head_source_receipt_sha256": source_sha,
+        },
+    }
+    for section, expected in expected_sections.items():
+        if stable[section] != expected:
+            raise CausalProductionError(
+                f"collector live {section} receipt differs from stable contract"
+            )
+    label_expected = {
+        "sidecar_meta_sha256": sidecar_meta_sha256,
+        "sidecar_bundle_sha256": training_data_receipt.get(
+            "sidecar_bundle_sha256"
+        ),
+        "contact_coverage_sha256": coverage_receipt_sha256,
+    }
+    if any(stable["labels"].get(name) != value for name, value in label_expected.items()):
+        raise CausalProductionError("collector live label receipts differ")
+    return config
 
 
 def validate_collector_config_v3(value: object) -> dict[str, Any]:
@@ -274,14 +564,20 @@ def validate_collector_config_v3(value: object) -> dict[str, Any]:
         identities.append(item)
     if len(set(identities)) != 2:
         raise CausalProductionError("causal collector run identity/nonce overlap")
-    if not isinstance(config["output_dir"], str) or not config["output_dir"]:
-        raise CausalProductionError("causal collector output directory is missing")
-    if not isinstance(config["stable_contract"], dict) or not config["stable_contract"]:
-        raise CausalProductionError("causal collector stable contract is missing")
+    if not isinstance(config["write_report"], bool):
+        raise CausalProductionError("causal collector write_report must be boolean")
+    if config["write_report"]:
+        if not isinstance(config["output_dir"], str) or not config["output_dir"]:
+            raise CausalProductionError("causal collector output directory is missing")
+    elif config["output_dir"] is not None:
+        raise CausalProductionError("write_report=false requires null output_dir for zero writes")
+    validate_stable_contract_v3(config["stable_contract"])
     if not isinstance(config["route_local_contract"], dict) or not config["route_local_contract"]:
         raise CausalProductionError("causal collector route-local contract is missing")
     if config["route_local_contract"].get("causal_route_id") != route:
         raise CausalProductionError("causal collector route-local contract differs")
+    if config["route_local_contract"] != build_production_route_receipt(route):
+        raise CausalProductionError("causal collector route receipt is not exact")
     for name in (
         "initial_parameter_tensors_sha256",
         "precursor_receipt_bytes_sha256",
@@ -289,6 +585,21 @@ def validate_collector_config_v3(value: object) -> dict[str, Any]:
         "dataset_contact_coverage_receipt_sha256",
     ):
         _sha(config[name], f"causal collector {name}")
+    stable = config["stable_contract"]
+    mirrors = {
+        "initial_parameter_tensors_sha256": stable["precursor"][
+            "initial_parameter_tensors_sha256"
+        ],
+        "precursor_receipt_bytes_sha256": stable["precursor"][
+            "precursor_receipt_bytes_sha256"
+        ],
+        "current_head_source_tree_sha256": stable["code"]["source_tree_sha256"],
+        "dataset_contact_coverage_receipt_sha256": stable["source_receipts"][
+            "coverage_receipt_sha256"
+        ],
+    }
+    if any(config[name] != expected for name, expected in mirrors.items()):
+        raise CausalProductionError("causal collector config/stable receipt mirrors differ")
     for name in (
         "optimizer_parameter_groups",
         "optimizer_step0_state",
@@ -296,6 +607,9 @@ def validate_collector_config_v3(value: object) -> dict[str, Any]:
     ):
         if config[name] is None:
             raise CausalProductionError(f"causal collector {name} is missing")
+    topology = config["stable_contract"]["topology"]
+    if topology["world_size"] <= 0:
+        raise CausalProductionError("causal collector stable topology is invalid")
     return config
 
 
@@ -376,7 +690,10 @@ def build_trace_record(
     ):
         _sha(value, name)
     counts = contact_supervision_count_receipt(contact_loss_mask, contact_confidence)
+    stable_contract = validate_stable_contract_v3(stable_contract)
+    receipt_hashes = stable_receipt_hashes_v3(stable_contract)
     hashes = {
+        **receipt_hashes,
         "ordered_sample_ids": canonical_sha256(ordered_sample_ids),
         "raw_batch": canonical_sha256(raw_batch),
         "augmentation_parameters": canonical_sha256(augmentation_parameters),
@@ -399,7 +716,19 @@ def build_trace_record(
         "scheduler_step0_state": canonical_sha256(scheduler_step0_state),
         "precursor_receipt_bytes": precursor_receipt_bytes_sha256,
     }
-    return {
+    schema_descriptor = {
+        "record_keys": [
+            "record_version", "trace_version", "matrix_schema_version", "matrix_id",
+            "causal_route_id", "seed", "global_step", "micro_step", "rank",
+            "world_size", "run_id", "run_nonce", "stable_contract",
+            "stable_contract_sha256", "stable_receipt_hashes", "route_local_contract",
+            "route_local_contract_sha256", "contact_supervision_counts", "hashes",
+            "trace_schema_sha256", "record_sha256",
+        ],
+        "required_hashes": list(REQUIRED_HASHES),
+        "stable_contract_keys": sorted(STABLE_CONTRACT_KEYS),
+    }
+    record = {
         "record_version": COLLECTOR_VERSION,
         "trace_version": TRACE_VERSION,
         "matrix_schema_version": MATRIX_SCHEMA_VERSION,
@@ -414,11 +743,15 @@ def build_trace_record(
         "run_nonce": run_nonce,
         "stable_contract": dict(stable_contract),
         "stable_contract_sha256": sha256_json(stable_contract),
+        "stable_receipt_hashes": receipt_hashes,
         "route_local_contract": dict(route_local_contract),
         "route_local_contract_sha256": sha256_json(route_local_contract),
         "contact_supervision_counts": counts,
         "hashes": hashes,
+        "trace_schema_sha256": sha256_json(schema_descriptor),
     }
+    record["record_sha256"] = sha256_json(record)
+    return record
 
 
 def validate_trace_record(value: object) -> dict[str, Any]:
@@ -439,10 +772,13 @@ def validate_trace_record(value: object) -> dict[str, Any]:
             "run_nonce",
             "stable_contract",
             "stable_contract_sha256",
+            "stable_receipt_hashes",
             "route_local_contract",
             "route_local_contract_sha256",
             "contact_supervision_counts",
             "hashes",
+            "trace_schema_sha256",
+            "record_sha256",
         },
         "causal matched trace",
     )
@@ -454,6 +790,10 @@ def validate_trace_record(value: object) -> dict[str, Any]:
     ):
         raise CausalProductionError("causal matched trace version/matrix differs")
     ensure_exact_causal_route(record["causal_route_id"])
+    if record["route_local_contract"] != build_production_route_receipt(
+        record["causal_route_id"]
+    ):
+        raise CausalProductionError("causal trace route-local receipt is not exact")
     if record["seed"] not in SEEDS:
         raise CausalProductionError("causal matched trace seed differs")
     for name in ("seed", "global_step", "micro_step", "rank", "world_size"):
@@ -461,15 +801,47 @@ def validate_trace_record(value: object) -> dict[str, Any]:
             raise CausalProductionError(f"causal matched trace {name} is invalid")
     if record["world_size"] <= 0 or not 0 <= record["rank"] < record["world_size"]:
         raise CausalProductionError("causal matched trace topology differs")
-    if sha256_json(record["stable_contract"]) != record["stable_contract_sha256"]:
+    stable = validate_stable_contract_v3(record["stable_contract"])
+    if sha256_json(stable) != record["stable_contract_sha256"]:
         raise CausalProductionError("causal matched stable contract digest differs")
+    receipt_hashes = stable_receipt_hashes_v3(stable)
+    if record["stable_receipt_hashes"] != receipt_hashes:
+        raise CausalProductionError("causal matched stable receipt hashes differ")
     if sha256_json(record["route_local_contract"]) != record["route_local_contract_sha256"]:
         raise CausalProductionError("causal matched route-local digest differs")
     hashes = record["hashes"]
-    if not isinstance(hashes, dict) or list(hashes) != list(REQUIRED_HASHES):
+    if not isinstance(hashes, dict) or set(hashes) != set(REQUIRED_HASHES):
         raise CausalProductionError("causal matched hash schema/order differs")
     for name, digest in hashes.items():
         _sha(digest, f"causal matched hash {name}")
+    if any(hashes[name] != digest for name, digest in receipt_hashes.items()):
+        raise CausalProductionError("causal matched receipt hash was not recomputed")
+    if (
+        hashes["initial_parameter_tensors"]
+        != stable["precursor"]["initial_parameter_tensors_sha256"]
+        or hashes["precursor_receipt_bytes"]
+        != stable["precursor"]["precursor_receipt_bytes_sha256"]
+    ):
+        raise CausalProductionError("causal trace precursor/initial tensor mirrors differ")
+    schema_descriptor = {
+        "record_keys": [
+            "record_version", "trace_version", "matrix_schema_version", "matrix_id",
+            "causal_route_id", "seed", "global_step", "micro_step", "rank",
+            "world_size", "run_id", "run_nonce", "stable_contract",
+            "stable_contract_sha256", "stable_receipt_hashes", "route_local_contract",
+            "route_local_contract_sha256", "contact_supervision_counts", "hashes",
+            "trace_schema_sha256", "record_sha256",
+        ],
+        "required_hashes": list(REQUIRED_HASHES),
+        "stable_contract_keys": sorted(STABLE_CONTRACT_KEYS),
+    }
+    if record["trace_schema_sha256"] != sha256_json(schema_descriptor):
+        raise CausalProductionError("causal matched trace schema hash differs")
+    unsigned = dict(record)
+    claimed_record_sha = unsigned.pop("record_sha256")
+    _sha(claimed_record_sha, "causal matched record")
+    if claimed_record_sha != sha256_json(unsigned):
+        raise CausalProductionError("causal matched record hash differs")
     counts = _exact(
         record["contact_supervision_counts"],
         {
@@ -533,6 +905,28 @@ def compare_causal_records(
                 raise CausalProductionError("collector observed batch/RNG/label/control hashes differ")
             if record["contact_supervision_counts"] != reference["contact_supervision_counts"]:
                 raise CausalProductionError("collector supervision counts differ across routes")
+    stream_bindings = {
+        "contact_target_stream_sha256": "contact_target",
+        "contact_mask_stream_sha256": "contact_loss_mask",
+        "contact_confidence_stream_sha256": "contact_confidence",
+        "action_target_stream_sha256": "action_target",
+        "action_mask_stream_sha256": "action_loss_mask",
+        "prompt_t5_stream_sha256": "prompt_t5",
+    }
+    stable_labels = next(iter(baseline.values()))["stable_contract"]["labels"]
+    for receipt_name, hash_name in stream_bindings.items():
+        replayed = sha256_json(
+            {
+                f"step{key[0]}/micro{key[1]}/rank{key[2]}": baseline[key][
+                    "hashes"
+                ][hash_name]
+                for key in sorted(baseline)
+            }
+        )
+        if stable_labels[receipt_name] != replayed:
+            raise CausalProductionError(
+                f"collector stable label stream was not recomputed: {receipt_name}"
+            )
     topology = {
         record["world_size"] for records in indexed.values() for record in records.values()
     }
@@ -546,7 +940,21 @@ def compare_causal_records(
         f"step{key[0]}/micro{key[1]}/rank{key[2]}": baseline[key]["hashes"]
         for key in sorted(baseline)
     }
-    return {
+    trace_manifest = {
+        route: {
+            f"step{key[0]}/micro{key[1]}/rank{key[2]}":
+            indexed[route][key]["record_sha256"]
+            for key in sorted(indexed[route])
+        }
+        for route in CAUSAL_ROUTES
+    }
+    schema_hashes = {
+        record["trace_schema_sha256"]
+        for records in indexed.values() for record in records.values()
+    }
+    if len(schema_hashes) != 1:
+        raise CausalProductionError("collector trace schema hashes differ")
+    report = {
         "report_version": COLLECTOR_VERSION,
         "status": "passed",
         "matrix_schema_version": MATRIX_SCHEMA_VERSION,
@@ -559,6 +967,8 @@ def compare_causal_records(
         "required_hashes": list(REQUIRED_HASHES),
         "all_hashes_equal_across_routes": True,
         "global_hashes_sha256": sha256_json(global_hashes),
+        "trace_manifest_sha256": sha256_json(trace_manifest),
+        "schema_sha256": next(iter(schema_hashes)),
         "run_id_by_route": {
             route: next(iter({record["run_id"] for record in indexed[route].values()}))
             for route in CAUSAL_ROUTES
@@ -568,6 +978,67 @@ def compare_causal_records(
             for route in CAUSAL_ROUTES
         },
     }
+    report["report_sha256"] = sha256_json(report)
+    return validate_collector_report_v3(report)
+
+
+def validate_collector_report_v3(value: object) -> dict[str, Any]:
+    report = _exact(
+        value,
+        {
+            "report_version", "status", "matrix_schema_version", "matrix_id",
+            "routes", "seed", "matched_record_count", "world_size", "rank_set",
+            "required_hashes", "all_hashes_equal_across_routes",
+            "global_hashes_sha256", "trace_manifest_sha256", "schema_sha256",
+            "run_id_by_route", "run_nonce_by_route", "report_sha256",
+        },
+        "causal collector v3 report",
+    )
+    if (
+        report["report_version"] != COLLECTOR_VERSION
+        or report["status"] != "passed"
+        or report["matrix_schema_version"] != MATRIX_SCHEMA_VERSION
+        or report["matrix_id"] != MATRIX_ID
+        or report["routes"] != list(CAUSAL_ROUTES)
+        or report["required_hashes"] != list(REQUIRED_HASHES)
+        or report["all_hashes_equal_across_routes"] is not True
+        or isinstance(report["seed"], bool) or report["seed"] not in SEEDS
+        or isinstance(report["matched_record_count"], bool)
+        or not isinstance(report["matched_record_count"], int)
+        or report["matched_record_count"] <= 0
+        or isinstance(report["world_size"], bool)
+        or not isinstance(report["world_size"], int) or report["world_size"] <= 0
+        or report["rank_set"] != list(range(report["world_size"]))
+    ):
+        raise CausalProductionError("causal collector v3 report identity differs")
+    for name in (
+        "global_hashes_sha256", "trace_manifest_sha256", "schema_sha256",
+        "report_sha256",
+    ):
+        _sha(report[name], f"causal collector report {name}")
+    for name in ("run_id_by_route", "run_nonce_by_route"):
+        mapping = report[name]
+        if not isinstance(mapping, dict) or list(mapping) != list(CAUSAL_ROUTES):
+            raise CausalProductionError(f"causal collector report {name} differs")
+    identities = list(report["run_id_by_route"].values()) + list(
+        report["run_nonce_by_route"].values()
+    )
+    import re
+
+    if (
+        len(set(identities)) != len(identities)
+        or any(
+            not isinstance(item, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}", item)
+            for item in identities
+        )
+    ):
+        raise CausalProductionError("causal collector report identities overlap")
+    unsigned = dict(report)
+    claimed = unsigned.pop("report_sha256")
+    if claimed != sha256_json(unsigned):
+        raise CausalProductionError("causal collector report hash differs")
+    return report
 
 
 def load_trace_jsonl(path: str | Path, *, route: str) -> list[dict[str, Any]]:
@@ -621,3 +1092,128 @@ def write_trace_jsonl_exclusive(
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def build_synthetic_stable_contract_v3(*, world_size: int = 1) -> dict[str, Any]:
+    """Build typed non-production inputs for formal CPU-only collector tests."""
+
+    if isinstance(world_size, bool) or not isinstance(world_size, int) or world_size <= 0:
+        raise CausalProductionError("synthetic collector world size is invalid")
+
+    def digest(label: str) -> str:
+        import hashlib
+
+        return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+    contract = {
+        "stable_contract_version": STABLE_CONTRACT_VERSION,
+        "code": {
+            "git_commit": "1" * 40,
+            "source_tree_sha256": digest("source-tree"),
+            "collector_source_sha256": digest("collector-source"),
+        },
+        "config": {
+            "matrix_manifest_sha256": digest("matrix"),
+            "control_config_sha256": digest("control"),
+            "transform_config_sha256": digest("transform"),
+            "optimizer_config_sha256": digest("optimizer"),
+            "scheduler_config_sha256": digest("scheduler"),
+        },
+        "dataset": {
+            "dataset_id": "synthetic-reviewed-target-hardware-dataset",
+            "dataset_tree_sha256": digest("dataset-tree"),
+            "dataset_info_sha256": digest("dataset-info"),
+            "episode_metadata_sha256": digest("episodes"),
+            "split_manifest_sha256": digest("split"),
+            "ordered_window_manifest_sha256": digest("windows"),
+        },
+        "hardware": {
+            "hardware_schema_id": "sonic_g1_rh56dftp6_omnipicker1_v1",
+            "hardware_contract_sha256": digest("hardware"),
+            "calibration_capture_sha256": digest("capture"),
+        },
+        "normalization": {"train_only_norm_sha256": digest("norm")},
+        "precursor": {
+            "precursor_receipt_bytes_sha256": digest("precursor-receipt"),
+            "precursor_bundle_sha256": digest("precursor-bundle"),
+            "initial_parameter_tensors_sha256": digest("initial-parameters"),
+        },
+        "labels": {
+            "sidecar_meta_sha256": digest("sidecar-meta"),
+            "sidecar_bundle_sha256": digest("sidecar-bundle"),
+            "contact_coverage_sha256": digest("coverage"),
+            "contact_target_stream_sha256": digest("contact-target"),
+            "contact_mask_stream_sha256": digest("contact-mask"),
+            "contact_confidence_stream_sha256": digest("contact-confidence"),
+            "action_target_stream_sha256": digest("action-target"),
+            "action_mask_stream_sha256": digest("action-mask"),
+            "prompt_t5_stream_sha256": digest("prompt-t5"),
+        },
+        "topology": {"world_size": world_size, "rank_set": list(range(world_size))},
+        "source_receipts": {
+            "training_data_receipt_sha256": digest("training-data"),
+            "preflight_receipt_sha256": digest("preflight"),
+            "coverage_receipt_sha256": digest("coverage-receipt"),
+            "current_head_source_receipt_sha256": digest("head-source"),
+        },
+    }
+    return validate_stable_contract_v3(contract)
+
+
+def collector_cpu_recording_acceptance_helper(project_dir: str | Path) -> dict[str, Any]:
+    """Instantiate the real collector and record a CPU batch with zero writes."""
+
+    import hashlib
+
+    stable = build_synthetic_stable_contract_v3()
+    route = CAUSAL_ROUTES[0]
+    config = {
+        "collector_version": COLLECTOR_VERSION, "enabled": True,
+        "matrix_schema_version": MATRIX_SCHEMA_VERSION, "matrix_id": MATRIX_ID,
+        "causal_route_id": route, "seed": SEEDS[0],
+        "run_id": "synthetic-collector-run-id-v3",
+        "run_nonce": "synthetic-collector-run-nonce-v3",
+        "output_dir": None, "write_report": False,
+        "stable_contract": stable,
+        "route_local_contract": build_production_route_receipt(route),
+        "initial_parameter_tensors_sha256": stable["precursor"][
+            "initial_parameter_tensors_sha256"
+        ],
+        "optimizer_parameter_groups": {"names": ["all"]},
+        "optimizer_step0_state": {}, "scheduler_step0_state": {"step": 0},
+        "precursor_receipt_bytes_sha256": stable["precursor"][
+            "precursor_receipt_bytes_sha256"
+        ],
+        "current_head_source_tree_sha256": stable["code"]["source_tree_sha256"],
+        "dataset_contact_coverage_receipt_sha256": stable["source_receipts"][
+            "coverage_receipt_sha256"
+        ],
+        "all_hashes_equal_across_routes": False,
+        "production_data_admission": False, "allow_5b_training": False,
+        "allow_server_training": False, "benefit_claimed": False,
+    }
+    collector = CausalMatchedControlCollector(
+        config, rank=0, world_size=1, trainer_seed=SEEDS[0], project_dir=project_dir
+    )
+    raw = hashlib.sha256(b"synthetic-raw-batch").hexdigest()
+    batch = {
+        SAMPLE_IDENTITY_KEY: [json.dumps({"episode": 1, "frame": 2})],
+        SAMPLE_AUGMENTATION_KEY: [json.dumps({"crop": [0, 0, 1, 1]})],
+        SAMPLE_RAW_HASH_KEY: [raw],
+        "contact_target": torch.zeros(1, 1, 22),
+        "contact_loss_mask": torch.zeros(1, 1, 22),
+        "contact_confidence": torch.zeros(1, 1, 22),
+        "action": torch.zeros(1, 2, 4),
+        "action_loss_mask": torch.ones(1, 2),
+        "prompt_embeds": torch.zeros(1, 2, 3),
+    }
+    record = collector.record(
+        global_step=0, batch_dict=batch,
+        visual_timestep=torch.tensor([10]), action_timestep=torch.tensor([20]),
+        visual_noise=torch.zeros(1, 1), action_noise=torch.zeros(1, 2, 4),
+    )
+    collector.close()
+    validate_trace_record(record)
+    if collector.output_path is not None:
+        raise AssertionError("write_report=false performed an output allocation")
+    return record

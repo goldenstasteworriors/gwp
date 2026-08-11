@@ -4,12 +4,23 @@ This config performs only the new v3/v1 bootstrap.  It does not import the
 historical contact mechanism production config and it forbids legacy aliases.
 """
 
-import copy
 import os
-from pathlib import Path
+
+from world_action_model.contact_causal_gate_bootstrap import (
+    bootstrap_robot_v3_stdlib,
+)
+
+
+# Reject false/stale/external-review-mismatched v3 gates before any module that
+# can transitively import NumPy or Torch.
+_stdlib_bootstrap = bootstrap_robot_v3_stdlib()
+
+import copy  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 from world_action_model.contact_causal_preflight import (
     load_robot_gate_from_environment,
+    replay_hardened_contact_asym25_v2_from_environment,
     validate_preflight_receipt_v2,
     validate_training_data_receipt_v2,
 )
@@ -31,6 +42,10 @@ from world_action_model.contact_ego_causal_precursor import (
 )
 from world_action_model.contact_causal_matched_control import (
     validate_collector_config_v3,
+    validate_collector_runtime_bindings_v3,
+)
+from world_action_model.contact_causal_coverage import (
+    validate_recomputed_dataset_supervision_coverage,
 )
 from world_action_model.contact_transition_schema import (
     SEGMENT_SCHEMA_VERSION,
@@ -38,8 +53,14 @@ from world_action_model.contact_transition_schema import (
 )
 
 
-gate, gate_sha256, gate_path = load_robot_gate_from_environment()
+gate, gate_sha256, gate_path = load_robot_gate_from_environment(
+    bootstrap_receipt=_stdlib_bootstrap
+)
 route = ensure_exact_causal_route(os.environ["GWP_CONTACT_CAUSAL_ROUTE"].strip())
+hardened_source_replay = replay_hardened_contact_asym25_v2_from_environment(
+    causal_gate=gate, causal_gate_sha256=gate_sha256, route=route
+)
+_hardened_receipt = hardened_source_replay["legacy_preflight_receipt"]
 
 
 def _required_json_environment(name, description):
@@ -86,6 +107,19 @@ coverage_path, coverage_receipt, coverage_sha256, _ = _required_json_environment
     "Robot dataset contact coverage receipt",
 )
 validate_dataset_supervision_coverage(coverage_receipt)
+validate_recomputed_dataset_supervision_coverage(
+    coverage_receipt,
+    sidecar_dir=os.environ["GWP_CONTACT_SIDECAR_DIR"],
+    expected_meta_sha256=gate["artifact_fingerprints"]["sidecar_meta_sha256"],
+    expected_episode_sha256=_hardened_receipt["episode_npz_sha256"],
+    dataset_id=_hardened_receipt["dataset_id"],
+    split_seed=_hardened_receipt["split_seed"],
+    split_episode_ids={
+        "train": _hardened_receipt["train_episode_ids"],
+        "val": _hardened_receipt["validation_episode_ids"],
+        "test": _hardened_receipt["heldout_episode_ids"],
+    },
+)
 if coverage_sha256 != gate["artifact_fingerprints"]["dataset_contact_coverage_receipt_sha256"]:
     raise ValueError("Robot contact coverage receipt differs from the v3 gate")
 
@@ -111,8 +145,7 @@ validate_preflight_receipt_v2(
     training_data_receipt=training_data_receipt,
 )
 if (
-    preflight_receipt["causal_route_id"] != route
-    or preflight_receipt["training_data_receipt_sha256"] != training_data_sha256
+    preflight_receipt["training_data_receipt_sha256"] != training_data_sha256
 ):
     raise ValueError("causal Robot preflight receipt differs")
 
@@ -189,10 +222,26 @@ for dataset in config["dataloaders"]["train"]["data_or_config"]:
         contact_sidecar_pattern="episode_{episode_index:06d}.npz",
         contact_sidecar_strict=True,
         contact_sidecar_require_reviewed_v1_1=True,
+        contact_sidecar_expected_meta_sha256=gate["artifact_fingerprints"][
+            "sidecar_meta_sha256"
+        ],
+        contact_sidecar_expected_episode_sha256=_hardened_receipt[
+            "episode_npz_sha256"
+        ],
         contact_label_origin="human_adjudicated_robot_native",
+        contact_human_adjudicated_only=True,
+        action_contact_ground_truth=False,
         hand_active_contact_ground_truth=False,
         grip_contact_ground_truth=False,
+        other_proxy_contact_ground_truth=False,
+        matched_control_identity=True,
+        matched_control_dataset_id=training_data_receipt["dataset_id"],
+        matched_control_dataset_info_sha256=training_data_receipt[
+            "dataset_info_sha256"
+        ],
     )
+
+config["dataloaders"]["train"]["transform"]["matched_control_capture"] = True
 
 direct = route == "aux_only_direct_q12"
 config["models"]["transformer"].update(
@@ -237,12 +286,26 @@ if config["train"].get("mixed_precision") != "bf16" or int(
 ) < 200:
     raise ValueError("causal production training requires bf16 and at least 200 steps")
 
+validate_collector_runtime_bindings_v3(
+    collector_config,
+    training_config=config,
+    matrix_manifest_sha256=matrix_sha256,
+    training_data_receipt=training_data_receipt,
+    training_data_receipt_sha256=training_data_sha256,
+    preflight_receipt_sha256=preflight_sha256,
+    coverage_receipt_sha256=coverage_sha256,
+    precursor_binding=precursor_binding,
+    sidecar_meta_sha256=gate["artifact_fingerprints"]["sidecar_meta_sha256"],
+    source_tree_receipt=source_tree_receipt,
+)
+
 config["contact_causal_main_integration"] = {
     "matrix_schema_version": matrix_manifest["schema_version"],
     "matrix_id": MATRIX_ID,
     "causal_route_id": route,
     "route_receipt": build_production_route_receipt(route),
     "precursor_binding": precursor_binding,
+    "hardened_contact_asym25_source_replay": hardened_source_replay,
     "gate_path_record_only": str(gate_path),
     "matrix_path_record_only": str(matrix_path),
     "preflight_path_record_only": str(preflight_path),

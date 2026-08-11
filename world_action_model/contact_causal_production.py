@@ -64,22 +64,43 @@ SEEDS = (6666, 7777, 8888)
 CHECKPOINT_STEPS = (0, 100, 200)
 STATES_PER_QUERY = 48_673
 TOTAL_Q12_BITS = 186.85000894308362
+DIRECT_UNUSED_PARAMETER_NAMES = (
+    "contact_condition_encoder.bias",
+    "contact_condition_encoder.weight",
+)
 SOURCE_TREE_RECEIPT_VERSION = "contact-causal-current-head-source-tree/v1"
 SOURCE_LOGICAL_PATHS = (
     "configs/contact_causal_production_matrix.v1.json",
+    "configs/giga_world_policy_0_5_ego_contact_pretrain.py",
     "configs/giga_world_policy_0_5_ego_contact_causal_precursor.py",
+    "configs/giga_world_policy_0_5_sonic_g1_finetune.py",
+    "configs/giga_world_policy_0_5_sonic_g1_asymmetric25_finetune.py",
     "configs/giga_world_policy_0_5_sonic_g1_asymmetric25_contact_causal_matrix_finetune.py",
+    "world_action_model/asymmetric_action_schema.py",
+    "world_action_model/asymmetric_hardware_manifest.py",
+    "world_action_model/contact_asym25_eval_runtime.py",
+    "world_action_model/contact_asym25_heldout_eval.py",
+    "world_action_model/contact_asym25_preflight.py",
     "world_action_model/contact_causal_production.py",
+    "world_action_model/contact_causal_gate_bootstrap.py",
+    "world_action_model/contact_causal_coverage.py",
     "world_action_model/contact_causal_matched_control.py",
     "world_action_model/contact_causal_preflight.py",
     "world_action_model/contact_causal_checkpoint.py",
+    "world_action_model/contact_causal_eval_runtime.py",
     "world_action_model/contact_causal_heldout_eval.py",
     "world_action_model/contact_ego_causal_precursor.py",
+    "world_action_model/contact_ego_stage1_preflight.py",
     "world_action_model/contact_route_contract.py",
     "world_action_model/contact_transition_schema.py",
     "world_action_model/contact_supervision_contract.py",
+    "world_action_model/datasets/wam_lerobot_dataset.py",
     "world_action_model/models/transformer_wa_casual_mot.py",
+    "world_action_model/transforms/wa_transforms_lerobot_pretrain.py",
     "world_action_model/trainer/wa_casual_trainer_mot.py",
+    "world_action_model/verified_io.py",
+    "scripts/review_contact_causal_checkpoint.py",
+    "scripts/evaluate_contact_causal_heldout.py",
 )
 
 ROUTE_LOCAL_JSON_POINTERS = (
@@ -107,16 +128,31 @@ ROUTE_LOCAL_JSON_POINTERS = (
     "/measured_route_costs/action_only_latency_ms",
     "/measured_route_costs/transport_flops_proxy",
     "/gradient_reachability_receipt/active_parameter_names_sha256",
+    "/gradient_reachability_receipt/active_parameter_names",
     "/gradient_reachability_receipt/inactive_parameter_names_sha256",
+    "/gradient_reachability_receipt/inactive_parameter_names",
+    "/gradient_reachability_receipt/observed_gradient_parameter_names",
+    "/gradient_reachability_receipt/observed_gradient_parameter_names_sha256",
     "/gradient_reachability_receipt/action_loss_reaches_planner",
     "/gradient_reachability_receipt/unused_parameter_names",
     "/parameter_topology/optimizer_state_names_sha256",
+    "/parameter_topology/parameter_tensor_sha256",
+    "/parameter_topology/optimizer_state_parameter_names",
+    "/parameter_topology/optimizer_state_receipt",
+    "/parameter_topology/optimizer_state_sha256",
     "/parameter_topology/unused_parameter_names",
     "/parameter_topology/unused_parameter_names_sha256",
     "/checkpoint_artifact_hashes/config_sha256",
+    "/checkpoint_artifact_hashes/weight_tensor_sha256",
     "/checkpoint_artifact_hashes/whole_bundle_sha256",
     "/checkpoint_artifact_hashes/route_receipt_sha256",
     "/checkpoint_file/path_record_only",
+    "/checkpoint_file/sha256",
+    "/checkpoint_file/size_bytes",
+    "/checkpoint_file/tensor_manifest",
+    "/checkpoint_file/tensor_manifest_sha256",
+    "/checkpoint_file/bundle_manifest",
+    "/parent_checkpoint_weight_sha256",
 )
 
 CROSS_SEED_JSON_POINTERS = (
@@ -199,7 +235,11 @@ def _exact(value: object, keys: set[str], name: str) -> dict[str, Any]:
 
 
 def _sha(value: object, name: str) -> str:
-    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+    if (
+        not isinstance(value, str)
+        or not _SHA256_RE.fullmatch(value)
+        or value == "0" * 64
+    ):
         raise CausalProductionError(f"{name} must be lowercase SHA-256")
     return value
 
@@ -457,7 +497,15 @@ def compare_same_seed_route_contracts(values: Sequence[Mapping[str, Any]]) -> st
     ]
     digests = {sha256_json(value) for value in normalized}
     if len(digests) != 1:
-        raise CausalProductionError("same-seed routes differ outside exact route allowlist")
+        differing = sorted(
+            key
+            for key in normalized[0]
+            if len({sha256_json(value[key]) for value in normalized}) != 1
+        )
+        raise CausalProductionError(
+            "same-seed routes differ outside exact route allowlist: "
+            + ",".join(differing)
+        )
     return next(iter(digests))
 
 
@@ -529,12 +577,30 @@ def validate_dataset_supervision_coverage(value: object) -> dict[str, Any]:
         != receipt["total_windows"]
     ):
         raise CausalProductionError("dataset-level positive contact coverage is insufficient")
-    if not isinstance(receipt["field_eligible_counts"], dict) or any(
+    grouped_fields = {
+        "presence", "left_censored", "right_censored", "side", "site",
+        "object_role", "contact_mode", "start_tau", "end_tau",
+    }
+    if (
+        not isinstance(receipt["field_eligible_counts"], dict)
+        or set(receipt["field_eligible_counts"]) != grouped_fields
+        or any(
         isinstance(count, bool) or not isinstance(count, int) or count < 0
         for count in receipt["field_eligible_counts"].values()
+        )
+        or any(count <= 0 for count in receipt["field_eligible_counts"].values())
+        or sum(receipt["field_eligible_counts"].values())
+        != receipt["total_grouped_eligible_items"]
     ):
         raise CausalProductionError("field coverage counts are invalid")
-    if not isinstance(receipt["phase_coverage"], dict) or not receipt["phase_coverage"]:
+    if (
+        not isinstance(receipt["phase_coverage"], dict)
+        or set(receipt["phase_coverage"]) != {"onset", "hold", "release"}
+        or any(
+            isinstance(count, bool) or not isinstance(count, int) or count <= 0
+            for count in receipt["phase_coverage"].values()
+        )
+    ):
         raise CausalProductionError("phase coverage is missing")
     _sha(receipt["coverage_source_sha256"], "coverage source")
     _sha(receipt["sidecar_bundle_sha256"], "sidecar bundle")
@@ -545,14 +611,22 @@ def validate_parameter_topology(value: object, *, route: str, step: int) -> dict
     receipt = _exact(
         value,
         {
+            "persistent_parameter_schema",
             "persistent_parameter_schema_sha256",
+            "persistent_buffer_schema",
             "persistent_buffer_schema_sha256",
             "parameter_tensor_sha256",
             "buffer_tensor_sha256",
             "step0_parameter_tensor_sha256",
+            "optimizer_group_parameter_names",
             "optimizer_group_names_sha256",
+            "optimizer_group_hyperparameters",
             "optimizer_hyperparameters_sha256",
+            "optimizer_state_parameter_names",
             "optimizer_state_names_sha256",
+            "optimizer_state_receipt",
+            "optimizer_state_sha256",
+            "scheduler_state_receipt",
             "scheduler_state_sha256",
             "equal_bit_mixing_persistent",
             "unused_parameter_names",
@@ -572,10 +646,80 @@ def validate_parameter_topology(value: object, *, route: str, step: int) -> dict
         "optimizer_group_names_sha256",
         "optimizer_hyperparameters_sha256",
         "optimizer_state_names_sha256",
+        "optimizer_state_sha256",
         "scheduler_state_sha256",
         "unused_parameter_names_sha256",
     ):
         _sha(receipt[field], field)
+    parameter_schema = receipt["persistent_parameter_schema"]
+    buffer_schema = receipt["persistent_buffer_schema"]
+    for schema, name in (
+        (parameter_schema, "parameter"),
+        (buffer_schema, "buffer"),
+    ):
+        if not isinstance(schema, list):
+            raise CausalProductionError(f"persistent {name} schema must be a list")
+        names = []
+        for row in schema:
+            row = _exact(row, {"name", "shape", "dtype"}, f"persistent {name} row")
+            if (
+                not isinstance(row["name"], str)
+                or not row["name"]
+                or not isinstance(row["shape"], list)
+                or any(isinstance(dim, bool) or not isinstance(dim, int) or dim < 0 for dim in row["shape"])
+                or not isinstance(row["dtype"], str)
+                or not row["dtype"].startswith("torch.")
+            ):
+                raise CausalProductionError(f"persistent {name} schema row differs")
+            names.append(row["name"])
+        if names != sorted(set(names)):
+            raise CausalProductionError(f"persistent {name} schema names differ")
+    if (
+        sha256_json(parameter_schema)
+        != receipt["persistent_parameter_schema_sha256"]
+        or sha256_json(buffer_schema)
+        != receipt["persistent_buffer_schema_sha256"]
+    ):
+        raise CausalProductionError("persistent parameter/buffer schema digest differs")
+    groups = receipt["optimizer_group_parameter_names"]
+    hyperparameters = receipt["optimizer_group_hyperparameters"]
+    if (
+        not isinstance(groups, list)
+        or not groups
+        or any(
+            not isinstance(group, list)
+            or group != sorted(set(group))
+            or any(name not in {row["name"] for row in parameter_schema} for name in group)
+            for group in groups
+        )
+        or not isinstance(hyperparameters, list)
+        or len(hyperparameters) != len(groups)
+    ):
+        raise CausalProductionError("optimizer group receipt differs")
+    if (
+        sha256_json(groups) != receipt["optimizer_group_names_sha256"]
+        or sha256_json(hyperparameters)
+        != receipt["optimizer_hyperparameters_sha256"]
+    ):
+        raise CausalProductionError("optimizer group/hyperparameter digest differs")
+    state_names = receipt["optimizer_state_parameter_names"]
+    if (
+        not isinstance(state_names, list)
+        or state_names != sorted(set(state_names))
+        or any(name not in {row["name"] for row in parameter_schema} for name in state_names)
+        or sha256_json(state_names) != receipt["optimizer_state_names_sha256"]
+    ):
+        raise CausalProductionError("optimizer state parameter names differ")
+    if (
+        not isinstance(receipt["optimizer_state_receipt"], list)
+        or sha256_json(receipt["optimizer_state_receipt"])
+        != receipt["optimizer_state_sha256"]
+    ):
+        raise CausalProductionError("optimizer state receipt digest differs")
+    if not isinstance(receipt["scheduler_state_receipt"], list):
+        raise CausalProductionError("scheduler state receipt must be a list")
+    if sha256_json(receipt["scheduler_state_receipt"]) != receipt["scheduler_state_sha256"]:
+        raise CausalProductionError("scheduler state receipt digest differs")
     if receipt["equal_bit_mixing_persistent"] is not False:
         raise CausalProductionError("equal-bit mixing matrix must be nonpersistent")
     unused = receipt["unused_parameter_names"]
@@ -584,9 +728,7 @@ def validate_parameter_topology(value: object, *, route: str, step: int) -> dict
     if unused != sorted(set(unused)) or sha256_json(unused) != receipt["unused_parameter_names_sha256"]:
         raise CausalProductionError("unused parameter allowlist digest differs")
     if route == "aux_only_direct_q12":
-        if not unused or any(
-            not name.startswith("contact_condition_encoder.") for name in unused
-        ):
+        if unused != list(DIRECT_UNUSED_PARAMETER_NAMES):
             raise CausalProductionError("direct unused set must be exactly contact_condition_encoder.*")
         if (
             receipt["unused_parameters_have_grad"] is not False
@@ -716,6 +858,7 @@ def validate_training_receipt_v5(value: object) -> dict[str, Any]:
         "base_weights_sha256",
         "initial_parameter_tensor_sha256",
         "persistent_parameter_schema_sha256",
+        "persistent_buffer_schema_sha256",
         "dataset_id",
         "dataset_tree_sha256",
         "dataset_info_sha256",
@@ -765,8 +908,11 @@ def validate_training_receipt_v5(value: object) -> dict[str, Any]:
     if (
         stable["hardware_schema_id"] != "sonic_g1_rh56dftp6_omnipicker1_v1"
         or stable["precision"] != "bfloat16"
+        or isinstance(stable["world_size"], bool)
+        or not isinstance(stable["world_size"], int)
         or stable["world_size"] <= 0
         or stable["rank_set"] != list(range(stable["world_size"]))
+        or any(isinstance(rank, bool) or not isinstance(rank, int) for rank in stable["rank_set"])
         or any(isinstance(stable[name], bool) or not isinstance(stable[name], int) for name in ("window_seed", "noise_seed", "training_seed"))
     ):
         raise CausalProductionError("stable hardware/precision/topology/seed contract differs")
@@ -851,6 +997,27 @@ def validate_training_receipt_v5(value: object) -> dict[str, Any]:
     validate_parameter_topology(
         receipt["parameter_topology"], route=route, step=receipt["checkpoint_step"]
     )
+    parameter_topology = receipt["parameter_topology"]
+    if (
+        stable["initial_parameter_tensor_sha256"]
+        != parameter_topology["step0_parameter_tensor_sha256"]
+        or stable["persistent_parameter_schema_sha256"]
+        != parameter_topology["persistent_parameter_schema_sha256"]
+        or stable["persistent_buffer_schema_sha256"]
+        != parameter_topology["persistent_buffer_schema_sha256"]
+    ):
+        raise CausalProductionError("stable model topology mirrors differ")
+    if receipt["checkpoint_step"] == 0 and (
+        stable["optimizer_parameter_groups_sha256"]
+        != parameter_topology["optimizer_group_names_sha256"]
+        or stable["optimizer_config_sha256"]
+        != parameter_topology["optimizer_hyperparameters_sha256"]
+        or stable["optimizer_step0_state_sha256"]
+        != parameter_topology["optimizer_state_sha256"]
+        or stable["scheduler_step0_state_sha256"]
+        != parameter_topology["scheduler_state_sha256"]
+    ):
+        raise CausalProductionError("stable step-0 optimizer/scheduler mirrors differ")
     costs = _exact(
         receipt["measured_route_costs"],
         {
@@ -869,8 +1036,12 @@ def validate_training_receipt_v5(value: object) -> dict[str, Any]:
     reachability = _exact(
         receipt["gradient_reachability_receipt"],
         {
+            "active_parameter_names",
             "active_parameter_names_sha256",
+            "inactive_parameter_names",
             "inactive_parameter_names_sha256",
+            "observed_gradient_parameter_names",
+            "observed_gradient_parameter_names_sha256",
             "action_loss_reaches_planner",
             "unused_parameter_names",
         },
@@ -878,6 +1049,24 @@ def validate_training_receipt_v5(value: object) -> dict[str, Any]:
     )
     _sha(reachability["active_parameter_names_sha256"], "active parameter names")
     _sha(reachability["inactive_parameter_names_sha256"], "inactive parameter names")
+    _sha(reachability["observed_gradient_parameter_names_sha256"], "observed gradient parameter names")
+    active = reachability["active_parameter_names"]
+    inactive = reachability["inactive_parameter_names"]
+    observed = reachability["observed_gradient_parameter_names"]
+    parameter_names = [row["name"] for row in receipt["parameter_topology"]["persistent_parameter_schema"]]
+    if (
+        any(not isinstance(names, list) or names != sorted(set(names)) for names in (active, inactive, observed))
+        or set(active) & set(inactive)
+        or sorted(active + inactive) != parameter_names
+        or inactive != receipt["parameter_topology"]["unused_parameter_names"]
+        or any(name not in active for name in observed)
+        or sha256_json(active) != reachability["active_parameter_names_sha256"]
+        or sha256_json(inactive) != reachability["inactive_parameter_names_sha256"]
+        or sha256_json(observed) != reachability["observed_gradient_parameter_names_sha256"]
+        or (receipt["checkpoint_step"] == 0 and observed)
+        or (receipt["checkpoint_step"] > 0 and observed != active)
+    ):
+        raise CausalProductionError("gradient reachability/observed set differs from model topology")
     if (
         reachability["action_loss_reaches_planner"] is not (not direct)
         or reachability["unused_parameter_names"]
@@ -907,13 +1096,43 @@ def validate_training_receipt_v5(value: object) -> dict[str, Any]:
         raise CausalProductionError("checkpoint artifact hash mirrors differ")
     checkpoint_file = _exact(
         receipt["checkpoint_file"],
-        {"path_record_only", "sha256", "size_bytes"},
+        {
+            "path_record_only",
+            "sha256",
+            "size_bytes",
+            "serialization",
+            "tensor_manifest",
+            "tensor_manifest_sha256",
+            "bundle_manifest",
+        },
         "checkpoint file receipt",
     )
     _sha(checkpoint_file["sha256"], "checkpoint file")
+    _sha(checkpoint_file["tensor_manifest_sha256"], "checkpoint tensor manifest")
     _native_int(checkpoint_file["size_bytes"], "checkpoint size", minimum=1)
     if not isinstance(checkpoint_file["path_record_only"], str) or not Path(checkpoint_file["path_record_only"]).is_absolute():
         raise CausalProductionError("checkpoint file path must be absolute")
+    from world_action_model.contact_causal_checkpoint import (
+        SAFE_WEIGHT_FILES,
+        validate_safe_tensor_manifest,
+    )
+
+    tensor_manifest = validate_safe_tensor_manifest(
+        checkpoint_file["tensor_manifest"]
+    )
+    if (
+        checkpoint_file["serialization"] != tensor_manifest["serialization"]
+        or checkpoint_file["serialization"]
+        != SAFE_WEIGHT_FILES.get(Path(checkpoint_file["path_record_only"]).name)
+        or sha256_json(tensor_manifest)
+        != checkpoint_file["tensor_manifest_sha256"]
+        or not isinstance(checkpoint_file["bundle_manifest"], dict)
+        or checkpoint_file["bundle_manifest"].get("bundle_sha256")
+        != artifact_hashes["whole_bundle_sha256"]
+        or checkpoint_file["bundle_manifest"].get("weight_file")
+        != Path(checkpoint_file["path_record_only"]).name
+    ):
+        raise CausalProductionError("checkpoint safe tensor/bundle mirrors differ")
     _sha(receipt["parent_checkpoint_weight_sha256"], "parent checkpoint weight")
     if receipt["scientific_admission"] != {
         "production_data_admission": False,
@@ -927,15 +1146,35 @@ def validate_training_receipt_v5(value: object) -> dict[str, Any]:
 
 def verify_checkpoint_file(receipt: Mapping[str, Any]) -> None:
     entry = receipt["checkpoint_file"]
-    path = Path(entry["path_record_only"])
-    try:
-        payload, digest, stat_record = read_verified_bytes(
-            path, expected_sha256=entry["sha256"]
+    from world_action_model.contact_causal_checkpoint import (
+        inspect_causal_checkpoint_bundle,
+        validate_weight_mapping_against_topology,
+    )
+
+    inspected = inspect_causal_checkpoint_bundle(
+        Path(entry["path_record_only"]).parent
+    )
+    validate_weight_mapping_against_topology(
+        entry["path_record_only"], receipt["parameter_topology"]
+    )
+    if (
+        inspected["weight_file_sha256"] != entry["sha256"]
+        or inspected["weight_file_size_bytes"] != entry["size_bytes"]
+        or inspected["tensor_manifest"] != entry["tensor_manifest"]
+        or inspected["tensor_manifest_sha256"]
+        != entry["tensor_manifest_sha256"]
+        or inspected["bundle_manifest"] != entry["bundle_manifest"]
+        or inspected["config_sha256"]
+        != receipt["checkpoint_artifact_hashes"]["config_sha256"]
+        or inspected["bundle_manifest"]["bundle_sha256"]
+        != receipt["checkpoint_artifact_hashes"]["whole_bundle_sha256"]
+        or inspected["config"].get("contact_causal_route")
+        != receipt["route"]["causal_route_id"]
+        or inspected["config"].get("production_matrix_id") != MATRIX_ID
+    ):
+        raise CausalProductionError(
+            "checkpoint safe tensor/config/bundle bytes changed"
         )
-    except (OSError, ValueError) as exc:
-        raise CausalProductionError("checkpoint file bytes are unavailable or changed") from exc
-    if not payload or len(payload) != entry["size_bytes"] or stat_record["size_bytes"] <= 0 or digest != entry["sha256"]:
-        raise CausalProductionError("checkpoint file must be real and non-empty")
 
 
 def named_tensor_digest(rows: Sequence[tuple[str, Any]]) -> str:
@@ -947,7 +1186,12 @@ def named_tensor_digest(rows: Sequence[tuple[str, Any]]) -> str:
             raise CausalProductionError("named tensor digest requires non-empty names")
         try:
             value = tensor.detach().to(device="cpu").contiguous()
-            raw = value.view(__import__("torch").uint8).numpy().tobytes(order="C")
+            raw = (
+                value.reshape(-1)
+                .view(__import__("torch").uint8)
+                .numpy()
+                .tobytes(order="C")
+            )
         except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
             raise CausalProductionError("named tensor digest received a non-tensor") from exc
         for payload in (
@@ -962,10 +1206,198 @@ def named_tensor_digest(rows: Sequence[tuple[str, Any]]) -> str:
 
 
 def model_parameter_and_buffer_digests(model: Any) -> tuple[str, str]:
+    persistent_names = set(model.state_dict())
     return (
         named_tensor_digest(list(model.named_parameters())),
-        named_tensor_digest(list(model.named_buffers())),
+        named_tensor_digest(
+            [
+                (name, tensor)
+                for name, tensor in model.named_buffers()
+                if name in persistent_names
+            ]
+        ),
     )
+
+
+def _runtime_state_receipt(value: Any) -> Any:
+    """Convert optimizer/scheduler state to strict JSON without pickle trust."""
+
+    try:
+        import torch
+    except ImportError as exc:
+        raise CausalProductionError("torch is required for live training-state receipts") from exc
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().to(device="cpu").contiguous()
+        return {
+            "kind": "tensor",
+            "shape": list(tensor.shape),
+            "dtype": str(tensor.dtype),
+            "bytes_sha256": named_tensor_digest([("state", tensor)]),
+        }
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise CausalProductionError("optimizer/scheduler state is non-finite")
+        return value
+    if isinstance(value, Mapping):
+        rows = []
+        for key in sorted(value, key=lambda item: str(item)):
+            if not isinstance(key, (str, int)) or isinstance(key, bool):
+                raise CausalProductionError("runtime state mapping key is not string/integer")
+            rows.append({"key": str(key), "value": _runtime_state_receipt(value[key])})
+        return {"kind": "mapping", "entries": rows}
+    if isinstance(value, (list, tuple)):
+        return {
+            "kind": "sequence",
+            "items": [_runtime_state_receipt(item) for item in value],
+        }
+    raise CausalProductionError(
+        f"unsupported optimizer/scheduler state type: {type(value).__name__}"
+    )
+
+
+def build_live_training_state_receipts(
+    *,
+    model: Any,
+    optimizers: Sequence[Any],
+    schedulers: Sequence[Any],
+    route: str,
+    checkpoint_step: int,
+    step0_parameter_tensor_sha256: str,
+    observed_gradient_parameter_names: Sequence[str],
+    unused_step0_tensor_sha256: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Recompute v5 topology/optimizer/scheduler/reachability from live objects."""
+
+    route = ensure_exact_causal_route(route)
+    if checkpoint_step not in CHECKPOINT_STEPS or isinstance(checkpoint_step, bool):
+        raise CausalProductionError("live receipt checkpoint step differs")
+    named_parameters = dict(model.named_parameters())
+    state_dict_names = set(model.state_dict())
+    named_buffers = {
+        name: tensor
+        for name, tensor in model.named_buffers()
+        if name in state_dict_names
+    }
+    if not named_parameters:
+        raise CausalProductionError("live causal model has no parameters")
+    parameter_schema = [
+        {"name": name, "shape": list(tensor.shape), "dtype": str(tensor.dtype)}
+        for name, tensor in sorted(named_parameters.items())
+    ]
+    buffer_schema = [
+        {"name": name, "shape": list(tensor.shape), "dtype": str(tensor.dtype)}
+        for name, tensor in sorted(named_buffers.items())
+    ]
+    if route == "aux_only_direct_q12":
+        unused = [name for name in named_parameters if name.startswith("contact_condition_encoder.")]
+        unused.sort()
+        if unused != list(DIRECT_UNUSED_PARAMETER_NAMES):
+            raise CausalProductionError("live direct unused parameter set differs")
+    else:
+        unused = []
+    parameter_names = sorted(named_parameters)
+    active = sorted(set(parameter_names) - set(unused))
+    observed = sorted(set(observed_gradient_parameter_names))
+    if any(name not in parameter_names for name in observed):
+        raise CausalProductionError("observed gradient name is absent from live model")
+    by_identity = {id(parameter): name for name, parameter in named_parameters.items()}
+    group_names = []
+    group_hyperparameters = []
+    state_names = []
+    optimizer_state_receipt = []
+    for optimizer_index, optimizer in enumerate(optimizers):
+        raw_optimizer = getattr(optimizer, "optimizer", optimizer)
+        for group_index, group in enumerate(raw_optimizer.param_groups):
+            names = []
+            for parameter in group["params"]:
+                try:
+                    names.append(by_identity[id(parameter)])
+                except KeyError as exc:
+                    raise CausalProductionError("optimizer contains a parameter outside the model") from exc
+            group_names.append(sorted(names))
+            hyper = {
+                key: _runtime_state_receipt(item)
+                for key, item in sorted(group.items())
+                if key != "params"
+            }
+            group_hyperparameters.append(
+                {
+                    "optimizer_index": optimizer_index,
+                    "group_index": group_index,
+                    "hyperparameters": hyper,
+                }
+            )
+        for parameter, state in raw_optimizer.state.items():
+            try:
+                name = by_identity[id(parameter)]
+            except KeyError as exc:
+                raise CausalProductionError("optimizer state references an unknown parameter") from exc
+            state_names.append(name)
+            optimizer_state_receipt.append(
+                {
+                    "optimizer_index": optimizer_index,
+                    "parameter_name": name,
+                    "state": _runtime_state_receipt(state),
+                }
+            )
+    state_names = sorted(state_names)
+    optimizer_state_receipt.sort(
+        key=lambda row: (row["optimizer_index"], row["parameter_name"])
+    )
+    scheduler_state_receipt = []
+    for index, scheduler in enumerate(schedulers):
+        state = scheduler.state_dict()
+        scheduler_state_receipt.append(
+            {"scheduler_index": index, "state": _runtime_state_receipt(state)}
+        )
+    parameter_sha256, buffer_sha256 = model_parameter_and_buffer_digests(model)
+    unused_current_sha256 = named_tensor_digest(
+        [(name, named_parameters[name]) for name in unused]
+    )
+    topology = {
+        "persistent_parameter_schema": parameter_schema,
+        "persistent_parameter_schema_sha256": sha256_json(parameter_schema),
+        "persistent_buffer_schema": buffer_schema,
+        "persistent_buffer_schema_sha256": sha256_json(buffer_schema),
+        "parameter_tensor_sha256": parameter_sha256,
+        "buffer_tensor_sha256": buffer_sha256,
+        "step0_parameter_tensor_sha256": step0_parameter_tensor_sha256,
+        "optimizer_group_parameter_names": group_names,
+        "optimizer_group_names_sha256": sha256_json(group_names),
+        "optimizer_group_hyperparameters": group_hyperparameters,
+        "optimizer_hyperparameters_sha256": sha256_json(group_hyperparameters),
+        "optimizer_state_parameter_names": state_names,
+        "optimizer_state_names_sha256": sha256_json(state_names),
+        "optimizer_state_receipt": optimizer_state_receipt,
+        "optimizer_state_sha256": sha256_json(optimizer_state_receipt),
+        "scheduler_state_receipt": scheduler_state_receipt,
+        "scheduler_state_sha256": sha256_json(scheduler_state_receipt),
+        "equal_bit_mixing_persistent": "equal_bit_mixing_matrix" in state_dict_names,
+        "unused_parameter_names": unused,
+        "unused_parameter_names_sha256": sha256_json(unused),
+        "unused_parameters_have_grad": any(
+            named_parameters[name].grad is not None for name in unused
+        ),
+        "unused_parameters_have_optimizer_state": bool(set(unused) & set(state_names)),
+        "unused_parameters_changed_from_step0": (
+            bool(unused)
+            and unused_current_sha256 != unused_step0_tensor_sha256
+        ),
+    }
+    reachability = {
+        "active_parameter_names": active,
+        "active_parameter_names_sha256": sha256_json(active),
+        "inactive_parameter_names": unused,
+        "inactive_parameter_names_sha256": sha256_json(unused),
+        "observed_gradient_parameter_names": observed,
+        "observed_gradient_parameter_names_sha256": sha256_json(observed),
+        "action_loss_reaches_planner": route != "aux_only_direct_q12",
+        "unused_parameter_names": unused,
+    }
+    validate_parameter_topology(topology, route=route, step=checkpoint_step)
+    return topology, reachability
 
 
 def build_checkpoint_training_receipt_v5(
@@ -978,6 +1410,8 @@ def build_checkpoint_training_receipt_v5(
     config_sha256: str,
     whole_bundle_sha256: str,
     parent_checkpoint_weight_sha256: str,
+    parameter_topology: Mapping[str, Any],
+    gradient_reachability_receipt: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Fill only checkpoint-local leaves of a reviewed v5 base receipt."""
 
@@ -985,14 +1419,14 @@ def build_checkpoint_training_receipt_v5(
     if checkpoint_step not in CHECKPOINT_STEPS or isinstance(checkpoint_step, bool):
         raise CausalProductionError("causal checkpoint step must be 0/100/200")
     path = Path(checkpoint_file_path).expanduser().absolute()
-    try:
-        file_sha256, stat_record = __import__(
-            "world_action_model.verified_io", fromlist=["hash_verified_regular_file"]
-        ).hash_verified_regular_file(path)
-    except (OSError, ValueError) as exc:
-        raise CausalProductionError("cannot hash causal checkpoint weight file") from exc
-    if stat_record["size_bytes"] <= 0:
-        raise CausalProductionError("causal checkpoint weight file is empty")
+    from world_action_model.contact_causal_checkpoint import (
+        inspect_causal_checkpoint_bundle,
+        validate_weight_mapping_against_topology,
+    )
+
+    inspected = inspect_causal_checkpoint_bundle(path.parent)
+    file_sha256 = inspected["weight_file_sha256"]
+    file_size_bytes = inspected["weight_file_size_bytes"]
     for value, name in (
         (parameter_tensor_sha256, "parameter tensor"),
         (buffer_tensor_sha256, "buffer tensor"),
@@ -1001,19 +1435,39 @@ def build_checkpoint_training_receipt_v5(
         (parent_checkpoint_weight_sha256, "parent checkpoint weight"),
     ):
         _sha(value, name)
+    if (
+        config_sha256 != inspected["config_sha256"]
+        or whole_bundle_sha256
+        != inspected["bundle_manifest"]["bundle_sha256"]
+        or path.name != inspected["weight_file"]
+    ):
+        raise CausalProductionError(
+            "runtime checkpoint config/bundle differs from safe inspection"
+        )
+    validate_weight_mapping_against_topology(path, parameter_topology)
     receipt["checkpoint_step"] = checkpoint_step
     receipt["output_path_record_only"] = str(path.parent)
     receipt["checkpoint_file"] = {
         "path_record_only": str(path),
         "sha256": file_sha256,
-        "size_bytes": stat_record["size_bytes"],
+        "size_bytes": file_size_bytes,
+        "serialization": inspected["tensor_manifest"]["serialization"],
+        "tensor_manifest": inspected["tensor_manifest"],
+        "tensor_manifest_sha256": inspected["tensor_manifest_sha256"],
+        "bundle_manifest": inspected["bundle_manifest"],
     }
     receipt["parent_checkpoint_weight_sha256"] = parent_checkpoint_weight_sha256
-    receipt["parameter_topology"] = dict(receipt["parameter_topology"])
-    receipt["parameter_topology"].update(
-        parameter_tensor_sha256=parameter_tensor_sha256,
-        buffer_tensor_sha256=buffer_tensor_sha256,
+    receipt["parameter_topology"] = deepcopy(dict(parameter_topology))
+    receipt["gradient_reachability_receipt"] = deepcopy(
+        dict(gradient_reachability_receipt)
     )
+    if (
+        receipt["parameter_topology"].get("parameter_tensor_sha256")
+        != parameter_tensor_sha256
+        or receipt["parameter_topology"].get("buffer_tensor_sha256")
+        != buffer_tensor_sha256
+    ):
+        raise CausalProductionError("live topology tensor digests differ from checkpoint")
     receipt["checkpoint_artifact_hashes"] = dict(
         receipt["checkpoint_artifact_hashes"]
     )
@@ -1062,12 +1516,18 @@ def validate_acceptance_v3(value: object, *, receipt: Mapping[str, Any]) -> dict
             "checkpoint_step",
             "training_receipt_sha256",
             "checkpoint_file_sha256",
+            "checkpoint_tensor_manifest_sha256",
+            "checkpoint_path_record_only",
+            "robot_gate_sha256",
+            "gate_reviewer_acceptance_sha256",
+            "current_head_source_receipt_sha256",
             "reviewer_identity",
             "reviewer_attestation_nonce",
             "acceptance_run_id",
             "acceptance_run_nonce",
             "reviewed_current_head_sha256",
             "reviewed_source_tree_sha256",
+            "reviewed_at_utc",
             "evidence_valid_until_utc",
             "oracle_used",
         },
@@ -1084,11 +1544,50 @@ def validate_acceptance_v3(value: object, *, receipt: Mapping[str, Any]) -> dict
         or acceptance["checkpoint_step"] != receipt["checkpoint_step"]
         or acceptance["training_receipt_sha256"] != sha256_json(receipt)
         or acceptance["checkpoint_file_sha256"] != receipt["checkpoint_file"]["sha256"]
+        or acceptance["checkpoint_tensor_manifest_sha256"]
+        != receipt["checkpoint_file"]["tensor_manifest_sha256"]
+        or acceptance["checkpoint_path_record_only"]
+        != receipt["checkpoint_file"]["path_record_only"]
+        or acceptance["robot_gate_sha256"]
+        != receipt["evidence"]["training_gate_sha256"]
+        or acceptance["gate_reviewer_acceptance_sha256"]
+        != receipt["evidence"]["external_reviewer_acceptance_sha256"]
+        or acceptance["current_head_source_receipt_sha256"]
+        != receipt["evidence"]["current_head_source_receipt_sha256"]
         or acceptance["reviewed_current_head_sha256"] != receipt["stable_contract"]["git_commit"]
         or acceptance["reviewed_source_tree_sha256"] != receipt["stable_contract"]["source_tree_sha256"]
         or acceptance["oracle_used"] is not False
     ):
         raise CausalProductionError("independent checkpoint acceptance binding differs")
+    for field in (
+        "checkpoint_tensor_manifest_sha256",
+        "robot_gate_sha256",
+        "gate_reviewer_acceptance_sha256",
+        "current_head_source_receipt_sha256",
+    ):
+        _sha(acceptance[field], f"acceptance {field}")
+    checkpoint_path = Path(acceptance["checkpoint_path_record_only"])
+    if not checkpoint_path.is_absolute():
+        raise CausalProductionError("acceptance checkpoint path must be absolute")
+    if not isinstance(acceptance["reviewed_at_utc"], str) or not _UTC_RE.fullmatch(
+        acceptance["reviewed_at_utc"]
+    ):
+        raise CausalProductionError("acceptance reviewed_at_utc must be canonical UTC")
+    try:
+        reviewed_at = datetime.fromisoformat(
+            acceptance["reviewed_at_utc"][:-1] + "+00:00"
+        )
+        expiry = datetime.fromisoformat(
+            acceptance["evidence_valid_until_utc"][:-1] + "+00:00"
+        )
+    except ValueError as exc:
+        raise CausalProductionError("acceptance UTC timestamp is invalid") from exc
+    if (
+        reviewed_at.tzinfo is None
+        or reviewed_at > datetime.now(timezone.utc)
+        or reviewed_at >= expiry
+    ):
+        raise CausalProductionError("acceptance review time must precede expiry")
     identities = [
         acceptance["reviewer_identity"],
         acceptance["reviewer_attestation_nonce"],
@@ -1190,12 +1689,78 @@ def validate_27_checkpoint_matrix(
     for seed in SEEDS:
         for route in CAUSAL_ROUTES:
             rows = [evidence[(seed, route, step)][0] for step in CHECKPOINT_STEPS]
+            first = rows[0]
+            for row in rows[1:]:
+                for field in (
+                    "run_identity",
+                    "model_config",
+                    "stable_contract",
+                    "training_contract",
+                    "precursor",
+                    "evidence",
+                    "topology",
+                    "route",
+                ):
+                    if row[field] != first[field]:
+                        raise CausalProductionError(
+                            f"run step contract drifted outside checkpoint-local state: {field}"
+                        )
             if rows[0]["parent_checkpoint_weight_sha256"] != rows[0]["precursor"]["parameter_tensor_sha256"]:
                 raise CausalProductionError("step-0 parent must be the precursor tensor digest")
             if rows[1]["parent_checkpoint_weight_sha256"] != rows[0]["checkpoint_artifact_hashes"]["weight_tensor_sha256"]:
                 raise CausalProductionError("step-100 parent chain differs")
             if rows[2]["parent_checkpoint_weight_sha256"] != rows[1]["checkpoint_artifact_hashes"]["weight_tensor_sha256"]:
                 raise CausalProductionError("step-200 parent chain differs")
+    for seed in SEEDS:
+        for step in CHECKPOINT_STEPS:
+            same_step = [evidence[(seed, route, step)][0] for route in CAUSAL_ROUTES]
+            compare_same_seed_route_contracts(same_step)
+            reference = same_step[0]
+            for row in same_step[1:]:
+                for field in (
+                    "stable_contract",
+                    "training_contract",
+                    "precursor",
+                    "evidence",
+                    "topology",
+                ):
+                    if row[field] != reference[field]:
+                        raise CausalProductionError(
+                            f"same-seed/step matched contract differs: {field}"
+                        )
+            equal = same_step[1]
+            semantic = same_step[2]
+            for field in (
+                "persistent_parameter_schema",
+                "persistent_parameter_schema_sha256",
+                "persistent_buffer_schema",
+                "persistent_buffer_schema_sha256",
+                "optimizer_group_parameter_names",
+                "optimizer_group_names_sha256",
+                "optimizer_group_hyperparameters",
+                "optimizer_hyperparameters_sha256",
+                "optimizer_state_parameter_names",
+                "optimizer_state_names_sha256",
+                "scheduler_state_receipt",
+                "scheduler_state_sha256",
+            ):
+                if equal["parameter_topology"][field] != semantic["parameter_topology"][field]:
+                    raise CausalProductionError(
+                        "equal-bit and semantic active optimizer/scheduler state differs"
+                    )
+            for field in (
+                "active_parameter_names",
+                "active_parameter_names_sha256",
+                "inactive_parameter_names",
+                "inactive_parameter_names_sha256",
+                "observed_gradient_parameter_names",
+                "observed_gradient_parameter_names_sha256",
+                "unused_parameter_names",
+            ):
+                if equal["gradient_reachability_receipt"][field] != semantic["gradient_reachability_receipt"][field]:
+                    raise CausalProductionError(
+                        "equal-bit and semantic gradient reachability differs"
+                    )
     return {
         "matrix_report_version": MATRIX_REPORT_VERSION,
         "matrix_schema_version": MATRIX_SCHEMA_VERSION,
