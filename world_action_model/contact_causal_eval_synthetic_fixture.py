@@ -1748,7 +1748,9 @@ def build_synthetic_causal_evaluator_results(
         EVALUATOR_VERSION,
         MATRIX_ID,
         MATRIX_SCHEMA_VERSION,
+        PREFLIGHT_RECEIPT_VERSION,
         RESULT_VERSION,
+        TRAINING_DATA_RECEIPT_VERSION,
         current_head_source_tree_receipt,
         route_packet_kind,
         sha256_json,
@@ -1780,7 +1782,7 @@ def build_synthetic_causal_evaluator_results(
         coverage = seed_artifact["coverage"]["receipt"]
         first_receipt = checkpoint_evidence[(seed, CAUSAL_ROUTES[0], 0)][0]
         training_data = {
-            "receipt_version": "contact-causal-training-data-receipt/v2",
+            "receipt_version": TRAINING_DATA_RECEIPT_VERSION,
             "matrix_schema_version": MATRIX_SCHEMA_VERSION,
             "matrix_id": MATRIX_ID,
             "dataset_id": hardened["dataset_id"],
@@ -1812,7 +1814,7 @@ def build_synthetic_causal_evaluator_results(
         }
         validate_training_data_receipt_v2(training_data)
         causal = {
-            "receipt_version": "contact-causal-production-preflight-receipt/v2",
+            "receipt_version": PREFLIGHT_RECEIPT_VERSION,
             "status": "artifact_consistency_passed_with_explicit_external_gates",
             "matrix_schema_version": MATRIX_SCHEMA_VERSION,
             "matrix_id": MATRIX_ID,
