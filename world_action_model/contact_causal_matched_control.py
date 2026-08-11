@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1340,6 +1341,7 @@ def build_current_run_trace_prefix_receipt_v1(
     route = ensure_exact_causal_route(route)
     trace_path = Path(trace_path).expanduser().absolute()
     selected: dict[str, str] = {}
+    selected_in_file_order: list[str] = []
     for record in records:
         validate_trace_record(record)
         if (
@@ -1360,6 +1362,26 @@ def build_current_run_trace_prefix_receipt_v1(
         if key in selected:
             raise CausalProductionError("current-run trace prefix key is duplicated")
         selected[key] = record["record_sha256"]
+        selected_in_file_order.append(key)
+    try:
+        trace_payload, _, _ = read_verified_bytes(trace_path)
+    except (OSError, ValueError) as exc:
+        raise CausalProductionError("cannot bind current-run trace prefix bytes") from exc
+    raw_lines = trace_payload.splitlines(keepends=True)
+    if (
+        len(raw_lines) != len(records)
+        or any(not line.endswith(b"\n") for line in raw_lines)
+        or not selected_in_file_order
+        or selected_in_file_order
+        != [
+            f"step{record['global_step']}/micro{record['micro_step']}/rank{record['rank']}"
+            for record in records[: len(selected_in_file_order)]
+        ]
+    ):
+        raise CausalProductionError(
+            "current-run trace prefix is not a canonical leading byte prefix"
+        )
+    prefix_payload = b"".join(raw_lines[: len(selected_in_file_order)])
     unsigned = {
         "receipt_version": "contact-causal-current-run-trace-prefix/v1",
         "causal_route_id": route,
@@ -1372,6 +1394,8 @@ def build_current_run_trace_prefix_receipt_v1(
         "record_count": len(selected),
         "record_sha256_by_key": dict(sorted(selected.items())),
         "trace_path_record_only": str(trace_path),
+        "trace_prefix_size_bytes": len(prefix_payload),
+        "trace_prefix_bytes_sha256": hashlib.sha256(prefix_payload).hexdigest(),
     }
     return {**unsigned, "receipt_sha256": sha256_json(unsigned)}
 
@@ -1382,14 +1406,19 @@ def validate_current_run_trace_prefix_receipt_v1(value: object) -> dict[str, Any
         {
             "receipt_version", "causal_route_id", "seed", "run_id", "run_nonce",
             "rank", "world_size", "through_checkpoint_step", "record_count",
-            "record_sha256_by_key", "trace_path_record_only", "receipt_sha256",
+            "record_sha256_by_key", "trace_path_record_only",
+            "trace_prefix_size_bytes", "trace_prefix_bytes_sha256",
+            "receipt_sha256",
         },
         "current-run trace prefix receipt",
     )
     route = ensure_exact_causal_route(receipt["causal_route_id"])
     if receipt["receipt_version"] != "contact-causal-current-run-trace-prefix/v1":
         raise CausalProductionError("current-run trace prefix version differs")
-    for name in ("seed", "rank", "world_size", "through_checkpoint_step", "record_count"):
+    for name in (
+        "seed", "rank", "world_size", "through_checkpoint_step", "record_count",
+        "trace_prefix_size_bytes",
+    ):
         if isinstance(receipt[name], bool) or not isinstance(receipt[name], int):
             raise CausalProductionError(f"current-run trace prefix {name} differs")
     if (
@@ -1398,6 +1427,7 @@ def validate_current_run_trace_prefix_receipt_v1(value: object) -> dict[str, Any
         or not 0 <= receipt["rank"] < receipt["world_size"]
         or receipt["through_checkpoint_step"] < 0
         or receipt["record_count"] <= 0
+        or receipt["trace_prefix_size_bytes"] <= 0
     ):
         raise CausalProductionError(
             "current-run trace prefix bounds differ or contain no live record"
@@ -1408,6 +1438,18 @@ def validate_current_run_trace_prefix_receipt_v1(value: object) -> dict[str, Any
     path = Path(receipt["trace_path_record_only"])
     if not path.is_absolute():
         raise CausalProductionError("current-run trace prefix path must be absolute")
+    _sha(receipt["trace_prefix_bytes_sha256"], "current-run raw trace prefix")
+    try:
+        raw_payload, _, _ = read_verified_bytes(path)
+    except (OSError, ValueError) as exc:
+        raise CausalProductionError("cannot replay current-run raw trace prefix") from exc
+    prefix_size = receipt["trace_prefix_size_bytes"]
+    if (
+        len(raw_payload) < prefix_size
+        or hashlib.sha256(raw_payload[:prefix_size]).hexdigest()
+        != receipt["trace_prefix_bytes_sha256"]
+    ):
+        raise CausalProductionError("current-run raw trace prefix bytes changed")
     rows = receipt["record_sha256_by_key"]
     if not isinstance(rows, dict) or list(rows) != sorted(rows):
         raise CausalProductionError("current-run trace prefix manifest is not sorted")

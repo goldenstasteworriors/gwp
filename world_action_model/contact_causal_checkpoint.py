@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import hashlib
+import os
 from pathlib import Path
+import stat
 from typing import Any
 
 from world_action_model.contact_causal_production import (
@@ -60,6 +62,21 @@ def _tensor_bytes(tensor: Any) -> bytes:
         raise CausalProductionError("cannot obtain canonical checkpoint tensor bytes") from exc
 
 
+def _validate_safe_weight_mapping(raw: object) -> dict[str, Any]:
+    import torch
+
+    if (
+        not isinstance(raw, dict)
+        or not raw
+        or any(not isinstance(name, str) or not name for name in raw)
+        or any(not isinstance(tensor, torch.Tensor) for tensor in raw.values())
+    ):
+        raise CausalProductionError(
+            "checkpoint must contain one non-empty top-level string-to-tensor mapping"
+        )
+    return dict(raw)
+
+
 def load_safe_weight_mapping(path: str | Path) -> tuple[dict[str, Any], str]:
     """Load only a safetensors file or a weights-only tensor mapping."""
 
@@ -83,16 +100,58 @@ def load_safe_weight_mapping(path: str | Path) -> tuple[dict[str, Any], str]:
             )
     except Exception as exc:
         raise CausalProductionError("checkpoint weight file is not safely loadable") from exc
-    if (
-        not isinstance(raw, dict)
-        or not raw
-        or any(not isinstance(name, str) or not name for name in raw)
-        or any(not isinstance(tensor, torch.Tensor) for tensor in raw.values())
-    ):
-        raise CausalProductionError(
-            "checkpoint must contain one non-empty top-level string-to-tensor mapping"
+    return _validate_safe_weight_mapping(raw), serialization
+
+
+def load_pinned_safe_weight_mapping(
+    path: str | Path, *, expected_sha256: str, expected_serialization: str,
+    expected_stat: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    """Load the exact no-follow FD whose bytes were verified, immune to path swaps."""
+
+    import torch
+    from world_action_model.verified_io import (
+        open_verified_regular_fd,
+        stat_identity,
+    )
+
+    weight_path = Path(path).expanduser().absolute()
+    serialization = SAFE_WEIGHT_FILES.get(weight_path.name)
+    if serialization != expected_serialization:
+        raise CausalProductionError("pinned checkpoint serialization differs")
+    fd = None
+    try:
+        fd, actual_sha256, identity = open_verified_regular_fd(
+            weight_path,
+            expected_sha256=expected_sha256,
+            expected_stat=expected_stat,
         )
-    return dict(raw), serialization
+        if actual_sha256 != expected_sha256:
+            raise CausalProductionError("pinned checkpoint SHA differs")
+        if not Path("/proc/self/fd").is_dir():
+            raise CausalProductionError("pinned checkpoint loading requires procfs FDs")
+        if serialization == "safetensors":
+            from safetensors.torch import load_file
+
+            raw = load_file(f"/proc/self/fd/{fd}", device="cpu")
+        else:
+            with os.fdopen(os.dup(fd), "rb") as handle:
+                raw = torch.load(handle, map_location="cpu", weights_only=True)
+        after = os.fstat(fd)
+        if not stat.S_ISREG(after.st_mode) or stat_identity(after) != identity:
+            raise CausalProductionError(
+                "pinned checkpoint inode changed while loading"
+            )
+        return _validate_safe_weight_mapping(raw)
+    except CausalProductionError:
+        raise
+    except Exception as exc:
+        raise CausalProductionError(
+            "pinned checkpoint weight file is not safely loadable"
+        ) from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def build_safe_tensor_manifest(path: str | Path) -> dict[str, Any]:

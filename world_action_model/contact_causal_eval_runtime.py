@@ -386,23 +386,67 @@ class CausalProductionHeldoutRuntime(ProductionHeldoutRuntime):
             "metric targets require the independent post-prediction scorer process"
         )
 
-    def load_checkpoint(self, checkpoint_path: str) -> None:
+    def load_checkpoint(
+        self, checkpoint_path: str, *, checkpoint_receipt: Mapping[str, Any]
+    ) -> None:
         from diffusers import FlowMatchEulerDiscreteScheduler
+        from world_action_model.contact_causal_checkpoint import (
+            load_pinned_safe_weight_mapping,
+        )
+        from world_action_model.contact_causal_production import (
+            model_parameter_and_buffer_digests,
+        )
         from world_action_model.contact_transition_schema import (
             SEGMENT_SCHEMA_VERSION,
             SEGMENT_TARGET_DIM,
         )
         from world_action_model.models import CasualWorldActionTransformer_MoT
+        from world_action_model.verified_io import read_verified_bytes, strict_json_loads
 
         self.unload_checkpoint()
-        checkpoint_path = str(Path(checkpoint_path).expanduser().absolute())
-        model = CasualWorldActionTransformer_MoT.from_pretrained(
-            checkpoint_path, torch_dtype=self.dtype, local_files_only=True
+        checkpoint_root = Path(checkpoint_path).expanduser().absolute()
+        weight_entry = checkpoint_receipt["checkpoint_file"]
+        weight_path = Path(weight_entry["path_record_only"]).absolute()
+        if weight_path.parent != checkpoint_root:
+            raise HeldoutEvaluationError(
+                "causal checkpoint receipt path differs from inference path"
+            )
+        config_payload, config_sha256, _ = read_verified_bytes(
+            checkpoint_root / "config.json",
+            expected_sha256=checkpoint_receipt["checkpoint_artifact_hashes"][
+                "config_sha256"
+            ],
         )
-        route = ensure_exact_causal_route(
-            getattr(model.config, "contact_causal_route", None)
+        config = strict_json_loads(
+            config_payload, name="pinned causal inference checkpoint config"
         )
-        validate_checkpoint_transformer_semantics(model.config.to_dict(), route=route)
+        if not isinstance(config, dict) or config_sha256 != checkpoint_receipt[
+            "checkpoint_artifact_hashes"
+        ]["config_sha256"]:
+            raise HeldoutEvaluationError("pinned causal checkpoint config differs")
+        route = ensure_exact_causal_route(config.get("contact_causal_route"))
+        validate_checkpoint_transformer_semantics(config, route=route)
+        mapping = load_pinned_safe_weight_mapping(
+            weight_path,
+            expected_sha256=weight_entry["sha256"],
+            expected_serialization=weight_entry["serialization"],
+        )
+        model = CasualWorldActionTransformer_MoT.from_config(config)
+        incompatible = model.load_state_dict(mapping, strict=True)
+        if incompatible.missing_keys or incompatible.unexpected_keys:
+            raise HeldoutEvaluationError(
+                "pinned causal checkpoint tensor mapping differs from its model"
+            )
+        parameter_sha256, buffer_sha256 = model_parameter_and_buffer_digests(model)
+        if (
+            parameter_sha256
+            != checkpoint_receipt["parameter_topology"]["parameter_tensor_sha256"]
+            or buffer_sha256
+            != checkpoint_receipt["parameter_topology"]["buffer_tensor_sha256"]
+        ):
+            raise HeldoutEvaluationError(
+                "pinned causal inference tensors differ from reviewed topology"
+            )
         direct = route == "aux_only_direct_q12"
         expected = {
             "in_action_channels": MODEL_ACTION_DIM,

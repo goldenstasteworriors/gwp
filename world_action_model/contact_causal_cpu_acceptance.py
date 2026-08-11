@@ -462,13 +462,15 @@ def _trainer_first_batch_three_route_acceptance() -> dict[str, Any]:
     )
 
     class _NamedModel:
-        def __init__(self, transformer):
+        def __init__(self, transformer, event_log):
             self.transformer = transformer
             self.forward_conditions = []
+            self.event_log = event_log
 
         def __call__(self, name, **kwargs):
             if name != "transformer":
                 raise AssertionError("trainer requested an unexpected model")
+            self.event_log.append("model_forward")
             self.forward_conditions.append(
                 (
                     kwargs.get("contact_condition"),
@@ -516,7 +518,8 @@ def _trainer_first_batch_three_route_acceptance() -> dict[str, Any]:
         torch.manual_seed(42_000 + route_index)
         model = _model(route)
         trainer = CasualWATrainerMoT.__new__(CasualWATrainerMoT)
-        named_model = _NamedModel(model)
+        event_log = []
+        named_model = _NamedModel(model, event_log)
         trainer.model = named_model
         trainer.models = [{"transformer": model}]
         trainer.accelerator = _Accelerator()
@@ -527,8 +530,7 @@ def _trainer_first_batch_three_route_acceptance() -> dict[str, Any]:
         trainer.action_flow_shift = 5.0
         trainer.state_repeats = 1
         trainer.action_repeats = 1
-        trainer.matched_control_collector = None
-        trainer.cur_step = 1
+        trainer.cur_step = 0
         trainer.production_matrix_id = MATRIX_ID
         trainer.production_causal_route_id = route
         trainer.contact_causal_route = route
@@ -543,6 +545,19 @@ def _trainer_first_batch_three_route_acceptance() -> dict[str, Any]:
         trainer.contact_loss_weight = 1.0
         trainer._causal_action_gradient_probe_completed = False
         trainer._causal_action_gradient_names = set()
+        trainer._causal_step0_checkpoint_saved = False
+        trainer._causal_collector_live_bound = True
+
+        class _FirstBatchCollector:
+            def __init__(self):
+                self.record_count = 0
+
+            def record(self, **_kwargs):
+                self.record_count += 1
+                event_log.append("collector_record")
+
+        first_batch_collector = _FirstBatchCollector()
+        trainer.matched_control_collector = first_batch_collector
 
         def _forward_vae(images):
             return torch.zeros(
@@ -599,8 +614,34 @@ def _trainer_first_batch_three_route_acceptance() -> dict[str, Any]:
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer, lr_lambda=lambda _: 1.0
         )
+        trainer.optimizers = [optimizer]
+        trainer.schedulers = [scheduler]
+
+        def _save_after_first_record(this):
+            if first_batch_collector.record_count != 1:
+                raise AssertionError(
+                    "production step-0 save did not follow exactly one live record"
+                )
+            if optimizer.state:
+                raise AssertionError("production step-0 save followed an optimizer update")
+            if named_tensor_digest(list(model.named_parameters())) != step0_sha:
+                raise AssertionError("production step-0 save followed a weight mutation")
+            event_log.append("step0_checkpoint_save")
+            this._causal_step0_checkpoint_saved = True
+
+        trainer._save_production_initial_checkpoint = types.MethodType(
+            _save_after_first_record, trainer
+        )
         optimizer.zero_grad(set_to_none=True)
         losses = trainer.forward_step(batch)
+        if event_log != [
+            "collector_record",
+            "step0_checkpoint_save",
+            "model_forward",
+        ]:
+            raise AssertionError(
+                f"production first-batch ordering differs for {route}: {event_log}"
+            )
         if set(losses) != {"visual_loss", "action_loss", "contact_loss"}:
             raise AssertionError(f"causal first batch loss schema differs: {route}")
         total = sum(losses.values())
@@ -659,6 +700,8 @@ def _trainer_first_batch_three_route_acceptance() -> dict[str, Any]:
             ],
             "model_condition_inputs_all_none": True,
             "condition_mask_negative_rejected": True,
+            "step0_save_after_first_live_record": True,
+            "step0_save_before_forward_and_optimizer": True,
         }
     return {
         "status": "passed",
@@ -1448,6 +1491,16 @@ def _make_acceptance(receipt: dict[str, Any]) -> dict[str, Any]:
         "precursor_receipt_bytes_sha256": receipt["precursor"]["receipt_bytes_sha256"],
         "precursor_checkpoint_dir_record_only": str(fixture_root / "precursor"),
         "precursor_bundle_sha256": receipt["precursor"]["bundle_sha256"],
+        "precursor_gate_path_record_only": str(
+            fixture_root / "precursor-gate.json"
+        ),
+        "precursor_gate_sha256": _h(f"precursor-gate-{label}"),
+        "precursor_gate_reviewer_acceptance_path_record_only": str(
+            fixture_root / "precursor-gate-review.json"
+        ),
+        "precursor_gate_reviewer_acceptance_sha256": _h(
+            f"precursor-gate-review-{label}"
+        ),
         "hardened_preflight_path_record_only": str(fixture_root / "hardened.json"),
         "hardened_preflight_receipt_sha256": receipt["evidence"][
             "hardened_preflight_receipt_sha256"
@@ -1476,7 +1529,12 @@ def _make_acceptance(receipt: dict[str, Any]) -> dict[str, Any]:
             "trace_manifest_sha256"
         ],
         "matched_control_trace_path_by_route": {
-            item: str(fixture_root / f"{item}.jsonl") for item in CAUSAL_ROUTES
+            item: {"0": str(fixture_root / f"{item}.jsonl")}
+            for item in CAUSAL_ROUTES
+        },
+        "matched_control_trace_sha256_by_route": {
+            item: {"0": _h(f"matched-control-trace-bytes-{item}")}
+            for item in CAUSAL_ROUTES
         },
         "current_run_trace_prefix_receipt_sha256": receipt["checkpoint_file"][
             "current_run_trace_prefix_receipt"
@@ -1539,6 +1597,26 @@ def _route_outputs(workspace: Path) -> None:
             raise AssertionError(
                 f"target-free inference accepted target key {target_key}"
             )
+
+    from world_action_model.contact_transition_schema import (
+        stable_equal_bit_mixed_logits,
+        validated_equal_bit_mixing_matrix,
+    )
+
+    probe_matrix = validated_equal_bit_mixing_matrix()
+    threshold_probe = torch.from_numpy(
+        (-1.0e-4 * probe_matrix[0].astype(np.float32))[None, None, :]
+    )
+    threshold_mixed = stable_equal_bit_mixed_logits(threshold_probe)
+    if (
+        not threshold_mixed[0, 0, 0].item() < 0
+        or not threshold_mixed.to(torch.bfloat16).sigmoid()[0, 0, 0].item()
+        == 0.5
+        or bool(threshold_mixed.ge(0)[0, 0, 0])
+    ):
+        raise AssertionError(
+            "equal-bit stable sign threshold did not cover the bf16 sigmoid boundary"
+        )
 
     equal_output = None
     for route in CAUSAL_ROUTES:

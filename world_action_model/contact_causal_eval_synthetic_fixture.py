@@ -113,6 +113,10 @@ def _run_checkpoint_reviewer_cli(
         str(precursor["receipt_path"]),
         "--precursor-checkpoint-dir",
         str(precursor["checkpoint_dir"]),
+        "--precursor-gate",
+        str(precursor["gate_path"]),
+        "--precursor-gate-reviewer-acceptance",
+        str(precursor["gate_review_path"]),
         "--hardened-preflight-receipt",
         str(seed_artifact["hardened_preflight_path"]),
         "--production-preflight-receipt",
@@ -1206,12 +1210,25 @@ def _build_precursor(
     import io
     import torch
 
-    from world_action_model.contact_causal_production import named_tensor_digest
+    from world_action_model.contact_causal_gate_bootstrap import (
+        EGO_BOOTSTRAP_CODE_PATHS,
+        _gate_contract_sha,
+        runtime_environment_sha256_stdlib,
+    )
+    from world_action_model.contact_causal_production import (
+        PRECURSOR_ID,
+        current_head_source_tree_receipt,
+        named_tensor_digest,
+        sha256_json,
+    )
     from world_action_model.contact_ego_causal_precursor import (
+        EVIDENCE_REPORT_KEYS,
+        FINGERPRINT_KEYS,
         build_live_precursor_receipt,
         freeze_precursor_action_path,
         precursor_objective_contract,
     )
+    from world_action_model.verified_io import verified_head_code_manifest
 
     class SyntheticPrecursor(torch.nn.Module):
         def __init__(self) -> None:
@@ -1249,31 +1266,123 @@ def _build_precursor(
         _use_new_zipfile_serialization=False,
     )
     (checkpoint_dir / "diffusion_pytorch_model.bin").write_bytes(payload.getvalue())
+    objective = precursor_objective_contract(fixed_save_step=100)
+    head = _git_head(repository_root)
+    source_sha = sha256_json(
+        current_head_source_tree_receipt(repository_root, expected_commit=head)
+    )
+    _, code_rows = verified_head_code_manifest(
+        repository_root, EGO_BOOTSTRAP_CODE_PATHS, expected_commit=head
+    )
+    code_sha = {
+        row["logical_path"]: row["head_blob_sha256"] for row in code_rows
+    }
+    evidence_reports = {}
+    for name in EVIDENCE_REPORT_KEYS:
+        if name == "external_reviewer_acceptance":
+            continue
+        report_path = fixture / f"precursor-{name}.json"
+        report_sha = _write_json(
+            report_path, {"synthetic_precursor_report": name}
+        )
+        evidence_reports[name] = {
+            "path": str(report_path),
+            "sha256": report_sha,
+        }
+    review_path = fixture / "precursor-gate-review.json"
+    evidence_reports["external_reviewer_acceptance"] = {
+        "path": str(review_path),
+        "sha256": _synthetic_sha("pending-precursor-review"),
+    }
+    root_bundle_sha = _synthetic_sha("synthetic-precursor-root")
+    fingerprints = {
+        name: _synthetic_sha(f"synthetic-precursor-{name}")
+        for name in FINGERPRINT_KEYS
+    }
+    fingerprints.update(
+        runtime_environment_sha256=runtime_environment_sha256_stdlib(),
+        current_head_source_tree_sha256=source_sha,
+        root_checkpoint_bundle_sha256=root_bundle_sha,
+        precursor_contract_sha256=objective["receipt_sha256"],
+    )
+    gate = {
+        "gate_version": "ego-discrete-contact-stage1-training-gate/v7",
+        "precursor_id": PRECURSOR_ID,
+        "evidence_valid_until_utc": "2099-12-31T23:59:59Z",
+        "expected_git_commit": head,
+        "training_run_id": "synthetic-precursor-training-run-id",
+        "training_run_nonce": "synthetic-precursor-training-run-nonce",
+        "human_adjudicated_contact_labels_passed": True,
+        "dual_annotation_agreement_passed": True,
+        "group_metadata_complete": True,
+        "dataset_source_binding_passed": True,
+        "t5_independent_replay_passed": True,
+        "route_neutral_objective_reviewed": True,
+        "action_path_excluded_from_scientific_io": True,
+        "parameter_freeze_receipt_passed": True,
+        "fixed_save_step_preregistered": True,
+        "allow_server_training": True,
+        "allow_5b_training": True,
+        "fixed_save_step": 100,
+        "objective_contract": objective,
+        "artifact_fingerprints": fingerprints,
+        "episode_npz_sha256": {
+            "episode_000001.npz": _synthetic_sha("precursor-episode")
+        },
+        "evidence_reports": evidence_reports,
+        "reviewed_by": "synthetic-precursor-gate-reviewed-by",
+        "reviewed_at_utc": "2026-08-11T00:00:00Z",
+        "note": "Synthetic CPU provenance fixture; no training admission.",
+    }
+    review = {
+        "acceptance_version": "ego-contact-planner-gate-independent-acceptance/v1",
+        "status": "accepted",
+        "accepted": True,
+        "precursor_id": PRECURSOR_ID,
+        "reviewer_identity": "synthetic-precursor-external-reviewer",
+        "reviewer_attestation_nonce": "synthetic-precursor-review-attestation",
+        "acceptance_run_id": "synthetic-precursor-review-run-id",
+        "acceptance_run_nonce": "synthetic-precursor-review-run-nonce",
+        "training_run_id": gate["training_run_id"],
+        "training_run_nonce": gate["training_run_nonce"],
+        "evidence_valid_until_utc": gate["evidence_valid_until_utc"],
+        "reviewed_at_utc": "2026-08-11T00:00:01Z",
+        "reviewed_gate_contract_sha256": _gate_contract_sha(
+            gate, review_report_name="external_reviewer_acceptance"
+        ),
+        "reviewed_git_commit": head,
+        "reviewed_code_blob_sha256": code_sha,
+        **fingerprints,
+        "human_adjudicated_contact_only": True,
+        "action_used_as_contact_proxy": False,
+        "hand_active_used_as_contact_proxy": False,
+        "other_proxy_used_as_contact": False,
+    }
+    review_sha = _write_json(review_path, review)
+    gate["evidence_reports"]["external_reviewer_acceptance"][
+        "sha256"
+    ] = review_sha
+    gate_path = fixture / "precursor-gate.json"
+    gate_sha = _write_json(gate_path, gate)
     receipt, bundle = build_live_precursor_receipt(
         model=model,
         checkpoint_dir=checkpoint_dir,
         parameter_partition=partition,
-        objective_contract=precursor_objective_contract(fixed_save_step=100),
+        objective_contract=objective,
         evidence_base={
-            "gate_sha256": _synthetic_sha("synthetic-precursor-gate"),
-            "root_checkpoint_bundle_sha256": _synthetic_sha(
-                "synthetic-precursor-root"
-            ),
+            "gate_sha256": gate_sha,
+            "root_checkpoint_bundle_sha256": root_bundle_sha,
             "dataset_source_tree_sha256": _synthetic_sha(
                 "synthetic-precursor-dataset"
             ),
             "sidecar_bundle_sha256": _synthetic_sha(
                 "synthetic-precursor-sidecar"
             ),
-            "training_code_head": _git_head(repository_root),
-            "training_code_source_tree_sha256": _synthetic_sha(
-                "synthetic-precursor-source"
-            ),
+            "training_code_head": head,
+            "training_code_source_tree_sha256": source_sha,
             "training_run_id": "synthetic-precursor-training-run-id",
             "training_run_nonce": "synthetic-precursor-training-run-nonce",
-            "reviewer_acceptance_sha256": _synthetic_sha(
-                "synthetic-precursor-review"
-            ),
+            "reviewer_acceptance_sha256": review_sha,
         },
         root_parameter_tensor_sha256=live_sha,
         frozen_root_tensor_sha256=frozen,
@@ -1285,6 +1394,10 @@ def _build_precursor(
         "receipt_path": receipt_path,
         "receipt_bytes_sha256": receipt_sha,
         "checkpoint_dir": checkpoint_dir,
+        "gate_path": gate_path,
+        "gate_sha256": gate_sha,
+        "gate_review_path": review_path,
+        "gate_review_sha256": review_sha,
         "bundle_sha256": bundle["bundle_sha256"],
         "parameter_tensor_sha256": live_sha,
     }
@@ -2613,6 +2726,16 @@ def build_synthetic_causal_admission_fixture(
                         source_tree_sha256=source_sha,
                         matrix_manifest_sha256=matrix_sha,
                         precursor_bundle_sha256=precursor["bundle_sha256"],
+                        precursor_gate_path_record_only=str(
+                            precursor["gate_path"]
+                        ),
+                        precursor_gate_sha256=precursor["gate_sha256"],
+                        precursor_gate_reviewer_acceptance_path_record_only=str(
+                            precursor["gate_review_path"]
+                        ),
+                        precursor_gate_reviewer_acceptance_sha256=precursor[
+                            "gate_review_sha256"
+                        ],
                         base_weights_sha256=precursor["parameter_tensor_sha256"],
                         initial_parameter_tensor_sha256=precursor[
                             "parameter_tensor_sha256"
@@ -2746,7 +2869,13 @@ def build_synthetic_causal_admission_fixture(
                             "trace_manifest_sha256"
                         ],
                         matched_control_trace_path_by_route={
-                            item: str(path)
+                            item: {"0": str(path)}
+                            for item, path in traces[
+                                "trace_path_by_route"
+                            ].items()
+                        },
+                        matched_control_trace_sha256_by_route={
+                            item: {"0": _sha_file(path)}
                             for item, path in traces[
                                 "trace_path_by_route"
                             ].items()

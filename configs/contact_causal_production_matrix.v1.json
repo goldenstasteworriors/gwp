@@ -1158,6 +1158,8 @@
     "/checkpoint_file/current_run_trace_prefix_receipt/run_nonce",
     "/checkpoint_file/current_run_trace_prefix_receipt/record_sha256_by_key",
     "/checkpoint_file/current_run_trace_prefix_receipt/trace_path_record_only",
+    "/checkpoint_file/current_run_trace_prefix_receipt/trace_prefix_size_bytes",
+    "/checkpoint_file/current_run_trace_prefix_receipt/trace_prefix_bytes_sha256",
     "/checkpoint_file/current_run_trace_prefix_receipt/receipt_sha256"
   ],
   "versions": {

@@ -27,13 +27,20 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, required=True)
     for route in CAUSAL_ROUTES:
-        parser.add_argument(f"--{route.replace('_', '-')}", type=Path, required=True)
+        parser.add_argument(
+            f"--{route.replace('_', '-')}",
+            type=Path,
+            action="append",
+            required=True,
+        )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     records = {
-        route: load_trace_jsonl(
-            getattr(args, route), route=route
-        )
+        route: [
+            record
+            for path in getattr(args, route)
+            for record in load_trace_jsonl(path, route=route)
+        ]
         for route in CAUSAL_ROUTES
     }
     report = compare_causal_records(records, required_seed=args.seed)

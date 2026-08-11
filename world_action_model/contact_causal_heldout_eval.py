@@ -426,13 +426,15 @@ def _recompute_route_packet_metrics(
         from world_action_model.contact_transition_schema import (
             EQUAL_BIT_NUM_BITS,
             EQUAL_BIT_VALID_STATES,
+            stable_equal_bit_mixed_logits,
             unstructured_ids_to_code,
-            validated_equal_bit_mixing_matrix,
         )
+        import torch
 
-        matrix = validated_equal_bit_mixing_matrix().astype(np.float32)
-        mixed = np.einsum("nqw,bw->nqb", logits, matrix, optimize=False)
-        raw_bits = mixed >= 0.0
+        mixed = stable_equal_bit_mixed_logits(
+            torch.from_numpy(np.asarray(logits, dtype=np.float32))
+        )
+        raw_bits = mixed.ge(0).cpu().numpy()
         weights = (1 << np.arange(EQUAL_BIT_NUM_BITS, dtype=np.uint32))
         raw_ids = (raw_bits.astype(np.uint32) * weights).sum(
             axis=-1, dtype=np.uint32
@@ -752,8 +754,12 @@ def validate_result_v3(
     value: object,
     *,
     verify_files: bool = True,
-    replay_predictions: bool = False,
+    replay_predictions: bool = True,
 ) -> dict[str, Any]:
+    if verify_files and replay_predictions is not True:
+        raise CausalProductionError(
+            "file-backed causal results require independent checkpoint prediction replay"
+        )
     result = _exact(
         value,
         {
@@ -1393,8 +1399,12 @@ def validate_aggregate_v5(
     *,
     evidence: Mapping[tuple[int, str, int], tuple[Mapping[str, Any], Mapping[str, Any]]],
     verify_files: bool = True,
-    replay_predictions: bool = False,
+    replay_predictions: bool = True,
 ) -> dict[str, Any]:
+    if verify_files and replay_predictions is not True:
+        raise CausalProductionError(
+            "file-backed causal aggregates require all nine checkpoint prediction replays"
+        )
     if verify_files:
         try:
             from world_action_model.contact_asym25_heldout_eval import (
@@ -1585,8 +1595,12 @@ def build_aggregate_v5(
     result_path_by_seed_route: Mapping[str, str | Path],
     evidence: Mapping[tuple[int, str, int], tuple[Mapping[str, Any], Mapping[str, Any]]],
     verify_files: bool = True,
-    replay_predictions: bool = False,
+    replay_predictions: bool = True,
 ) -> dict[str, Any]:
+    if verify_files and replay_predictions is not True:
+        raise CausalProductionError(
+            "file-backed causal aggregate construction requires prediction replay"
+        )
     try:
         from world_action_model.contact_asym25_heldout_eval import (
             read_per_window_csv,
@@ -1610,8 +1624,8 @@ def build_aggregate_v5(
         result, digest, _ = strict_json_file(path, name=f"causal held-out result {key}")
         validate_result_v3(
             result,
-            verify_files=True,
-            replay_predictions=False,
+            verify_files=verify_files,
+            replay_predictions=replay_predictions,
         )
         entries[key] = {
             "path_record_only": str(Path(path).expanduser().absolute()),

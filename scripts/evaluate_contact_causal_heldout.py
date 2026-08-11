@@ -13,10 +13,92 @@ import stat
 import subprocess
 import sys
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _stdlib_bootstrap_evaluator_head(root: Path) -> str:
+    """Verify the HEAD-declared evaluator tree before NumPy/project imports."""
+
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "HEAD^{commit}"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).stdout.strip()
+    manifest_payload = subprocess.run(
+        [
+            "git", "-C", str(root), "cat-file", "blob",
+            f"{head}:configs/contact_causal_production_matrix.v1.json",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    ).stdout
+    manifest = json.loads(manifest_payload.decode("utf-8"))
+    logical_paths = manifest.get("source_logical_paths")
+    if (
+        not isinstance(logical_paths, list)
+        or "scripts/evaluate_contact_causal_heldout.py" not in logical_paths
+        or len(logical_paths) != len(set(logical_paths))
+    ):
+        raise RuntimeError("causal evaluator HEAD source manifest differs")
+    for logical_path in logical_paths:
+        if (
+            not isinstance(logical_path, str)
+            or Path(logical_path).is_absolute()
+            or ".." in Path(logical_path).parts
+        ):
+            raise RuntimeError("causal evaluator HEAD source path is unsafe")
+        expected = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "blob", f"{head}:{logical_path}"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        ).stdout
+        path = root / logical_path
+        before = os.lstat(path)
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise RuntimeError("causal evaluator runtime source is unsafe")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
+            os, "O_NOFOLLOW", 0
+        )
+        fd = os.open(path, flags)
+        try:
+            opened = os.fstat(fd)
+            chunks = []
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            after = os.fstat(fd)
+        finally:
+            os.close(fd)
+        if (
+            (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or b"".join(chunks) != expected
+        ):
+            raise RuntimeError(
+                f"causal evaluator source differs from HEAD: {logical_path}"
+            )
+    if subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "HEAD^{commit}"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).stdout.strip() != head:
+        raise RuntimeError("causal evaluator HEAD changed during bootstrap")
+    return head
+
+
+_EVALUATOR_BOOTSTRAP_HEAD = _stdlib_bootstrap_evaluator_head(REPOSITORY_ROOT)
+
 import numpy as np
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
@@ -67,6 +149,10 @@ from world_action_model.contact_causal_production import (  # noqa: E402
 def _source_contract(causal_path: Path, hardened_path: Path):
     causal, causal_sha, _ = strict_json_file(causal_path, name="causal preflight v2")
     validate_preflight_receipt_v2(causal)
+    if causal["git_commit"] != _EVALUATOR_BOOTSTRAP_HEAD:
+        raise CausalProductionError(
+            "causal evaluator preflight differs from stdlib bootstrap HEAD"
+        )
     try:
         hardened, hardened_sha = load_and_replay_preflight_receipt(hardened_path)
         _, assignments = load_completed_group_split(
@@ -261,6 +347,7 @@ def predict_phase(args: argparse.Namespace) -> None:
         inference_steps=args.inference_steps,
         verified_private_cache_parent=str(cache_parent),
         verified_run_nonce=evaluator_nonce,
+        base_model_source_snapshot=base_snapshot,
     )
     steps: list[int] = []
     window_ids: list[str] = []
@@ -272,7 +359,8 @@ def predict_phase(args: argparse.Namespace) -> None:
         for step in CHECKPOINT_STEPS:
             receipt, _ = accepted[step]
             runtime.load_checkpoint(
-                str(Path(receipt["checkpoint_file"]["path_record_only"]).parent)
+                str(Path(receipt["checkpoint_file"]["path_record_only"]).parent),
+                checkpoint_receipt=receipt,
             )
             if runtime.causal_route != route:
                 raise CausalProductionError("prediction checkpoint route differs")
@@ -743,7 +831,7 @@ def evaluate(args: argparse.Namespace) -> None:
         "oracle_used": False,
         "benefit_claimed": False,
     }
-    validate_result_v3(result, verify_files=True)
+    validate_result_v3(result, verify_files=True, replay_predictions=True)
     result_path = output_dir / "contact_causal_heldout_result.json"
     result_sha = write_strict_json(result_path, result, overwrite=args.overwrite)
     print(json.dumps({"result": str(result_path), "sha256": result_sha}, sort_keys=True))
@@ -756,7 +844,7 @@ def aggregate(args: argparse.Namespace) -> None:
     evidence = {}
     for path in args.result:
         result, _, _ = strict_json_file(path, name="causal held-out result")
-        validate_result_v3(result, verify_files=True, replay_predictions=False)
+        validate_result_v3(result, verify_files=True, replay_predictions=True)
         key = f"{result['seed']}/{result['causal_route_id']}"
         if key in paths:
             raise CausalProductionError("duplicate causal aggregate seed/route")

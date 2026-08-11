@@ -68,6 +68,38 @@ DIRECT_UNUSED_PARAMETER_NAMES = (
     "contact_condition_encoder.bias",
     "contact_condition_encoder.weight",
 )
+
+
+def expected_route_unused_parameter_names(
+    parameter_names: Sequence[str], *, route: str
+) -> list[str]:
+    """Derive the exact architecture-declared dead projections plus route-local pair."""
+
+    ensure_exact_causal_route(route)
+    common_suffixes = (
+        "condition_embedder.text_embedder.linear_1.bias",
+        "condition_embedder.text_embedder.linear_1.weight",
+        "condition_embedder.text_embedder.linear_2.bias",
+        "condition_embedder.text_embedder.linear_2.weight",
+    )
+    structural = {
+        name
+        for name in parameter_names
+        if name in common_suffixes
+        or name
+        in tuple(f"action_{suffix}" for suffix in common_suffixes)
+        or (
+            re.fullmatch(
+                r"blocks\.[0-9]+\.(?:action|visual)_expert\.attn2\."
+                r"(?:norm_k\.weight|to_[kv]\.(?:bias|weight))",
+                name,
+            )
+            is not None
+        )
+    }
+    if route == "aux_only_direct_q12":
+        structural.update(DIRECT_UNUSED_PARAMETER_NAMES)
+    return sorted(structural)
 SOURCE_TREE_RECEIPT_VERSION = "contact-causal-current-head-source-tree/v1"
 SOURCE_LOGICAL_PATHS = (
     "configs/contact_causal_production_matrix.v1.json",
@@ -191,6 +223,8 @@ CROSS_SEED_JSON_POINTERS = (
     "/checkpoint_file/current_run_trace_prefix_receipt/run_nonce",
     "/checkpoint_file/current_run_trace_prefix_receipt/record_sha256_by_key",
     "/checkpoint_file/current_run_trace_prefix_receipt/trace_path_record_only",
+    "/checkpoint_file/current_run_trace_prefix_receipt/trace_prefix_size_bytes",
+    "/checkpoint_file/current_run_trace_prefix_receipt/trace_prefix_bytes_sha256",
     "/checkpoint_file/current_run_trace_prefix_receipt/receipt_sha256",
 )
 
@@ -832,23 +866,12 @@ def validate_parameter_topology(value: object, *, route: str, step: int) -> dict
         raise CausalProductionError("unused parameter allowlist is invalid")
     if unused != sorted(set(unused)) or sha256_json(unused) != receipt["unused_parameter_names_sha256"]:
         raise CausalProductionError("unused parameter allowlist digest differs")
-    direct_unused = set(DIRECT_UNUSED_PARAMETER_NAMES)
-    if step == 0:
-        expected_step0_unused = (
-            list(DIRECT_UNUSED_PARAMETER_NAMES)
-            if route == "aux_only_direct_q12"
-            else []
-        )
-        if unused != expected_step0_unused:
-            raise CausalProductionError("step-0 route-unused set differs")
-    elif route == "aux_only_direct_q12":
-        if not direct_unused.issubset(unused):
-            raise CausalProductionError(
-                "direct route did not retain its exact 22-to-action inactive set"
-            )
-    elif direct_unused & set(unused):
+    expected_unused = expected_route_unused_parameter_names(
+        sorted(parameter_name_set), route=route
+    )
+    if unused != expected_unused:
         raise CausalProductionError(
-            "strict route declared its 22-to-action encoder inactive"
+            "route-unused parameters differ from the exact model-derived allowlist"
         )
     if (
         receipt["unused_parameters_have_grad"] is not False
@@ -1227,11 +1250,14 @@ def validate_training_receipt_v5(value: object) -> dict[str, Any]:
         raise CausalProductionError(
             "active-gradient parameter count differs from the live active set"
         )
-    expected_no_action_gradient = direct or receipt["checkpoint_step"] == 0
+    expected_action_gradient = (
+        []
+        if direct or receipt["checkpoint_step"] == 0
+        else planner_names
+    )
     if (
-        any(name not in planner_names or name not in active for name in action_gradient)
-        or (expected_no_action_gradient and action_gradient)
-        or (not expected_no_action_gradient and not action_gradient)
+        action_gradient != expected_action_gradient
+        or any(name not in active for name in action_gradient)
         or reachability["action_loss_reaches_planner"] is not bool(action_gradient)
         or reachability["unused_parameter_names"]
         != receipt["parameter_topology"]["unused_parameter_names"]
@@ -1543,18 +1569,18 @@ def build_live_training_state_receipts(
             "live causal model route-unused parameter schema differs"
         )
     observed = sorted(set(observed_gradient_parameter_names))
+    expected_unused = expected_route_unused_parameter_names(
+        sorted(named_parameters), route=route
+    )
     if checkpoint_step == 0:
-        unused = (
-            direct_route_unused if route == "aux_only_direct_q12" else []
-        )
+        unused = expected_unused
     else:
         unused = sorted(set(named_parameters) - set(observed))
-    if route == "aux_only_direct_q12":
-        if not set(direct_route_unused).issubset(unused):
-            raise CausalProductionError("live direct unused parameter set differs")
-    elif set(direct_route_unused) & set(unused):
+    if unused != expected_unused:
         raise CausalProductionError(
-            "strict route did not activate its 22-to-action encoder"
+            "live unused set differs from the exact route-derived allowlist: "
+            f"missing={sorted(set(expected_unused) - set(unused))},"
+            f"extra={sorted(set(unused) - set(expected_unused))}"
         )
     parameter_names = sorted(named_parameters)
     active = sorted(set(parameter_names) - set(unused))
@@ -1796,6 +1822,10 @@ def validate_acceptance_v3(value: object, *, receipt: Mapping[str, Any]) -> dict
             "precursor_receipt_bytes_sha256",
             "precursor_checkpoint_dir_record_only",
             "precursor_bundle_sha256",
+            "precursor_gate_path_record_only",
+            "precursor_gate_sha256",
+            "precursor_gate_reviewer_acceptance_path_record_only",
+            "precursor_gate_reviewer_acceptance_sha256",
             "hardened_preflight_path_record_only",
             "hardened_preflight_receipt_sha256",
             "production_preflight_path_record_only",
@@ -1810,6 +1840,7 @@ def validate_acceptance_v3(value: object, *, receipt: Mapping[str, Any]) -> dict
             "matched_control_report_sha256",
             "matched_control_trace_manifest_sha256",
             "matched_control_trace_path_by_route",
+            "matched_control_trace_sha256_by_route",
             "current_run_trace_prefix_receipt_sha256",
             "current_head_source_receipt_sha256",
             "reviewer_identity",
@@ -1880,6 +1911,8 @@ def validate_acceptance_v3(value: object, *, receipt: Mapping[str, Any]) -> dict
         "route_training_acceptance_sha256",
         "precursor_receipt_bytes_sha256",
         "precursor_bundle_sha256",
+        "precursor_gate_sha256",
+        "precursor_gate_reviewer_acceptance_sha256",
         "hardened_preflight_receipt_sha256",
         "production_preflight_receipt_sha256",
         "training_data_receipt_sha256",
@@ -1894,6 +1927,8 @@ def validate_acceptance_v3(value: object, *, receipt: Mapping[str, Any]) -> dict
         "gate_reviewer_acceptance_path_record_only",
         "route_training_acceptance_path_record_only",
         "precursor_receipt_path_record_only", "precursor_checkpoint_dir_record_only",
+        "precursor_gate_path_record_only",
+        "precursor_gate_reviewer_acceptance_path_record_only",
         "hardened_preflight_path_record_only", "production_preflight_path_record_only",
         "training_data_path_record_only", "coverage_path_record_only",
         "sidecar_dir_record_only", "t5_embedding_dir_record_only",
@@ -1906,12 +1941,36 @@ def validate_acceptance_v3(value: object, *, receipt: Mapping[str, Any]) -> dict
     ):
         raise CausalProductionError("acceptance evidence paths must be absolute")
     trace_paths = acceptance["matched_control_trace_path_by_route"]
+    trace_sha256 = acceptance["matched_control_trace_sha256_by_route"]
     if (
         not isinstance(trace_paths, dict)
         or list(trace_paths) != list(CAUSAL_ROUTES)
-        or any(not isinstance(path, str) or not Path(path).is_absolute() for path in trace_paths.values())
+        or not isinstance(trace_sha256, dict)
+        or list(trace_sha256) != list(CAUSAL_ROUTES)
     ):
         raise CausalProductionError("acceptance matched trace path map differs")
+    expected_rank_keys = [
+        str(rank) for rank in range(receipt["topology"]["world_size"])
+    ]
+    for route_name in CAUSAL_ROUTES:
+        route_paths = trace_paths[route_name]
+        route_sha = trace_sha256[route_name]
+        if (
+            not isinstance(route_paths, dict)
+            or list(route_paths) != expected_rank_keys
+            or not isinstance(route_sha, dict)
+            or list(route_sha) != expected_rank_keys
+            or any(
+                not isinstance(path, str) or not Path(path).is_absolute()
+                for path in route_paths.values()
+            )
+        ):
+            raise CausalProductionError("acceptance matched trace rank map differs")
+        for rank_key in expected_rank_keys:
+            _sha(
+                route_sha[rank_key],
+                f"acceptance matched trace bytes {route_name}/rank{rank_key}",
+            )
     if not isinstance(acceptance["reviewed_at_utc"], str) or not _UTC_RE.fullmatch(
         acceptance["reviewed_at_utc"]
     ):
@@ -1982,7 +2041,12 @@ def verify_acceptance_bound_artifacts_v3(
         validate_collector_report_v3,
     )
     from world_action_model.contact_ego_causal_precursor import (
+        replay_precursor_gate_evidence_bytes,
+        validate_precursor_gate,
         validate_precursor_receipt,
+    )
+    from world_action_model.contact_causal_gate_bootstrap import (
+        validate_ego_precursor_review_v1,
     )
     from world_action_model.contact_causal_checkpoint import (
         inspect_causal_checkpoint_bundle,
@@ -2030,6 +2094,33 @@ def verify_acceptance_bound_artifacts_v3(
         name="accepted precursor receipt",
     )
     validate_precursor_receipt(precursor)
+    precursor_gate, precursor_gate_sha, _ = strict_json_file(
+        acceptance["precursor_gate_path_record_only"],
+        name="accepted Ego v7 precursor gate",
+    )
+    validate_precursor_gate(precursor_gate)
+    replay_precursor_gate_evidence_bytes(
+        precursor_gate,
+        gate_path=acceptance["precursor_gate_path_record_only"],
+    )
+    precursor_review, precursor_review_sha, _ = strict_json_file(
+        acceptance["precursor_gate_reviewer_acceptance_path_record_only"],
+        name="accepted Ego v7 precursor review",
+    )
+    validate_ego_precursor_review_v1(
+        precursor_review,
+        gate=precursor_gate,
+        gate_bytes_sha256=precursor_gate_sha,
+        repository_root=root,
+    )
+    expected_precursor_review_path = Path(
+        precursor_gate["evidence_reports"]["external_reviewer_acceptance"]["path"]
+    )
+    if not expected_precursor_review_path.is_absolute():
+        expected_precursor_review_path = (
+            Path(acceptance["precursor_gate_path_record_only"]).parent
+            / expected_precursor_review_path
+        )
     precursor_bundle = inspect_causal_checkpoint_bundle(
         acceptance["precursor_checkpoint_dir_record_only"]
     )
@@ -2040,6 +2131,21 @@ def verify_acceptance_bound_artifacts_v3(
     parameter_names = precursor["parameter_partition"]["all_parameter_names"]
     if (
         precursor_sha != acceptance["precursor_receipt_bytes_sha256"]
+        or precursor_gate_sha != acceptance["precursor_gate_sha256"]
+        or precursor_gate_sha != precursor["gate_sha256"]
+        or precursor_review_sha
+        != acceptance["precursor_gate_reviewer_acceptance_sha256"]
+        or precursor_review_sha != precursor["reviewer_acceptance_sha256"]
+        or precursor_review_sha
+        != precursor_gate["evidence_reports"]["external_reviewer_acceptance"][
+            "sha256"
+        ]
+        or Path(
+            acceptance["precursor_gate_reviewer_acceptance_path_record_only"]
+        ).absolute()
+        != expected_precursor_review_path.absolute()
+        or precursor["training_run_id"] != precursor_gate["training_run_id"]
+        or precursor["training_run_nonce"] != precursor_gate["training_run_nonce"]
         or precursor_sha
         != gate["artifact_fingerprints"]["precursor_receipt_bytes_sha256"]
         or precursor_bundle["bundle_manifest"]["bundle_sha256"]
@@ -2107,10 +2213,28 @@ def verify_acceptance_bound_artifacts_v3(
     ):
         raise CausalProductionError("accepted runtime source bytes changed")
 
-    traces = {
-        route_name: load_trace_jsonl(path, route=route_name)
-        for route_name, path in acceptance["matched_control_trace_path_by_route"].items()
-    }
+    from world_action_model.verified_io import hash_verified_regular_file
+
+    traces = {}
+    for route_name, rank_paths in acceptance[
+        "matched_control_trace_path_by_route"
+    ].items():
+        route_records = []
+        for rank_key, path in rank_paths.items():
+            actual_trace_sha256, _ = hash_verified_regular_file(path)
+            if actual_trace_sha256 != acceptance[
+                "matched_control_trace_sha256_by_route"
+            ][route_name][rank_key]:
+                raise CausalProductionError(
+                    "accepted matched-control trace bytes changed"
+                )
+            loaded = load_trace_jsonl(path, route=route_name)
+            if {record["rank"] for record in loaded} != {int(rank_key)}:
+                raise CausalProductionError(
+                    "accepted matched-control trace rank differs"
+                )
+            route_records.extend(loaded)
+        traces[route_name] = route_records
     report, report_sha, _ = strict_json_file(
         acceptance["matched_control_report_path_record_only"],
         name="accepted current-run matched-control report",
@@ -2129,7 +2253,11 @@ def verify_acceptance_bound_artifacts_v3(
     prefix = receipt["checkpoint_file"]["current_run_trace_prefix_receipt"]
     if (
         Path(prefix["trace_path_record_only"]).absolute()
-        != Path(acceptance["matched_control_trace_path_by_route"][route]).absolute()
+        != Path(
+            acceptance["matched_control_trace_path_by_route"][route][
+                str(prefix["rank"])
+            ]
+        ).absolute()
         or replay_current_run_trace_prefix_v1(prefix) != prefix
     ):
         raise CausalProductionError("accepted current-run trace prefix changed")
@@ -2162,6 +2290,7 @@ def validate_27_checkpoint_matrix(
     acceptance_hashes: set[str] = set()
     precursor_receipt_bytes: set[str] = set()
     precursor_bundles: set[str] = set()
+    precursor_provenance_replayed = False
     step0_weights: set[str] = set()
     common_by_seed: dict[str, str] = {}
     common_by_route: dict[str, str] = {}
@@ -2243,6 +2372,68 @@ def validate_27_checkpoint_matrix(
                     )
                 all_identities.update(external_identities)
                 externally_replayed_gates.add(gate_sha256)
+            if not precursor_provenance_replayed:
+                from world_action_model.contact_causal_gate_bootstrap import (
+                    validate_ego_precursor_review_v1,
+                )
+                from world_action_model.contact_ego_causal_precursor import (
+                    validate_precursor_gate,
+                    validate_precursor_receipt,
+                )
+
+                precursor_value, precursor_sha, _ = strict_json_file(
+                    acceptance["precursor_receipt_path_record_only"],
+                    name="matrix precursor identity replay",
+                )
+                validate_precursor_receipt(precursor_value)
+                precursor_gate, precursor_gate_sha, _ = strict_json_file(
+                    acceptance["precursor_gate_path_record_only"],
+                    name="matrix precursor gate identity replay",
+                )
+                validate_precursor_gate(precursor_gate)
+                precursor_review, precursor_review_sha, _ = strict_json_file(
+                    acceptance[
+                        "precursor_gate_reviewer_acceptance_path_record_only"
+                    ],
+                    name="matrix precursor reviewer identity replay",
+                )
+                validate_ego_precursor_review_v1(
+                    precursor_review,
+                    gate=precursor_gate,
+                    gate_bytes_sha256=precursor_gate_sha,
+                    repository_root=(
+                        Path(__file__).resolve().parents[1]
+                        if repository_root is None
+                        else repository_root
+                    ),
+                )
+                if (
+                    precursor_sha != receipt["precursor"]["receipt_bytes_sha256"]
+                    or precursor_gate_sha != precursor_value["gate_sha256"]
+                    or precursor_review_sha
+                    != precursor_value["reviewer_acceptance_sha256"]
+                ):
+                    raise CausalProductionError(
+                        "matrix precursor provenance bytes differ"
+                    )
+                precursor_identities = {
+                    precursor_value["training_run_id"],
+                    precursor_value["training_run_nonce"],
+                    precursor_gate["reviewed_by"],
+                    precursor_review["reviewer_identity"],
+                    precursor_review["reviewer_attestation_nonce"],
+                    precursor_review["acceptance_run_id"],
+                    precursor_review["acceptance_run_nonce"],
+                }
+                if (
+                    len(precursor_identities) != 7
+                    or all_identities.intersection(precursor_identities)
+                ):
+                    raise CausalProductionError(
+                        "precursor provenance identity is globally reused"
+                    )
+                all_identities.update(precursor_identities)
+                precursor_provenance_replayed = True
         receipt_ids = {
             receipt["run_identity"]["training_run_id"],
             receipt["run_identity"]["training_run_nonce"],

@@ -165,6 +165,33 @@ def validated_equal_bit_mixing_matrix() -> np.ndarray:
     return matrix.copy()
 
 
+def stable_equal_bit_mixed_logits(contact_logits):
+    """Compute the fixed Rademacher projection in an explicit float32 order."""
+
+    import torch
+
+    if (
+        not isinstance(contact_logits, torch.Tensor)
+        or contact_logits.shape[-1] != EQUAL_BIT_CODE_WIDTH
+        or not torch.isfinite(contact_logits).all()
+    ):
+        raise ValueError("equal-bit projection requires finite 22-D tensor logits")
+    matrix = torch.as_tensor(
+        validated_equal_bit_mixing_matrix(),
+        device=contact_logits.device,
+        dtype=torch.float32,
+    )
+    source = contact_logits.to(dtype=torch.float32)
+    mixed = torch.zeros(
+        (*source.shape[:-1], EQUAL_BIT_NUM_BITS),
+        device=source.device,
+        dtype=torch.float32,
+    )
+    for width_index in range(EQUAL_BIT_CODE_WIDTH):
+        mixed = mixed + source[..., width_index, None] * matrix[:, width_index]
+    return mixed / math.sqrt(float(EQUAL_BIT_CODE_WIDTH))
+
+
 def unstructured_capacity_metadata(
     K: int = EQUAL_BIT_VALID_STATES,
     Q: int = 12,

@@ -203,6 +203,35 @@ def validate_precursor_gate(value: object) -> dict[str, Any]:
     return gate
 
 
+def replay_precursor_gate_evidence_bytes(
+    gate: Mapping[str, Any], *, gate_path: str | Path
+) -> dict[str, str]:
+    """Reopen every Ego v7 evidence report at the exact gate-bound bytes."""
+
+    validated = validate_precursor_gate(gate)
+    root = Path(gate_path).expanduser().absolute().parent
+    replayed = {}
+    for name in EVIDENCE_REPORT_KEYS:
+        entry = validated["evidence_reports"][name]
+        path = Path(entry["path"])
+        if not path.is_absolute():
+            path = root / path
+        try:
+            payload, digest, _ = read_verified_bytes(
+                path, expected_sha256=entry["sha256"]
+            )
+        except (OSError, ValueError) as exc:
+            raise CausalProductionError(
+                f"cannot replay Ego precursor evidence bytes: {name}"
+            ) from exc
+        if not payload or digest != entry["sha256"]:
+            raise CausalProductionError(
+                f"Ego precursor evidence bytes changed: {name}"
+            )
+        replayed[name] = digest
+    return replayed
+
+
 def validate_parameter_partition(value: object) -> dict[str, Any]:
     partition = _exact(
         value,

@@ -44,6 +44,7 @@ class ProductionHeldoutRuntime:
         verified_private_cache_parent: str | None = None,
         verified_training_run_nonce: str | None = None,
         open_metric_dataset: bool = True,
+        base_model_source_snapshot: Mapping[str, Any] | None = None,
     ) -> None:
         import torch
         from diffusers.models import AutoencoderKLWan
@@ -152,12 +153,73 @@ class ProductionHeldoutRuntime:
             self.dataset.open()
 
         self.base_model_path = str(Path(base_model_path).expanduser().absolute())
-        self.vae = AutoencoderKLWan.from_pretrained(
-            self.base_model_path,
-            subfolder="vae",
-            torch_dtype=self.dtype,
-            local_files_only=True,
-        )
+        if base_model_source_snapshot is None:
+            self.vae = AutoencoderKLWan.from_pretrained(
+                self.base_model_path,
+                subfolder="vae",
+                torch_dtype=self.dtype,
+                local_files_only=True,
+            )
+        else:
+            from world_action_model.contact_causal_checkpoint import (
+                SAFE_WEIGHT_FILES,
+                load_pinned_safe_weight_mapping,
+            )
+            from world_action_model.verified_io import (
+                read_verified_bytes,
+                strict_json_loads,
+            )
+
+            if (
+                base_model_source_snapshot.get("path_record_only")
+                != self.base_model_path
+                or not isinstance(
+                    base_model_source_snapshot.get("_runtime_rows"), list
+                )
+            ):
+                raise HeldoutEvaluationError(
+                    "pinned base-model snapshot path/schema differs"
+                )
+            base_rows = {
+                row["logical_path"]: row
+                for row in base_model_source_snapshot["_runtime_rows"]
+            }
+            config_row = base_rows.get("vae/config.json")
+            weight_names = [
+                f"vae/{name}"
+                for name in SAFE_WEIGHT_FILES
+                if f"vae/{name}" in base_rows
+            ]
+            if not isinstance(config_row, dict) or len(weight_names) != 1:
+                raise HeldoutEvaluationError(
+                    "pinned VAE requires one config and one approved weight file"
+                )
+            config_payload, config_sha256, _ = read_verified_bytes(
+                Path(self.base_model_path) / "vae/config.json",
+                expected_sha256=config_row["sha256"],
+                expected_stat=config_row["stat"],
+            )
+            if config_sha256 != config_row["sha256"]:
+                raise HeldoutEvaluationError("pinned VAE config bytes differ")
+            vae_config = strict_json_loads(
+                config_payload, name="pinned causal evaluator VAE config"
+            )
+            if not isinstance(vae_config, dict):
+                raise HeldoutEvaluationError("pinned VAE config must be an object")
+            weight_row = base_rows[weight_names[0]]
+            weight_path = Path(self.base_model_path) / weight_names[0]
+            vae_mapping = load_pinned_safe_weight_mapping(
+                weight_path,
+                expected_sha256=weight_row["sha256"],
+                expected_serialization=SAFE_WEIGHT_FILES[weight_path.name],
+                expected_stat=weight_row["stat"],
+            )
+            self.vae = AutoencoderKLWan.from_config(vae_config)
+            incompatible = self.vae.load_state_dict(vae_mapping, strict=True)
+            if incompatible.missing_keys or incompatible.unexpected_keys:
+                raise HeldoutEvaluationError(
+                    "pinned VAE tensor mapping differs from its config"
+                )
         self.vae.requires_grad_(False)
         self.vae.eval().to(self.device, dtype=self.dtype)
         self.latents_mean = torch.tensor(

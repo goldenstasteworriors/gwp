@@ -416,6 +416,8 @@ class CasualWATrainerMoT(Trainer):
         )
         self._causal_checkpoint_weight_sha256 = {}
         self._causal_initial_parameter_sha256 = None
+        self._causal_step0_checkpoint_saved = False
+        self._causal_collector_live_bound = False
         matched_control_config = model_config.get("matched_control_collector")
         self.production_matched_control_external_acceptance_sha256 = (
             matched_control_config.get("external_acceptance_sha256")
@@ -1119,6 +1121,8 @@ class CasualWATrainerMoT(Trainer):
             return
         if self.cur_step != 0:
             raise ValueError("production step-0 checkpoint must precede optimization")
+        if self.production_matrix_id and self._causal_step0_checkpoint_saved:
+            raise ValueError("causal production step-0 checkpoint was already emitted")
         self._verify_production_training_source()
         if self.production_matrix_id and self.matched_control_collector is not None:
             unwrapped = self.accelerator.unwrap_model(self.models[0])
@@ -1140,9 +1144,31 @@ class CasualWATrainerMoT(Trainer):
         self.accelerator.wait_for_everyone()
         self._write_production_checkpoint_receipt(output_dir, 0)
         self.accelerator.wait_for_everyone()
+        if self.production_matrix_id:
+            self._causal_step0_checkpoint_saved = True
+
+    def _bind_causal_step0_collector(self) -> None:
+        """Bind live step-0 objects before the first production batch is recorded."""
+
+        if not self.production_matrix_id:
+            return
+        if self.cur_step != 0:
+            raise ValueError("causal collector must bind before optimization")
+        if self.matched_control_collector is None:
+            raise ValueError("causal production requires the live matched-control collector")
+        self._verify_production_training_source()
+        unwrapped = self.accelerator.unwrap_model(self.models[0])
+        self.matched_control_collector.bind_live_training_state(
+            model=unwrapped["transformer"],
+            optimizers=self.optimizers,
+            schedulers=self.schedulers,
+        )
+        self._causal_collector_live_bound = True
 
     def train(self) -> None:
-        if self.current_training_data_receipt is not None or self.production_matrix_id:
+        if self.production_matrix_id:
+            self._bind_causal_step0_collector()
+        elif self.current_training_data_receipt is not None:
             self._save_production_initial_checkpoint()
         try:
             super().train()
@@ -1391,9 +1417,12 @@ class CasualWATrainerMoT(Trainer):
             )
         if self.matched_control_collector is not None:
             from world_action_model.contact_causal_matched_control import (
+                canonical_sha256,
                 capture_pre_forward_rng_v3,
             )
 
+            pre_forward_rng = capture_pre_forward_rng_v3()
+            pre_forward_rng_sha256 = canonical_sha256(pre_forward_rng)
             self.matched_control_collector.record(
                 global_step=self.cur_step,
                 batch_dict=batch_dict,
@@ -1411,8 +1440,25 @@ class CasualWATrainerMoT(Trainer):
                 state_input_mask=None,
                 embodiment_id=embodiment_id,
                 prompt_t5=prompt_embeds,
-                pre_forward_rng=capture_pre_forward_rng_v3(),
+                pre_forward_rng=pre_forward_rng,
             )
+            if self.production_matrix_id and not self._causal_step0_checkpoint_saved:
+                if self.cur_step != 0:
+                    raise ValueError(
+                        "causal production reached optimization without a step-0 checkpoint"
+                    )
+                if not self._causal_collector_live_bound:
+                    raise ValueError(
+                        "causal production collector was not bound to live step-0 objects"
+                    )
+                self._save_production_initial_checkpoint()
+                if (
+                    canonical_sha256(capture_pre_forward_rng_v3())
+                    != pre_forward_rng_sha256
+                ):
+                    raise ValueError(
+                        "causal step-0 checkpoint save changed pre-forward RNG state"
+                    )
 
         model_output = transformer(
             ref_latents=ref_latents,

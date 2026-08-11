@@ -35,6 +35,7 @@ from world_action_model.contact_transition_schema import (
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
     contact_transport_capacity_metadata,
+    stable_equal_bit_mixed_logits,
     validated_equal_bit_mixing_matrix,
 )
 from world_action_model.contact_route_contract import (
@@ -1203,14 +1204,9 @@ class CasualWorldActionTransformer_MoT(
             )
         if not torch.isfinite(contact_logits).all():
             raise ValueError("equal-bit transport requires finite planner logits")
-        matrix = self._validated_equal_bit_mixing_matrix(
-            device=contact_logits.device, dtype=contact_logits.dtype
-        )
-        mixed_logits = F.linear(contact_logits, matrix) / math.sqrt(
-            float(SEGMENT_TARGET_DIM)
-        )
-        soft_bits = mixed_logits.sigmoid()
-        raw_bits = (soft_bits >= 0.5).to(dtype=contact_logits.dtype)
+        mixed_logits = stable_equal_bit_mixed_logits(contact_logits)
+        soft_bits = mixed_logits.sigmoid().to(dtype=contact_logits.dtype)
+        raw_bits = (mixed_logits >= 0).to(dtype=contact_logits.dtype)
         integer_weights = (2 ** torch.arange(
             EQUAL_BIT_NUM_BITS, device=contact_logits.device, dtype=torch.int64
         )).view(*([1] * (raw_bits.ndim - 1)), EQUAL_BIT_NUM_BITS)
