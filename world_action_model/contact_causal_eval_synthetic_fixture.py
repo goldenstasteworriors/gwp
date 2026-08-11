@@ -2827,6 +2827,7 @@ def run_serialized_full_evaluator_acceptance(
 
     import sys
     import types
+    from importlib.machinery import ModuleSpec
 
     repository_root = Path(repository_root).expanduser().absolute()
     package_init_stubs = {
@@ -2865,9 +2866,11 @@ def run_serialized_full_evaluator_acceptance(
         )
 
     ftfy_stub = types.ModuleType("ftfy")
+    ftfy_stub.__spec__ = ModuleSpec("ftfy", loader=None)
     ftfy_stub.fix_text = _forbidden_optional_dependency
     sys.modules["ftfy"] = ftfy_stub
     decord_stub = types.ModuleType("decord")
+    decord_stub.__spec__ = ModuleSpec("decord", loader=None)
     decord_stub.VideoReader = _forbidden_optional_dependency
     sys.modules["decord"] = decord_stub
 
