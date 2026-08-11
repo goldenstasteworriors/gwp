@@ -1469,10 +1469,12 @@ def _make_acceptance(receipt: dict[str, Any]) -> dict[str, Any]:
         "matched_control_report_path_record_only": str(
             fixture_root / "matched-control-report.json"
         ),
-        "matched_control_report_sha256": _h(f"current-matched-report-{seed}"),
-        "matched_control_trace_manifest_sha256": _h(
-            f"current-trace-manifest-{seed}"
-        ),
+        "matched_control_report_sha256": receipt["evidence"][
+            "matched_control_receipt_sha256"
+        ],
+        "matched_control_trace_manifest_sha256": receipt["evidence"][
+            "trace_manifest_sha256"
+        ],
         "matched_control_trace_path_by_route": {
             item: str(fixture_root / f"{item}.jsonl") for item in CAUSAL_ROUTES
         },
