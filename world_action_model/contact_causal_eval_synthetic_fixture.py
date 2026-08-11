@@ -2927,7 +2927,9 @@ def build_synthetic_causal_admission_fixture(
                                 traces=traces,
                                 output_path=reviewer_output,
                             )
-                        except subprocess.CalledProcessError:
+                        except RuntimeError as exc:
+                            if "FileExistsError" not in str(exc):
+                                raise
                             checkpoint_reviewer_o_excl_rejected = True
                         else:
                             raise AssertionError(

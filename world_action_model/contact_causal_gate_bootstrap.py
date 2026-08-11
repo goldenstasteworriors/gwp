@@ -11,18 +11,15 @@ from datetime import datetime, timezone
 import hashlib
 from importlib import metadata as importlib_metadata
 import json
+import math
 import os
 from pathlib import Path
 import platform
 import re
+import stat
+import subprocess
 import sys
 from typing import Any, Mapping
-
-from world_action_model.verified_io import (
-    read_verified_bytes,
-    strict_json_loads,
-    verified_head_code_manifest,
-)
 
 
 EGO_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v7"
@@ -73,11 +70,13 @@ ROBOT_FINGERPRINT_KEYS = (
 EGO_BOOTSTRAP_CODE_PATHS = (
     "configs/giga_world_policy_0_5_ego_contact_causal_precursor.py",
     "world_action_model/contact_causal_gate_bootstrap.py",
+    "world_action_model/verified_io.py",
     "world_action_model/contact_ego_causal_precursor.py",
 )
 ROBOT_BOOTSTRAP_CODE_PATHS = (
     "configs/giga_world_policy_0_5_sonic_g1_asymmetric25_contact_causal_matrix_finetune.py",
     "world_action_model/contact_causal_gate_bootstrap.py",
+    "world_action_model/verified_io.py",
     "world_action_model/contact_causal_preflight.py",
 )
 
@@ -91,6 +90,156 @@ _UTC_RE = re.compile(
 
 class CausalGateBootstrapError(ValueError):
     pass
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant is forbidden: {value}")
+
+
+def _finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"non-finite JSON number is forbidden: {value}")
+    return parsed
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key is forbidden: {key}")
+        result[key] = value
+    return result
+
+
+def strict_json_loads(payload: bytes, *, name: str) -> Any:
+    """Parse gate JSON without importing any project-owned trust helper."""
+
+    try:
+        return json.loads(
+            payload.decode("utf-8"),
+            parse_constant=_reject_json_constant,
+            parse_float=_finite_json_float,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise CausalGateBootstrapError(f"invalid strict JSON: {name}") from exc
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        int(value.st_dev), int(value.st_ino), int(value.st_mode),
+        int(value.st_size), int(value.st_mtime_ns), int(value.st_ctime_ns),
+    )
+
+
+def read_verified_bytes(path: str | Path) -> tuple[bytes, str, dict[str, int]]:
+    """Read one non-symlink regular-file FD and verify its identity is stable."""
+
+    absolute = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    try:
+        before_open = os.lstat(absolute)
+    except OSError as exc:
+        raise CausalGateBootstrapError(f"cannot lstat verified source: {absolute}") from exc
+    if stat.S_ISLNK(before_open.st_mode) or not stat.S_ISREG(before_open.st_mode):
+        raise CausalGateBootstrapError(
+            f"verified source must be a non-symlink regular file: {absolute}"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(absolute, flags)
+    except OSError as exc:
+        raise CausalGateBootstrapError(f"cannot safely open verified source: {absolute}") from exc
+    try:
+        before = os.fstat(fd)
+        if _stat_identity(before) != _stat_identity(before_open):
+            raise CausalGateBootstrapError(f"verified source changed during open: {absolute}")
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+            chunks.append(block)
+        after = os.fstat(fd)
+        if _stat_identity(after) != _stat_identity(before):
+            raise CausalGateBootstrapError(f"verified source changed while reading: {absolute}")
+        identity = {
+            "device": int(before.st_dev), "inode": int(before.st_ino),
+            "mode": int(before.st_mode), "size_bytes": int(before.st_size),
+            "mtime_ns": int(before.st_mtime_ns), "ctime_ns": int(before.st_ctime_ns),
+        }
+        return b"".join(chunks), digest.hexdigest(), identity
+    finally:
+        os.close(fd)
+
+
+def verified_head_code_manifest(
+    repository_root: str | Path,
+    logical_paths: tuple[str, ...],
+    *,
+    expected_commit: str | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Compare runtime bytes with a single pinned HEAD using stdlib only."""
+
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(repository_root))))
+    if root.is_symlink() or not root.is_dir():
+        raise CausalGateBootstrapError("code repository root must be a real directory")
+    if not logical_paths or len(set(logical_paths)) != len(logical_paths):
+        raise CausalGateBootstrapError("code manifest paths must be non-empty and unique")
+    for logical_path in logical_paths:
+        candidate = Path(logical_path)
+        if (
+            not isinstance(logical_path, str) or not logical_path
+            or candidate.is_absolute() or ".." in candidate.parts
+            or candidate.as_posix() != logical_path
+        ):
+            raise CausalGateBootstrapError("code manifest contains an unsafe logical path")
+
+    def git_bytes(*arguments: str) -> bytes:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(root), *arguments],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            ).stdout
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise CausalGateBootstrapError("cannot read current HEAD code blob bytes") from exc
+
+    commit = git_bytes("rev-parse", "--verify", "HEAD^{commit}").decode("ascii").strip()
+    if (
+        not _COMMIT_RE.fullmatch(commit)
+        or (expected_commit is not None and commit != expected_commit)
+    ):
+        raise CausalGateBootstrapError("current HEAD commit differs from expected code identity")
+    rows: list[dict[str, Any]] = []
+    for logical_path in logical_paths:
+        object_name = f"{commit}:{logical_path}"
+        blob_sha1 = git_bytes("rev-parse", "--verify", object_name).decode("ascii").strip()
+        if not _COMMIT_RE.fullmatch(blob_sha1):
+            raise CausalGateBootstrapError("invalid current-HEAD code blob identity")
+        head_payload = git_bytes("cat-file", "blob", object_name)
+        runtime_payload, runtime_sha256, runtime_stat = read_verified_bytes(root / logical_path)
+        head_sha256 = hashlib.sha256(head_payload).hexdigest()
+        if head_sha256 != runtime_sha256 or len(head_payload) != len(runtime_payload):
+            raise CausalGateBootstrapError(
+                f"runtime code bytes differ from current HEAD blob: {logical_path}"
+            )
+        rows.append({
+            "logical_path": logical_path,
+            "git_blob_sha1": blob_sha1,
+            "head_blob_sha256": head_sha256,
+            "head_blob_size_bytes": len(head_payload),
+            "runtime_sha256": runtime_sha256,
+            "runtime_size_bytes": runtime_stat["size_bytes"],
+        })
+    if git_bytes("rev-parse", "--verify", "HEAD^{commit}").decode("ascii").strip() != commit:
+        raise CausalGateBootstrapError("HEAD changed while reading code blob bytes")
+    return commit, rows
 
 
 def _exact(value: object, keys: set[str], name: str) -> dict[str, Any]:
