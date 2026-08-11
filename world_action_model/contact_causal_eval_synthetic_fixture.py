@@ -1429,7 +1429,7 @@ def _build_current_causal_traces(
         precursor_bundle_sha256=precursor["bundle_sha256"],
         initial_parameter_tensors_sha256=precursor["parameter_tensor_sha256"],
     )
-    trace_key = "step0/micro0/rank0"
+    trace_keys = [f"step{step}/micro0/rank0" for step in (0, 100, 200)]
     stream_values = {
         "contact_target_stream_sha256": target,
         "contact_mask_stream_sha256": mask,
@@ -1446,7 +1446,9 @@ def _build_current_causal_traces(
         sidecar_bundle_sha256=hardened["sidecar_bundle_sha256"],
         contact_coverage_sha256=coverage_sha256,
         **{
-            name: sha256_json({trace_key: canonical_sha256(value)})
+            name: sha256_json(
+                {trace_key: canonical_sha256(value) for trace_key in trace_keys}
+            )
             for name, value in stream_values.items()
         },
     )
