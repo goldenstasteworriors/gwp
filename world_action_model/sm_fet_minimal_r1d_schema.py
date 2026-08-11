@@ -13,9 +13,10 @@ clamped, modulo-reduced, or completion-filled data.
 from __future__ import annotations
 
 from bisect import bisect_right
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, IntEnum
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -296,6 +297,9 @@ class ResourceValidationContext:
     controller_target_enums: tuple[int, ...]
     constant_target_enums: tuple[int, ...]
     actuator_resource_ids: tuple[int, ...]
+    compatible_wrist_target_pairs: tuple[
+        frozenset[tuple[int, TargetNamespace, TargetSelector, bytes]], ...
+    ]
     canonical_bytes: bytes
     sha256: str
 
@@ -1710,7 +1714,75 @@ _RESOURCE_CONTEXT_KEYS = {
     "controller_target_enums",
     "constant_target_enums",
     "actuator_resource_ids",
+    "compatible_wrist_target_pairs",
 }
+_RESOURCE_TARGET_JSON_KEYS = {
+    "resource_id",
+    "target_namespace",
+    "target_selector",
+    "target_key_hex",
+}
+_TARGET_KEY_LENGTHS = {
+    TargetSelector.CONTROLLER_ENUM: 2,
+    TargetSelector.LOCATOR_POINT: 4,
+    TargetSelector.LOCATOR_AXIS: 6,
+    TargetSelector.LOCATOR_FULL: 8,
+    TargetSelector.ENTITY_LOCATOR: 13,
+    TargetSelector.CONSTANT: 2,
+}
+
+
+def _resource_target_sort_key(
+    target: tuple[int, TargetNamespace, TargetSelector, bytes],
+) -> bytes:
+    return (
+        struct.pack("<H", target[0])
+        + target[1].value.encode("ascii")
+        + b"\x00"
+        + target[2].value.encode("ascii")
+        + b"\x00"
+        + target[3]
+    )
+
+
+def _parse_wrist_target_json(
+    value: object,
+    *,
+    name: str,
+) -> tuple[int, TargetNamespace, TargetSelector, bytes]:
+    obj = _exact_dict(value, _RESOURCE_TARGET_JSON_KEYS, prefix=name)
+    resource_id = _strict_int(
+        obj["resource_id"],
+        "PROFILE_UNKNOWN_NOT_ADMITTED",
+        f"{name}.resource_id",
+        minimum=0,
+        maximum=65535,
+    )
+    if type(obj["target_namespace"]) is not str:
+        raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", f"{name}.target_namespace must be string")
+    if type(obj["target_selector"]) is not str:
+        raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", f"{name}.target_selector must be string")
+    try:
+        namespace = TargetNamespace(obj["target_namespace"])
+        selector = TargetSelector(obj["target_selector"])
+    except ValueError as exc:
+        raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", f"{name} has unknown target enum") from exc
+    if namespace is not TargetNamespace.WRIST_POSE:
+        raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "wrist compatibility may contain only WRIST_POSE")
+    key_hex = obj["target_key_hex"]
+    if (
+        type(key_hex) is not str
+        or len(key_hex) % 2
+        or re.fullmatch(r"[0-9a-f]*", key_hex) is None
+    ):
+        raise SchemaError(
+            "PROFILE_UNKNOWN_NOT_ADMITTED",
+            f"{name}.target_key_hex is not canonical",
+        )
+    key = bytes.fromhex(key_hex)
+    if len(key) != _TARGET_KEY_LENGTHS[selector]:
+        raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", f"{name} target key length mismatch")
+    return resource_id, namespace, selector, key
 
 
 def validate_resource_validation_context(
@@ -1748,8 +1820,44 @@ def validate_resource_validation_context(
         if parsed != tuple(sorted(set(parsed))):
             raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", f"{name} must be sorted and unique")
         parsed_lists.append(parsed)
+    raw_pairs = obj["compatible_wrist_target_pairs"]
+    if type(raw_pairs) is not list:
+        raise SchemaError(
+            "PROFILE_UNKNOWN_NOT_ADMITTED",
+            "compatible_wrist_target_pairs must be canonical array",
+        )
+    parsed_pairs: list[
+        frozenset[tuple[int, TargetNamespace, TargetSelector, bytes]]
+    ] = []
+    pair_sort_keys: list[tuple[bytes, bytes]] = []
+    for pair_index, raw_pair in enumerate(raw_pairs):
+        if type(raw_pair) is not list or len(raw_pair) != 2:
+            raise SchemaError(
+                "PROFILE_UNKNOWN_NOT_ADMITTED",
+                "wrist compatibility pair must have two targets",
+            )
+        left = _parse_wrist_target_json(raw_pair[0], name=f"wrist_pair[{pair_index}][0]")
+        right = _parse_wrist_target_json(raw_pair[1], name=f"wrist_pair[{pair_index}][1]")
+        left_key, right_key = _resource_target_sort_key(left), _resource_target_sort_key(right)
+        if not left_key < right_key:
+            raise SchemaError(
+                "PROFILE_UNKNOWN_NOT_ADMITTED",
+                "wrist pair targets must be distinct and bytewise sorted",
+            )
+        parsed_pairs.append(frozenset((left, right)))
+        pair_sort_keys.append((left_key, right_key))
+    if pair_sort_keys != sorted(set(pair_sort_keys)):
+        raise SchemaError(
+            "PROFILE_UNKNOWN_NOT_ADMITTED",
+            "wrist compatibility pairs must be sorted and duplicate-free",
+        )
     return ResourceValidationContext(
-        parsed_lists[0], parsed_lists[1], parsed_lists[2], canonical, digest
+        parsed_lists[0],
+        parsed_lists[1],
+        parsed_lists[2],
+        tuple(parsed_pairs),
+        canonical,
+        digest,
     )
 
 
@@ -1792,15 +1900,7 @@ def validate_resource_claim(
         raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "target_selector is not frozen enum")
     if type(claim.target_key) is not bytes:
         raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "target_key must be finite bytes")
-    expected_lengths = {
-        TargetSelector.CONTROLLER_ENUM: 2,
-        TargetSelector.LOCATOR_POINT: 4,
-        TargetSelector.LOCATOR_AXIS: 6,
-        TargetSelector.LOCATOR_FULL: 8,
-        TargetSelector.ENTITY_LOCATOR: 13,
-        TargetSelector.CONSTANT: 2,
-    }
-    if len(claim.target_key) != expected_lengths[claim.target_selector]:
+    if len(claim.target_key) != _TARGET_KEY_LENGTHS[claim.target_selector]:
         raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "target_key length disagrees with selector")
     translation_rank = (constraint.locator.uv - 1) * 32 + constraint.locator.depth - 1
     full_locator_rank = locator_rank(constraint.locator, verify=verify)
@@ -1925,14 +2025,7 @@ def validate_resource_compatibility(
     context: ResourceValidationContext,
     verify: bool,
     profile_receipt: object,
-    compatible_wrist_target_pairs: Collection[
-        frozenset[tuple[int, TargetNamespace, TargetSelector, bytes]]
-    ] = (),
 ) -> None:
-    if not isinstance(compatible_wrist_target_pairs, Collection) or isinstance(
-        compatible_wrist_target_pairs, (str, bytes)
-    ):
-        raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "wrist compatibility must be finite")
     _strict_bool(verify, "PROFILE_UNKNOWN_NOT_ADMITTED", "verify")
     context = _validate_resource_context(context, profile_receipt)
     _validate_resource_claim_set(
@@ -1962,7 +2055,7 @@ def validate_resource_compatibility(
                 and second.target_namespace is TargetNamespace.WRIST_POSE
                 and first.resource_target_id != second.resource_target_id
                 and frozenset((first.resource_target_id, second.resource_target_id))
-                not in compatible_wrist_target_pairs
+                not in context.compatible_wrist_target_pairs
             ):
                 raise SchemaError("PROFILE_RESOURCE_MUTEX", "distinct wrist targets require explicit profile compatibility")
             if (
@@ -2051,6 +2144,7 @@ def _normalize(value: tuple[float, float, float], *, code: str, name: str) -> tu
     return (value[0] / length, value[1] / length, value[2] / length)
 
 
+@lru_cache(maxsize=1)
 def generated_axis_centers() -> tuple[tuple[float, float, float], ...]:
     centers: list[tuple[float, float, float]] = []
     for elevation_index in range(16):
@@ -2163,16 +2257,6 @@ def decode_translation_center(
     )
 
 
-def _snap_binary64_edge(value: float, edges: tuple[float, ...]) -> float:
-    """Recover an exact materialized edge after bounded binary64 trig roundoff."""
-
-    for edge in edges:
-        tolerance = 8.0 * max(math.ulp(value), math.ulp(edge))
-        if abs(value - edge) <= tolerance:
-            return edge
-    return value
-
-
 def quantize_axis(direction: tuple[float, float, float]) -> int:
     unit = _normalize(
         _vector3(direction, code="METRIC_UNKNOWN", name="axis"),
@@ -2193,8 +2277,6 @@ def quantize_axis(direction: tuple[float, float, float]) -> int:
         elevation = math.asin(max(-1.0, min(1.0, unit[2])))
         azimuth_edges = tuple(-math.pi + 2.0 * math.pi * index / 32.0 for index in range(33))
         elevation_edges = tuple(-math.pi / 2.0 + math.pi * index / 16.0 for index in range(17))
-        azimuth = _snap_binary64_edge(azimuth, azimuth_edges)
-        elevation = _snap_binary64_edge(elevation, elevation_edges)
         azimuth_index = min(31, bisect_right(azimuth_edges, azimuth) - 1)
         elevation_index = min(15, bisect_right(elevation_edges, elevation) - 1)
     return 1 + 32 * elevation_index + azimuth_index
@@ -2205,6 +2287,7 @@ def decode_axis_center(axis_code: int) -> tuple[float, float, float]:
     return generated_axis_centers()[axis_code - 1]
 
 
+@lru_cache(maxsize=512, typed=True)
 def zero_roll_basis(axis_code: int) -> FrameBasis:
     z_axis = decode_axis_center(axis_code)
     seeds = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
@@ -2241,6 +2324,7 @@ def validate_frame_basis(frame: FrameBasis) -> None:
         raise SchemaError("FRAME_INVALID", "frame is not right-handed")
 
 
+@lru_cache(maxsize=512 * 32, typed=True)
 def decode_frame(axis_code: int, roll_code: int) -> FrameBasis:
     _strict_int(roll_code, "FIELD_RANGE", "roll_code", minimum=1, maximum=32)
     base = zero_roll_basis(axis_code)
@@ -2257,11 +2341,23 @@ def decode_frame(axis_code: int, roll_code: int) -> FrameBasis:
 
 def quantize_roll(axis_code: int, x_direction: tuple[float, float, float]) -> int:
     base = zero_roll_basis(axis_code)
-    direction = _normalize(
-        _vector3(x_direction, code="METRIC_UNKNOWN", name="roll x direction"),
+    raw_direction = _vector3(
+        x_direction,
         code="METRIC_UNKNOWN",
         name="roll x direction",
     )
+    direction = _normalize(
+        raw_direction,
+        code="METRIC_UNKNOWN",
+        name="roll x direction",
+    )
+    # The 32 materialized decoded directions are constructive exact ties.  This
+    # finite equality check has zero width: adjacent representable inputs are
+    # never absorbed into the edge as they were by the removed ULP band.
+    for roll_code in range(1, 33):
+        golden_direction = decode_frame(axis_code, roll_code).x
+        if raw_direction == golden_direction or direction == golden_direction:
+            return roll_code
     coordinate_x = _dot(direction, base.x)
     coordinate_y = _dot(direction, base.y)
     if coordinate_x == 0.0 and coordinate_y == 0.0:
@@ -2272,7 +2368,6 @@ def quantize_roll(axis_code: int, x_direction: tuple[float, float, float]) -> in
     if theta == 2.0 * math.pi:
         theta = 0.0
     edges = tuple(2.0 * math.pi * index / 32.0 for index in range(33))
-    theta = _snap_binary64_edge(theta, edges)
     return 1 + min(31, bisect_right(edges, theta) - 1)
 
 
