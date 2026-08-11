@@ -1086,8 +1086,10 @@ class CasualWATrainerMoT(Trainer):
         )
         if self.matched_control_collector is None:
             raise ValueError("causal checkpoint requires the live collector")
-        trace_prefix = self.matched_control_collector.current_run_trace_prefix_receipt(
-            through_step=step
+        trace_prefix_by_rank = (
+            self.matched_control_collector.current_run_trace_prefix_receipts_by_rank(
+                through_step=step
+            )
         )
         if step == 0:
             parent_sha256 = self.causal_precursor_binding["parameter_tensor_sha256"]
@@ -1109,7 +1111,7 @@ class CasualWATrainerMoT(Trainer):
             parent_checkpoint_weight_sha256=parent_sha256,
             parameter_topology=topology,
             gradient_reachability_receipt=reachability,
-            current_run_trace_prefix_receipt=trace_prefix,
+            current_run_trace_prefix_receipt_by_rank=trace_prefix_by_rank,
         )
         write_canonical_json_exclusive(
             artifact_dir / "checkpoint_training_receipt.json", receipt

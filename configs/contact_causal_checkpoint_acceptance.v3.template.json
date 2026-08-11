@@ -39,7 +39,7 @@
   "matched_control_trace_manifest_sha256": null,
   "matched_control_trace_path_by_route": null,
   "matched_control_trace_sha256_by_route": null,
-  "current_run_trace_prefix_receipt_sha256": null,
+  "current_run_trace_prefix_receipt_sha256_by_rank": null,
   "current_head_source_receipt_sha256": null,
   "reviewer_identity": null,
   "reviewer_attestation_nonce": null,

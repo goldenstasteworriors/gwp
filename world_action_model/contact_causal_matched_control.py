@@ -369,6 +369,7 @@ class CausalMatchedControlCollector:
             "precursor_receipt_bytes_sha256"
         )
         self.write_report = config["write_report"]
+        self.output_dir = None
         self.output_path = None
         self._output_fd = None
         if self.write_report:
@@ -376,6 +377,7 @@ class CausalMatchedControlCollector:
                 config.get("output_dir", ""), project_root=project_dir
             )
             output_dir.mkdir(parents=True, exist_ok=True)
+            self.output_dir = output_dir
             safe = f"{self.run_id}__{self.run_nonce}__{self.route}__seed{self.seed}__rank{rank:05d}.jsonl"
             self.output_path = output_dir / safe
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -538,6 +540,36 @@ class CausalMatchedControlCollector:
             run_nonce=self.run_nonce, rank=self.rank, world_size=self.world_size,
             through_checkpoint_step=through_step, trace_path=self.output_path,
         )
+
+    def current_run_trace_prefix_receipts_by_rank(
+        self, *, through_step: int
+    ) -> dict[str, dict[str, Any]]:
+        """Reopen every rank-local trace and bind its checkpoint-time prefix."""
+
+        if self.output_dir is None or not self.write_report:
+            raise CausalProductionError(
+                "production rank-prefix map requires write_report=true"
+            )
+        receipts: dict[str, dict[str, Any]] = {}
+        for rank in range(self.world_size):
+            safe = (
+                f"{self.run_id}__{self.run_nonce}__{self.route}__"
+                f"seed{self.seed}__rank{rank:05d}.jsonl"
+            )
+            trace_path = self.output_dir / safe
+            records = load_trace_jsonl(trace_path, route=self.route)
+            receipts[str(rank)] = build_current_run_trace_prefix_receipt_v1(
+                records,
+                route=self.route,
+                seed=self.seed,
+                run_id=self.run_id,
+                run_nonce=self.run_nonce,
+                rank=rank,
+                world_size=self.world_size,
+                through_checkpoint_step=through_step,
+                trace_path=trace_path,
+            )
+        return receipts
 
     def close(self) -> None:
         if self._output_fd is not None:

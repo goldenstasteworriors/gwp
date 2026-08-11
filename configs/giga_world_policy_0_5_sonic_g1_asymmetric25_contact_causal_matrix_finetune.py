@@ -5,6 +5,25 @@ historical contact mechanism production config and it forbids legacy aliases.
 """
 
 import os
+from pathlib import Path
+import sys
+
+
+_repository_root = Path(__file__).resolve().parents[1]
+sys.dont_write_bytecode = True
+for _current, _directory_names, _file_names in os.walk(
+    _repository_root, followlinks=False
+):
+    _relative = Path(_current).relative_to(_repository_root)
+    _directory_names[:] = [
+        _name
+        for _name in _directory_names
+        if not (_relative == Path(".") and _name in {".git", "outputs"})
+    ]
+    if "__pycache__" in _directory_names or any(
+        _name.endswith(".pyc") for _name in _file_names
+    ):
+        raise RuntimeError("production causal config forbids repository bytecode caches")
 
 if os.environ.get("GWP_CONTACT_CAUSAL_TEST_ONLY_TINY_RUNTIME"):
     raise ValueError("production causal config forbids the test-only tiny runtime")
@@ -19,7 +38,6 @@ from world_action_model.contact_causal_gate_bootstrap import (
 _stdlib_bootstrap = bootstrap_robot_v3_stdlib()
 
 import copy  # noqa: E402
-from pathlib import Path  # noqa: E402
 
 from world_action_model.contact_causal_preflight import (
     build_robot_runtime_source_receipts_v1,

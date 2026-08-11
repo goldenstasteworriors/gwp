@@ -38,6 +38,7 @@ def _reject_project_bytecode_cache(root: Path) -> None:
 
 _reject_project_bytecode_cache(REPOSITORY_ROOT)
 _REVIEWER_BOOTSTRAP_PATHS = (
+    "world_action_model/__init__.py",
     "configs/contact_causal_production_matrix.v1.json",
     "configs/giga_world_policy_0_5_ego_contact_pretrain.py",
     "configs/giga_world_policy_0_5_ego_contact_causal_precursor.py",
@@ -62,11 +63,25 @@ _REVIEWER_BOOTSTRAP_PATHS = (
     "world_action_model/contact_route_contract.py",
     "world_action_model/contact_transition_schema.py",
     "world_action_model/contact_supervision_contract.py",
+    "world_action_model/datasets/__init__.py",
+    "world_action_model/datasets/hot3d_wam_dataset.py",
     "world_action_model/datasets/wam_lerobot_dataset.py",
+    "world_action_model/models/__init__.py",
+    "world_action_model/models/action_projectors.py",
+    "world_action_model/models/transformer_wa.py",
+    "world_action_model/models/transformer_wa_casual.py",
     "world_action_model/models/transformer_wa_casual_mot.py",
+    "world_action_model/transforms/__init__.py",
+    "world_action_model/transforms/wa_transforms.py",
+    "world_action_model/transforms/wa_transforms_hot3d.py",
     "world_action_model/transforms/wa_transforms_lerobot_pretrain.py",
+    "world_action_model/trainer/__init__.py",
+    "world_action_model/trainer/wa_casual_trainer.py",
     "world_action_model/trainer/wa_casual_trainer_mot.py",
+    "world_action_model/trainer/wa_casual_trainer_pretrain.py",
     "world_action_model/verified_io.py",
+    "third_party/giga-datasets/giga_datasets/__init__.py",
+    "third_party/giga-datasets/giga_datasets/datasets/__init__.py",
     "third_party/giga-train/giga_train/trainers/trainer.py",
     "third_party/giga-datasets/giga_datasets/datasets/lerobot_dataset.py",
     "scripts/compare_contact_causal_matrix_hashes.py",
@@ -553,13 +568,18 @@ def main() -> None:
         raise CausalProductionError(
             "current-run matched-control report is not bound by the receipt"
         )
-    trace_prefix = receipt["checkpoint_file"]["current_run_trace_prefix_receipt"]
-    if (
-        Path(trace_prefix["trace_path_record_only"]).absolute()
-        != trace_paths[route][str(trace_prefix["rank"])]
-        or replay_current_run_trace_prefix_v1(trace_prefix) != trace_prefix
-    ):
-        raise CausalProductionError("checkpoint current-run trace prefix differs")
+    trace_prefix_by_rank = receipt["checkpoint_file"][
+        "current_run_trace_prefix_receipt_by_rank"
+    ]
+    if list(trace_prefix_by_rank) != expected_rank_keys:
+        raise CausalProductionError("checkpoint current-run prefix rank set differs")
+    for rank_key, trace_prefix in trace_prefix_by_rank.items():
+        if (
+            Path(trace_prefix["trace_path_record_only"]).absolute()
+            != trace_paths[route][rank_key]
+            or replay_current_run_trace_prefix_v1(trace_prefix) != trace_prefix
+        ):
+            raise CausalProductionError("checkpoint current-run trace prefix differs")
 
     head = current_git_head(repository_root)
     if head != gate["expected_git_commit"] or head != receipt["stable_contract"]["git_commit"]:
@@ -693,9 +713,10 @@ def main() -> None:
             for causal_route, paths in trace_paths.items()
         },
         "matched_control_trace_sha256_by_route": trace_sha256_by_route,
-        "current_run_trace_prefix_receipt_sha256": trace_prefix[
-            "receipt_sha256"
-        ],
+        "current_run_trace_prefix_receipt_sha256_by_rank": {
+            rank_key: prefix["receipt_sha256"]
+            for rank_key, prefix in trace_prefix_by_rank.items()
+        },
         "current_head_source_receipt_sha256": source_receipt_sha256,
         "reviewer_identity": args.reviewer_identity,
         "reviewer_attestation_nonce": args.reviewer_attestation_nonce,

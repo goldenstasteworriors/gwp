@@ -102,6 +102,7 @@ def expected_route_unused_parameter_names(
     return sorted(structural)
 SOURCE_TREE_RECEIPT_VERSION = "contact-causal-current-head-source-tree/v1"
 SOURCE_LOGICAL_PATHS = (
+    "world_action_model/__init__.py",
     "configs/contact_causal_production_matrix.v1.json",
     "configs/giga_world_policy_0_5_ego_contact_pretrain.py",
     "configs/giga_world_policy_0_5_ego_contact_causal_precursor.py",
@@ -126,11 +127,25 @@ SOURCE_LOGICAL_PATHS = (
     "world_action_model/contact_route_contract.py",
     "world_action_model/contact_transition_schema.py",
     "world_action_model/contact_supervision_contract.py",
+    "world_action_model/datasets/__init__.py",
+    "world_action_model/datasets/hot3d_wam_dataset.py",
     "world_action_model/datasets/wam_lerobot_dataset.py",
+    "world_action_model/models/__init__.py",
+    "world_action_model/models/action_projectors.py",
+    "world_action_model/models/transformer_wa.py",
+    "world_action_model/models/transformer_wa_casual.py",
     "world_action_model/models/transformer_wa_casual_mot.py",
+    "world_action_model/transforms/__init__.py",
+    "world_action_model/transforms/wa_transforms.py",
+    "world_action_model/transforms/wa_transforms_hot3d.py",
     "world_action_model/transforms/wa_transforms_lerobot_pretrain.py",
+    "world_action_model/trainer/__init__.py",
+    "world_action_model/trainer/wa_casual_trainer.py",
     "world_action_model/trainer/wa_casual_trainer_mot.py",
+    "world_action_model/trainer/wa_casual_trainer_pretrain.py",
     "world_action_model/verified_io.py",
+    "third_party/giga-datasets/giga_datasets/__init__.py",
+    "third_party/giga-datasets/giga_datasets/datasets/__init__.py",
     "third_party/giga-train/giga_train/trainers/trainer.py",
     "third_party/giga-datasets/giga_datasets/datasets/lerobot_dataset.py",
     "scripts/compare_contact_causal_matrix_hashes.py",
@@ -218,14 +233,7 @@ CROSS_SEED_JSON_POINTERS = (
     "/evidence/contact_coverage_receipt_sha256",
     "/evidence/trace_manifest_sha256",
     "/checkpoint_file/path_record_only",
-    "/checkpoint_file/current_run_trace_prefix_receipt/seed",
-    "/checkpoint_file/current_run_trace_prefix_receipt/run_id",
-    "/checkpoint_file/current_run_trace_prefix_receipt/run_nonce",
-    "/checkpoint_file/current_run_trace_prefix_receipt/record_sha256_by_key",
-    "/checkpoint_file/current_run_trace_prefix_receipt/trace_path_record_only",
-    "/checkpoint_file/current_run_trace_prefix_receipt/trace_prefix_size_bytes",
-    "/checkpoint_file/current_run_trace_prefix_receipt/trace_prefix_bytes_sha256",
-    "/checkpoint_file/current_run_trace_prefix_receipt/receipt_sha256",
+    "/checkpoint_file/current_run_trace_prefix_receipt_by_rank",
 )
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -1294,7 +1302,7 @@ def validate_training_receipt_v5(value: object) -> dict[str, Any]:
             "tensor_manifest",
             "tensor_manifest_sha256",
             "bundle_manifest",
-            "current_run_trace_prefix_receipt",
+            "current_run_trace_prefix_receipt_by_rank",
         },
         "checkpoint file receipt",
     )
@@ -1304,19 +1312,27 @@ def validate_training_receipt_v5(value: object) -> dict[str, Any]:
         validate_current_run_trace_prefix_receipt_v1,
     )
 
-    trace_prefix = validate_current_run_trace_prefix_receipt_v1(
-        checkpoint_file["current_run_trace_prefix_receipt"]
-    )
+    trace_prefix_by_rank = checkpoint_file[
+        "current_run_trace_prefix_receipt_by_rank"
+    ]
+    expected_rank_keys = [str(rank) for rank in range(stable["world_size"])]
     if (
-        trace_prefix["causal_route_id"] != route
-        or trace_prefix["seed"] != receipt["seed"]
-        or trace_prefix["run_id"] != run["training_run_id"]
-        or trace_prefix["run_nonce"] != run["training_run_nonce"]
-        or trace_prefix["through_checkpoint_step"] != receipt["checkpoint_step"]
-        or trace_prefix["rank"] != 0
-        or trace_prefix["world_size"] != stable["world_size"]
+        not isinstance(trace_prefix_by_rank, dict)
+        or list(trace_prefix_by_rank) != expected_rank_keys
     ):
-        raise CausalProductionError("checkpoint current-run trace binding differs")
+        raise CausalProductionError("checkpoint current-run trace rank set differs")
+    for rank_key, raw_prefix in trace_prefix_by_rank.items():
+        trace_prefix = validate_current_run_trace_prefix_receipt_v1(raw_prefix)
+        if (
+            trace_prefix["causal_route_id"] != route
+            or trace_prefix["seed"] != receipt["seed"]
+            or trace_prefix["run_id"] != run["training_run_id"]
+            or trace_prefix["run_nonce"] != run["training_run_nonce"]
+            or trace_prefix["through_checkpoint_step"] != receipt["checkpoint_step"]
+            or trace_prefix["rank"] != int(rank_key)
+            or trace_prefix["world_size"] != stable["world_size"]
+        ):
+            raise CausalProductionError("checkpoint current-run trace binding differs")
     _native_int(checkpoint_file["size_bytes"], "checkpoint size", minimum=1)
     if not isinstance(checkpoint_file["path_record_only"], str) or not Path(checkpoint_file["path_record_only"]).is_absolute():
         raise CausalProductionError("checkpoint file path must be absolute")
@@ -1702,7 +1718,7 @@ def build_checkpoint_training_receipt_v5(
     parent_checkpoint_weight_sha256: str,
     parameter_topology: Mapping[str, Any],
     gradient_reachability_receipt: Mapping[str, Any],
-    current_run_trace_prefix_receipt: Mapping[str, Any],
+    current_run_trace_prefix_receipt_by_rank: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Fill only checkpoint-local leaves of a reviewed v5 base receipt."""
 
@@ -1746,8 +1762,8 @@ def build_checkpoint_training_receipt_v5(
         "tensor_manifest": inspected["tensor_manifest"],
         "tensor_manifest_sha256": inspected["tensor_manifest_sha256"],
         "bundle_manifest": inspected["bundle_manifest"],
-        "current_run_trace_prefix_receipt": deepcopy(
-            dict(current_run_trace_prefix_receipt)
+        "current_run_trace_prefix_receipt_by_rank": deepcopy(
+            dict(current_run_trace_prefix_receipt_by_rank)
         ),
     }
     receipt["parent_checkpoint_weight_sha256"] = parent_checkpoint_weight_sha256
@@ -1841,7 +1857,7 @@ def validate_acceptance_v3(value: object, *, receipt: Mapping[str, Any]) -> dict
             "matched_control_trace_manifest_sha256",
             "matched_control_trace_path_by_route",
             "matched_control_trace_sha256_by_route",
-            "current_run_trace_prefix_receipt_sha256",
+            "current_run_trace_prefix_receipt_sha256_by_rank",
             "current_head_source_receipt_sha256",
             "reviewer_identity",
             "reviewer_attestation_nonce",
@@ -1888,10 +1904,13 @@ def validate_acceptance_v3(value: object, *, receipt: Mapping[str, Any]) -> dict
         != receipt["evidence"]["training_data_receipt_sha256"]
         or acceptance["contact_coverage_receipt_sha256"]
         != receipt["evidence"]["contact_coverage_receipt_sha256"]
-        or acceptance["current_run_trace_prefix_receipt_sha256"]
-        != receipt["checkpoint_file"]["current_run_trace_prefix_receipt"][
-            "receipt_sha256"
-        ]
+        or acceptance["current_run_trace_prefix_receipt_sha256_by_rank"]
+        != {
+            rank: prefix["receipt_sha256"]
+            for rank, prefix in receipt["checkpoint_file"][
+                "current_run_trace_prefix_receipt_by_rank"
+            ].items()
+        }
         or acceptance["matched_control_report_sha256"]
         != receipt["evidence"]["matched_control_receipt_sha256"]
         or acceptance["matched_control_trace_manifest_sha256"]
@@ -1919,9 +1938,21 @@ def validate_acceptance_v3(value: object, *, receipt: Mapping[str, Any]) -> dict
         "contact_coverage_receipt_sha256",
         "matched_control_report_sha256",
         "matched_control_trace_manifest_sha256",
-        "current_run_trace_prefix_receipt_sha256",
     ):
         _sha(acceptance[field], f"acceptance {field}")
+    prefix_sha256_by_rank = acceptance[
+        "current_run_trace_prefix_receipt_sha256_by_rank"
+    ]
+    expected_rank_keys = [
+        str(rank) for rank in range(receipt["stable_contract"]["world_size"])
+    ]
+    if (
+        not isinstance(prefix_sha256_by_rank, dict)
+        or list(prefix_sha256_by_rank) != expected_rank_keys
+    ):
+        raise CausalProductionError("acceptance trace-prefix rank set differs")
+    for rank_key, digest in prefix_sha256_by_rank.items():
+        _sha(digest, f"acceptance trace-prefix rank {rank_key}")
     path_fields = (
         "checkpoint_path_record_only", "robot_gate_path_record_only",
         "gate_reviewer_acceptance_path_record_only",
@@ -2250,17 +2281,18 @@ def verify_acceptance_bound_artifacts_v3(
         or report != compare_causal_records(traces, required_seed=receipt["seed"])
     ):
         raise CausalProductionError("accepted current-run matched-control replay changed")
-    prefix = receipt["checkpoint_file"]["current_run_trace_prefix_receipt"]
-    if (
-        Path(prefix["trace_path_record_only"]).absolute()
-        != Path(
-            acceptance["matched_control_trace_path_by_route"][route][
-                str(prefix["rank"])
-            ]
-        ).absolute()
-        or replay_current_run_trace_prefix_v1(prefix) != prefix
-    ):
-        raise CausalProductionError("accepted current-run trace prefix changed")
+    prefix_by_rank = receipt["checkpoint_file"][
+        "current_run_trace_prefix_receipt_by_rank"
+    ]
+    for rank_key, prefix in prefix_by_rank.items():
+        if (
+            Path(prefix["trace_path_record_only"]).absolute()
+            != Path(
+                acceptance["matched_control_trace_path_by_route"][route][rank_key]
+            ).absolute()
+            or replay_current_run_trace_prefix_v1(prefix) != prefix
+        ):
+            raise CausalProductionError("accepted current-run trace prefix changed")
     source = current_head_source_tree_receipt(
         root, expected_commit=receipt["stable_contract"]["git_commit"]
     )

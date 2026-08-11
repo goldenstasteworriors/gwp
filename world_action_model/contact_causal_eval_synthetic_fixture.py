@@ -2741,8 +2741,8 @@ def build_synthetic_causal_admission_fixture(
                         trace_path=traces["trace_path_by_route"][route],
                     )
                     receipt["checkpoint_file"][
-                        "current_run_trace_prefix_receipt"
-                    ] = prefix
+                        "current_run_trace_prefix_receipt_by_rank"
+                    ] = {"0": prefix}
                     fixture_root_for_acceptance = Path(
                         receipt["checkpoint_file"]["path_record_only"]
                     ).parent
@@ -2827,9 +2827,9 @@ def build_synthetic_causal_admission_fixture(
                                 "trace_path_by_route"
                             ].items()
                         },
-                        current_run_trace_prefix_receipt_sha256=prefix[
-                            "receipt_sha256"
-                        ],
+                        current_run_trace_prefix_receipt_sha256_by_rank={
+                            "0": prefix["receipt_sha256"]
+                        },
                         current_head_source_receipt_sha256=source_sha,
                         reviewed_current_head_sha256=_git_head(root),
                         reviewed_source_tree_sha256=source_sha,

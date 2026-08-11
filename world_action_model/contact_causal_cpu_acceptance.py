@@ -1443,7 +1443,7 @@ def _make_receipt(
             "tensor_manifest": inspected["tensor_manifest"],
             "tensor_manifest_sha256": inspected["tensor_manifest_sha256"],
             "bundle_manifest": inspected["bundle_manifest"],
-            "current_run_trace_prefix_receipt": trace_prefix,
+            "current_run_trace_prefix_receipt_by_rank": {"0": trace_prefix},
         },
         "parent_checkpoint_weight_sha256": parent_sha,
         "scientific_admission": {
@@ -1540,9 +1540,12 @@ def _make_acceptance(receipt: dict[str, Any]) -> dict[str, Any]:
             item: {"0": _h(f"matched-control-trace-bytes-{item}")}
             for item in CAUSAL_ROUTES
         },
-        "current_run_trace_prefix_receipt_sha256": receipt["checkpoint_file"][
-            "current_run_trace_prefix_receipt"
-        ]["receipt_sha256"],
+        "current_run_trace_prefix_receipt_sha256_by_rank": {
+            rank: prefix["receipt_sha256"]
+            for rank, prefix in receipt["checkpoint_file"][
+                "current_run_trace_prefix_receipt_by_rank"
+            ].items()
+        },
         "current_head_source_receipt_sha256": receipt["evidence"][
             "current_head_source_receipt_sha256"
         ],
@@ -2019,6 +2022,18 @@ def run_cpu_acceptance(repository_root: str | Path) -> dict[str, Any]:
                     validate_acceptance_v3(acceptance, receipt=receipt)
                     evidence[(seed, route, step)] = (receipt, acceptance)
                     parent = parameter_topology["parameter_tensor_sha256"]
+        missing_rank_prefix = deepcopy(
+            evidence[(6666, "hard_st_semantic", 100)][0]
+        )
+        missing_rank_prefix["checkpoint_file"][
+            "current_run_trace_prefix_receipt_by_rank"
+        ] = {}
+        try:
+            validate_training_receipt_v5(missing_rank_prefix)
+        except CausalProductionError:
+            pass
+        else:
+            raise AssertionError("checkpoint accepted an incomplete rank-prefix set")
         report = validate_27_checkpoint_matrix(evidence, verify_files=True)
         full_evaluator_report = _full_evaluator_acceptance_subprocess(
             workspace=workspace, root=root, evidence=evidence
@@ -2208,6 +2223,7 @@ def run_cpu_acceptance(repository_root: str | Path) -> dict[str, Any]:
                 "route_cache_policy_drift",
                 "optimizer_parameter_group_omission",
                 "active_optimizer_state_omission",
+                "checkpoint_rank_prefix_set_incomplete",
                 "boolean_integer_alias",
                 "GT_oracle_evaluator_leakage",
                 "target_key_in_exact_inference_packet",
