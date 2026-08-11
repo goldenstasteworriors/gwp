@@ -1299,7 +1299,7 @@ def _build_t5_and_runtime(
         build_robot_runtime_source_receipts_v1,
     )
 
-    root = fixture / "t5_embedding"
+    root = Path(hardened["data_root"]) / "t5_embedding"
     root.mkdir(parents=True)
     for episode in SYNTHETIC_EPISODE_IDS:
         torch.save(
