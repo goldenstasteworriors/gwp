@@ -43,6 +43,7 @@ from world_action_model.contact_asym25_checkpoint_acceptance import (
     CheckpointAcceptanceError,
     strict_json_file as strict_checkpoint_json_file,
     validate_acceptance,
+    validate_acceptance_claim,
     validate_bundle_manifest,
     validate_training_receipt,
 )
@@ -67,7 +68,7 @@ WINDOW_MANIFEST_VERSION = "contact-asym25-heldout-windows/v1"
 CHECKPOINT_MANIFEST_VERSION = "contact-asym25-heldout-checkpoints/v2"
 CURRENT_TRAINING_DATA_RECEIPT_VERSION = "contact-asym25-current-training-data-receipt/v1"
 RESULT_VERSION = "contact-asym25-heldout-result/v2"
-AGGREGATE_RESULT_VERSION = "contact-asym25-heldout-aggregate/v2"
+AGGREGATE_RESULT_VERSION = "contact-asym25-heldout-aggregate/v4"
 ARTIFACT_RECEIPT_VERSION = "contact-asym25-heldout-artifacts/v1"
 
 EVALUATION_SEEDS = (6666, 7777, 8888)
@@ -285,7 +286,6 @@ def load_and_replay_preflight_receipt(path: str | Path) -> tuple[dict, str]:
         "contact_schema_version": SEGMENT_SCHEMA_VERSION,
         "contact_target_dim": SEGMENT_TARGET_DIM,
         "num_contact_tokens": NUM_CONTACT_QUERIES,
-        "transport_mode": "hard_st",
         "time_bins": TIME_BINS,
         "horizon_frames": HORIZON_FRAMES,
     }
@@ -910,6 +910,8 @@ def validate_checkpoint_manifest(
             or receipt["dataset_source_tree_sha256"] != dataset_tree_sha256
             or receipt["initial_weights_bundle_sha256"]
             != base_model["bundle_sha256"]
+            or receipt["base_model_bundle_sha256"]
+            != base_model["bundle_sha256"]
             or receipt["action_schema_contract"]
             != ASYMMETRIC25_ACTION_SCHEMA_CONTRACT
         ):
@@ -923,13 +925,37 @@ def validate_checkpoint_manifest(
         }
     if seen != {(selected_seed, step) for step in CHECKPOINT_STEPS}:
         raise HeldoutEvaluationError("checkpoint manifest seed/step matrix is incomplete")
-    run_nonces = {row["receipt"]["training_run_nonce"] for row in accepted.values()}
+    run_identities = {
+        (
+            row["receipt"]["training_run_nonce"],
+            row["receipt"]["training_run_id"],
+            row["receipt"]["experiment_family_id"],
+            row["receipt"]["variant_id"],
+            row["receipt"]["transport_variant_id"],
+            row["receipt"]["matched_control_external_acceptance_sha256"],
+            row["receipt"]["production_run_contract_sha256"],
+            row["receipt"]["current_training_data_receipt_sha256"],
+        )
+        for row in accepted.values()
+    }
     acceptance_nonces = {
         row["acceptance"]["reviewer_attestation_nonce"] for row in accepted.values()
     }
-    if len(run_nonces) != 1 or len(acceptance_nonces) != len(CHECKPOINT_STEPS):
+    acceptance_run_nonces = {
+        row["acceptance"]["acceptance_run_nonce"] for row in accepted.values()
+    }
+    acceptance_run_ids = {
+        row["acceptance"]["acceptance_run_id"] for row in accepted.values()
+    }
+    if (
+        len(run_identities) != 1
+        or len(acceptance_nonces) != len(CHECKPOINT_STEPS)
+        or len(acceptance_run_nonces) != len(CHECKPOINT_STEPS)
+        or len(acceptance_run_ids) != len(CHECKPOINT_STEPS)
+    ):
         raise HeldoutEvaluationError(
-            "one training run must have one nonce and three independent acceptances"
+            "one training run must have one ID/nonce and three distinct "
+            "reviewer acceptance identities"
         )
     for step, expected_parent in (
         (0, base_model["bundle_sha256"]),
@@ -2162,58 +2188,145 @@ def checkpoint_entries_by_key(manifest: Mapping[str, Any]) -> dict[tuple[int, in
 
 
 def validate_three_seed_run_contracts(
-    evidence_by_seed: Mapping[int, Sequence[tuple[Mapping[str, Any], str]]],
+    evidence_by_seed: Mapping[
+        int,
+        Sequence[tuple[Mapping[str, Any], Mapping[str, Any], str]],
+    ],
 ) -> dict[str, Any]:
-    """Require three genuinely distinct runs under one variant contract."""
+    """Revalidate nine acceptances and require distinct reviewer/run identities."""
 
     if set(evidence_by_seed) != set(EVALUATION_SEEDS):
         raise HeldoutEvaluationError("three-seed evidence matrix is incomplete")
-    run_contracts: dict[int, tuple[str, str, str, str, str]] = {}
+    run_contracts: dict[int, tuple[str, str, str, str, str, str, str]] = {}
     acceptance_hashes: set[str] = set()
+    reviewer_nonces: set[str] = set()
+    acceptance_run_nonces: set[str] = set()
+    acceptance_run_ids: set[str] = set()
+    base_contracts: set[str] = set()
     for seed in EVALUATION_SEEDS:
         rows = evidence_by_seed[seed]
         if len(rows) != len(CHECKPOINT_STEPS):
             raise HeldoutEvaluationError("three-seed checkpoint matrix is incomplete")
-        steps = {receipt.get("checkpoint_step") for receipt, _ in rows}
+        steps = {receipt.get("checkpoint_step") for receipt, _, _ in rows}
         identities = {
             (
                 receipt.get("training_run_nonce"),
+                receipt.get("training_run_id"),
                 receipt.get("experiment_family_id"),
                 receipt.get("variant_id"),
+                receipt.get("transport_variant_id"),
                 receipt.get("heldout_window_manifest_sha256"),
                 receipt.get("matched_control_receipt_sha256"),
             )
-            for receipt, _ in rows
+            for receipt, _, _ in rows
         }
         if steps != set(CHECKPOINT_STEPS) or len(identities) != 1:
             raise HeldoutEvaluationError(
                 "each seed must contain one run with step 0/100/200"
             )
-        for _, digest in rows:
-            acceptance_hashes.add(_require_sha256(digest, "checkpoint acceptance digest"))
+        for receipt, acceptance, digest in rows:
+            validate_training_receipt(receipt)
+            try:
+                validate_acceptance_claim(
+                    acceptance,
+                    training_receipt=receipt,
+                    training_receipt_sha256=acceptance[
+                        "checkpoint_training_receipt_sha256"
+                    ],
+                )
+            except (CheckpointAcceptanceError, KeyError) as exc:
+                raise HeldoutEvaluationError(
+                    "aggregate checkpoint acceptance content is invalid"
+                ) from exc
+            acceptance_hashes.add(
+                _require_sha256(digest, "checkpoint acceptance digest")
+            )
+            reviewer_nonces.add(acceptance["reviewer_attestation_nonce"])
+            acceptance_run_nonces.add(acceptance["acceptance_run_nonce"])
+            acceptance_run_ids.add(acceptance["acceptance_run_id"])
+            base_contracts.add(
+                hashlib.sha256(
+                    _canonical_json_bytes(
+                        {
+                            "experiment_family_id": receipt["experiment_family_id"],
+                            "variant_id": receipt["variant_id"],
+                            "transport_variant_id": receipt[
+                                "transport_variant_id"
+                            ],
+                            "initial_weights_bundle_sha256": receipt[
+                                "initial_weights_bundle_sha256"
+                            ],
+                            "base_model_bundle_sha256": receipt[
+                                "base_model_bundle_sha256"
+                            ],
+                            "training_code_receipt_sha256": receipt[
+                                "training_code_receipt_sha256"
+                            ],
+                            "dataset_source_tree_sha256": receipt[
+                                "dataset_source_tree_sha256"
+                            ],
+                            "runtime_environment_receipt_sha256": receipt[
+                                "runtime_environment_receipt_sha256"
+                            ],
+                            "optimizer_config_sha256": receipt[
+                                "optimizer_config_sha256"
+                            ],
+                            "scheduler_config_sha256": receipt[
+                                "scheduler_config_sha256"
+                            ],
+                            "stable_training_config_sha256": receipt[
+                                "stable_training_config_sha256"
+                            ],
+                            "training_precision": receipt["training_precision"],
+                            "contact_query_count": receipt["contact_query_count"],
+                            "contact_target_dim": receipt["contact_target_dim"],
+                            "contact_time_bins": receipt["contact_time_bins"],
+                            "action_schema_contract": receipt[
+                                "action_schema_contract"
+                            ],
+                        }
+                    )
+                ).hexdigest()
+            )
         run_contracts[seed] = next(iter(identities))
         _require_sha256(
-            run_contracts[seed][4], "matched-control receipt digest"
+            run_contracts[seed][6], "matched-control receipt digest"
         )
     if (
         len({value[0] for value in run_contracts.values()}) != len(EVALUATION_SEEDS)
-        or len({value[1] for value in run_contracts.values()}) != 1
+        or len({value[1] for value in run_contracts.values()}) != len(EVALUATION_SEEDS)
         or len({value[2] for value in run_contracts.values()}) != 1
+        or len({value[3] for value in run_contracts.values()}) != 1
+        or len({value[4] for value in run_contracts.values()}) != 1
         or len(acceptance_hashes) != len(EVALUATION_SEEDS) * len(CHECKPOINT_STEPS)
+        or len(reviewer_nonces) != len(EVALUATION_SEEDS) * len(CHECKPOINT_STEPS)
+        or len(acceptance_run_nonces)
+        != len(EVALUATION_SEEDS) * len(CHECKPOINT_STEPS)
+        or len(acceptance_run_ids) != len(EVALUATION_SEEDS) * len(CHECKPOINT_STEPS)
+        or len(base_contracts) != 1
     ):
         raise HeldoutEvaluationError(
-            "three seeds require distinct run/acceptance identities and one family/variant"
+            "three seeds require globally distinct reviewer/acceptance/run identities "
+            "and one family/base contract"
         )
     return {
-        "experiment_family_id": next(iter(run_contracts.values()))[1],
-        "variant_id": next(iter(run_contracts.values()))[2],
+        "experiment_family_id": next(iter(run_contracts.values()))[2],
+        "variant_id": next(iter(run_contracts.values()))[3],
+        "transport_variant_id": next(iter(run_contracts.values()))[4],
         "training_run_nonces_by_seed": {
             str(seed): run_contracts[seed][0] for seed in EVALUATION_SEEDS
         },
+        "training_run_ids_by_seed": {
+            str(seed): run_contracts[seed][1] for seed in EVALUATION_SEEDS
+        },
         "matched_control_receipt_sha256_by_seed": {
-            str(seed): run_contracts[seed][4] for seed in EVALUATION_SEEDS
+            str(seed): run_contracts[seed][6] for seed in EVALUATION_SEEDS
         },
         "independent_acceptance_sha256": sorted(acceptance_hashes),
+        "reviewer_attestation_nonces": sorted(reviewer_nonces),
+        "acceptance_run_nonces": sorted(acceptance_run_nonces),
+        "acceptance_run_ids": sorted(acceptance_run_ids),
+        "common_base_contract_sha256": next(iter(base_contracts)),
     }
 
 
@@ -2222,14 +2335,39 @@ def validate_matched_variant_run_contracts(
 ) -> dict[str, Any]:
     """Prove matched variants share controls but are distinct training runs."""
 
-    if len(receipts) < 2:
-        raise HeldoutEvaluationError("matched-variant comparison needs at least two runs")
+    if len(receipts) != 3:
+        raise HeldoutEvaluationError(
+            "matched-variant comparison needs exactly three transport runs"
+        )
     common_fields = (
         "split_seed",
         "production_preflight_receipt_sha256",
         "heldout_window_manifest_sha256",
         "matched_control_receipt_sha256",
         "experiment_family_id",
+        "initial_weights_bundle_sha256",
+        "base_model_bundle_sha256",
+        "training_code_receipt_sha256",
+        "dataset_source_tree_sha256",
+        "training_precision",
+        "contact_query_count",
+        "contact_target_dim",
+        "contact_time_bins",
+        "action_schema_contract",
+        "production_run_contract",
+        "production_run_contract_sha256",
+        "runtime_environment_receipt",
+        "runtime_environment_receipt_sha256",
+        "optimizer_config_sha256",
+        "scheduler_config_sha256",
+        "training_config_sha256",
+        "training_config_receipt",
+        "stable_training_config_sha256",
+        "control_config_sha256",
+        "train_window_receipt_sha256",
+        "training_gate_sha256",
+        "current_training_data_receipt",
+        "current_training_data_receipt_sha256",
     )
     for receipt in receipts:
         validate_training_receipt(receipt)
@@ -2242,12 +2380,118 @@ def validate_matched_variant_run_contracts(
             "matched variants differ in seed/window/control/family receipt"
         )
     variants = [receipt["variant_id"] for receipt in receipts]
+    transports = [receipt["transport_variant_id"] for receipt in receipts]
     nonces = [receipt["training_run_nonce"] for receipt in receipts]
-    if len(set(variants)) != len(variants) or len(set(nonces)) != len(nonces):
+    run_ids = [receipt["training_run_id"] for receipt in receipts]
+    external_acceptances = [
+        receipt["matched_control_external_acceptance_sha256"]
+        for receipt in receipts
+    ]
+    if (
+        len(set(variants)) != len(variants)
+        or set(transports)
+        != {"soft_semantic", "hard_st", "hard_detached"}
+        or len(set(nonces)) != len(nonces)
+        or len(set(run_ids)) != len(run_ids)
+        or len(set(external_acceptances)) != len(external_acceptances)
+    ):
         raise HeldoutEvaluationError(
             "matched variants require distinct variant IDs and training run nonces"
         )
-    return {**common, "variant_ids": sorted(variants), "training_run_nonces": sorted(nonces)}
+    return {
+        **common,
+        "variant_ids": sorted(variants),
+        "transport_variant_ids": sorted(transports),
+        "training_run_nonces": sorted(nonces),
+        "training_run_ids": sorted(run_ids),
+        "matched_control_external_acceptance_sha256": sorted(
+            external_acceptances
+        ),
+    }
+
+
+def validate_nine_run_matrix(
+    evidence_by_run: Mapping[
+        tuple[int, str],
+        Sequence[tuple[Mapping[str, Any], Mapping[str, Any], str]],
+    ],
+) -> dict[str, Any]:
+    """Cross-check all 3 seeds x 3 transports and all 27 acceptances."""
+
+    transports = ("soft_semantic", "hard_st", "hard_detached")
+    expected_keys = {
+        (seed, transport) for seed in EVALUATION_SEEDS for transport in transports
+    }
+    if set(evidence_by_run) != expected_keys:
+        raise HeldoutEvaluationError("nine-run production matrix is incomplete")
+
+    three_seed_contracts = {}
+    for transport in transports:
+        three_seed_contracts[transport] = validate_three_seed_run_contracts(
+            {
+                seed: evidence_by_run[(seed, transport)]
+                for seed in EVALUATION_SEEDS
+            }
+        )
+    matched_seed_contracts = {}
+    for seed in EVALUATION_SEEDS:
+        representatives = [
+            evidence_by_run[(seed, transport)][0][0] for transport in transports
+        ]
+        matched_seed_contracts[str(seed)] = validate_matched_variant_run_contracts(
+            representatives
+        )
+
+    training_run_ids = set()
+    training_run_nonces = set()
+    reviewer_nonces = set()
+    acceptance_run_ids = set()
+    acceptance_run_nonces = set()
+    acceptance_hashes = set()
+    for rows in evidence_by_run.values():
+        for receipt, acceptance, acceptance_sha256 in rows:
+            training_run_ids.add(receipt["training_run_id"])
+            training_run_nonces.add(receipt["training_run_nonce"])
+            reviewer_nonces.add(acceptance["reviewer_attestation_nonce"])
+            acceptance_run_ids.add(acceptance["acceptance_run_id"])
+            acceptance_run_nonces.add(acceptance["acceptance_run_nonce"])
+            acceptance_hashes.add(
+                _require_sha256(
+                    acceptance_sha256, "nine-run checkpoint acceptance digest"
+                )
+            )
+    if (
+        len(training_run_ids) != len(expected_keys)
+        or len(training_run_nonces) != len(expected_keys)
+        or len(reviewer_nonces) != len(expected_keys) * len(CHECKPOINT_STEPS)
+        or len(acceptance_run_ids) != len(expected_keys) * len(CHECKPOINT_STEPS)
+        or len(acceptance_run_nonces) != len(expected_keys) * len(CHECKPOINT_STEPS)
+        or len(acceptance_hashes) != len(expected_keys) * len(CHECKPOINT_STEPS)
+    ):
+        raise HeldoutEvaluationError(
+            "nine-run matrix reuses training or reviewer acceptance identities"
+        )
+    family_ids = {
+        contract["experiment_family_id"]
+        for contract in three_seed_contracts.values()
+    }
+    if len(family_ids) != 1:
+        raise HeldoutEvaluationError(
+            "nine-run matrix spans multiple experiment families"
+        )
+    return {
+        "experiment_family_id": next(iter(family_ids)),
+        "split_seeds": list(EVALUATION_SEEDS),
+        "transport_variant_ids": list(transports),
+        "training_run_ids": sorted(training_run_ids),
+        "training_run_nonces": sorted(training_run_nonces),
+        "reviewer_attestation_nonces": sorted(reviewer_nonces),
+        "acceptance_run_ids": sorted(acceptance_run_ids),
+        "acceptance_run_nonces": sorted(acceptance_run_nonces),
+        "independent_acceptance_sha256": sorted(acceptance_hashes),
+        "three_seed_contracts": three_seed_contracts,
+        "matched_seed_contracts": matched_seed_contracts,
+    }
 
 
 def build_current_training_data_receipt(

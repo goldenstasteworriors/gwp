@@ -1,5 +1,6 @@
 {
-  "gate_version": "contact-asym25-training-gate/v1",
+  "gate_version": "contact-asym25-training-gate/v2",
+  "evidence_valid_until_utc": null,
   "human_adjudicated_sidecar_passed": false,
   "independent_segment_count": 0,
   "dual_annotation_agreement_passed": false,
@@ -27,9 +28,29 @@
   "evidence_reports": {
     "annotation_agreement": {"path": null, "sha256": null},
     "hardware_verification": {"path": null, "sha256": null},
-    "matched_control_hash_collector": {"path": null, "sha256": null}
+    "matched_control_hash_collector": {"path": null, "sha256": null},
+    "gate_reviewer_acceptance": {"path": null, "sha256": null}
+  },
+  "matched_control_expectations": {
+    "expected_git_commit": null,
+    "expected_run_id_by_variant": null,
+    "expected_run_nonce_by_variant": null,
+    "expected_report_sha256": null,
+    "expected_trace_files": null,
+    "expected_trace_manifest_sha256": null,
+    "expected_global_hashes_sha256": null,
+    "expected_hash_schema_sha256": null,
+    "expected_control_config_sha256": null,
+    "expected_variant_config_sha256": null,
+    "expected_shared_model_config_sha256": null,
+    "expected_world_size": null,
+    "expected_rank_set": null,
+    "expected_collector_version": null,
+    "expected_collector_source_sha256": null,
+    "expected_run_contract_sha256": null,
+    "expected_external_acceptance_sha256_by_variant": null
   },
   "reviewed_by": null,
   "reviewed_at_utc": null,
-  "note": "Template only. Do not set gates true without independent evidence and artifact-bound review."
+  "note": "Fail-closed template only. v1 gates and self-reported metrics are rejected; do not set true/null fields without current-run evidence and external review."
 }

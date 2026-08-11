@@ -25,8 +25,15 @@ PRODUCTION_TRAIN_NORM_RECEIPT_VERSION = (
 PRODUCTION_SPLIT_RECEIPT_VERSION = "contact-asym25-production-split-receipt/v1"
 NORM_SOURCE_TREE_RECEIPT_VERSION = "contact-asym25-norm-source-tree/v1"
 NORM_SOURCE_TREE_SCOPE = "meta-info+episode-metadata+data-parquet/v1"
+PRODUCTION_TRAIN_RAW_STATS_VERSION = (
+    "contact-asym25-train-only-raw-sufficient-statistics/v1"
+)
+PRODUCTION_NUMERIC_CONTRACT = (
+    "robot25-pad32-float64-h48-clamp-exact-linear-quantile/v1"
+)
 PRODUCTION_SPLIT_SEEDS = frozenset({6666, 7777, 8888})
 PRODUCTION_ACTION_SCHEMA_ID = "sonic_g1_rh56dftp6_omnipicker1_v1"
+PRODUCTION_PHYSICAL_DIM = 25
 PRODUCTION_MODEL_DIM = 32
 PRODUCTION_ACTION_HORIZON = 48
 PRODUCTION_BOUNDARY = (
@@ -34,6 +41,10 @@ PRODUCTION_BOUNDARY = (
 )
 PRODUCTION_ACTION_REPRESENTATION = (
     "delta_for_true_delta_mask_dims_else_absolute_action"
+)
+PRODUCTION_PADDING_CONTRACT = "physical_dims_0_24;model_padding_dims_25_31_exact_zero"
+PRODUCTION_GRIP_VALIDITY_CONTRACT = (
+    "robot25_grip_dims_18_24_all_valid_on_every_selected_train_row"
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -176,10 +187,8 @@ def build_norm_source_tree_receipt(data_root: str | Path) -> dict[str, Any]:
     if episode_jsonl.is_file():
         episode_paths = [episode_jsonl]
     else:
-        episode_paths = sorted((root / "meta" / "episodes").glob("*/*.parquet"))
-        episode_paths += sorted((root / "meta" / "episodes").glob("*.parquet"))
-    data_paths = sorted((root / "data").glob("*/*.parquet"))
-    data_paths += sorted((root / "data").glob("*.parquet"))
+        episode_paths = sorted((root / "meta" / "episodes").rglob("*.parquet"))
+    data_paths = sorted((root / "data").rglob("*.parquet"))
     paths = [info_path, *episode_paths, *data_paths]
     if not info_path.is_file() or not episode_paths or not data_paths:
         raise ProductionTrainNormError(
@@ -204,6 +213,7 @@ def build_norm_source_tree_receipt(data_root: str | Path) -> dict[str, Any]:
         "tree_sha256": canonical_json_sha256(rows),
         "file_count": len(rows),
         "total_size_bytes": sum(row["size_bytes"] for row in rows),
+        "files": rows,
     }
 
 
@@ -250,6 +260,7 @@ def build_expected_train_norm_source_receipt(
         "tree_sha256",
         "file_count",
         "total_size_bytes",
+        "files",
     }
     if set(source_tree) != expected_tree_keys:
         raise ProductionTrainNormError("norm source-tree receipt schema differs")
@@ -259,6 +270,7 @@ def build_expected_train_norm_source_receipt(
     ):
         raise ProductionTrainNormError("norm source-tree receipt identity differs")
     _require_sha256(source_tree["tree_sha256"], "norm source-tree digest")
+    files = source_tree["files"]
     if (
         isinstance(source_tree["file_count"], bool)
         or not isinstance(source_tree["file_count"], int)
@@ -266,8 +278,33 @@ def build_expected_train_norm_source_receipt(
         or isinstance(source_tree["total_size_bytes"], bool)
         or not isinstance(source_tree["total_size_bytes"], int)
         or source_tree["total_size_bytes"] <= 0
+        or not isinstance(files, list)
+        or len(files) != source_tree["file_count"]
     ):
         raise ProductionTrainNormError("norm source-tree counts are invalid")
+    expected_file_keys = {"logical_path", "sha256", "size_bytes"}
+    logical_paths = []
+    for row in files:
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != expected_file_keys
+            or not isinstance(row["logical_path"], str)
+            or not row["logical_path"]
+            or Path(row["logical_path"]).is_absolute()
+            or ".." in Path(row["logical_path"]).parts
+            or isinstance(row["size_bytes"], bool)
+            or not isinstance(row["size_bytes"], int)
+            or row["size_bytes"] <= 0
+        ):
+            raise ProductionTrainNormError("norm source-tree file receipt differs")
+        _require_sha256(row["sha256"], "norm source file digest")
+        logical_paths.append(row["logical_path"])
+    if logical_paths != sorted(set(logical_paths)):
+        raise ProductionTrainNormError("norm source-tree file order differs")
+    if canonical_json_sha256(files) != source_tree["tree_sha256"]:
+        raise ProductionTrainNormError("norm source-tree aggregate digest differs")
+    if sum(row["size_bytes"] for row in files) != source_tree["total_size_bytes"]:
+        raise ProductionTrainNormError("norm source-tree aggregate size differs")
     state_count = sum(lengths[episode] for episode in train)
     receipt = {
         "receipt_version": PRODUCTION_TRAIN_NORM_RECEIPT_VERSION,
@@ -281,11 +318,14 @@ def build_expected_train_norm_source_receipt(
         "dataset_info_sha256": split_receipt["dataset_info_sha256"],
         "episode_metadata_sha256": split_receipt["episode_metadata_sha256"],
         "source_dataset_tree_receipt": source_tree,
+        "physical_dim": PRODUCTION_PHYSICAL_DIM,
         "model_dim": model_dim,
         "action_horizon": action_horizon,
         "delta_mask": [False] * model_dim,
         "action_representation": PRODUCTION_ACTION_REPRESENTATION,
         "boundary": PRODUCTION_BOUNDARY,
+        "padding_contract": PRODUCTION_PADDING_CONTRACT,
+        "grip_validity_contract": PRODUCTION_GRIP_VALIDITY_CONTRACT,
         "num_episodes": len(train),
         "num_state_samples": state_count,
         "num_action_samples": state_count * action_horizon,
@@ -298,6 +338,8 @@ def validate_production_train_norm_metadata(
     *,
     expected_source_receipt: Mapping[str, Any],
     expected_source_receipt_sha256: str,
+    expected_raw_statistics: Mapping[str, Any],
+    expected_raw_statistics_sha256: str,
     data_root: str | Path,
 ) -> dict[str, Any]:
     """Reject whole-dataset/another-seed norm metadata on production paths."""
@@ -316,6 +358,23 @@ def validate_production_train_norm_metadata(
         raise ProductionTrainNormError(
             "normalization stats are not the exact receipt-seed train-only artifact"
         )
+    raw_statistics = dict(expected_raw_statistics)
+    raw_digest = canonical_json_sha256(raw_statistics)
+    if raw_statistics.get("receipt_version") != PRODUCTION_TRAIN_RAW_STATS_VERSION:
+        raise ProductionTrainNormError("expected raw statistics version differs")
+    if raw_statistics.get("numeric_contract") != PRODUCTION_NUMERIC_CONTRACT:
+        raise ProductionTrainNormError("expected raw numeric contract differs")
+    if raw_digest != _require_sha256(
+        expected_raw_statistics_sha256, "expected raw statistics digest"
+    ):
+        raise ProductionTrainNormError("expected raw statistics digest differs")
+    if (
+        metadata.get("production_train_raw_statistics") != raw_statistics
+        or metadata.get("production_train_raw_statistics_sha256") != raw_digest
+    ):
+        raise ProductionTrainNormError(
+            "normalization raw sufficient statistics differ from verified train data"
+        )
     roots = metadata.get("data_roots")
     if (
         not isinstance(roots, list)
@@ -333,12 +392,15 @@ def validate_production_train_norm_metadata(
         ],
         "split_manifest_sha256": expected["split_manifest_sha256"],
         "source_dataset_tree_receipt": expected["source_dataset_tree_receipt"],
+        "physical_dim": expected["physical_dim"],
         "action_schema_id": expected["action_schema_id"],
         "model_dim": expected["model_dim"],
         "action_horizon": expected["action_horizon"],
         "delta_mask": expected["delta_mask"],
         "action_representation": expected["action_representation"],
         "boundary": expected["boundary"],
+        "padding_contract": expected["padding_contract"],
+        "grip_validity_contract": expected["grip_validity_contract"],
         "num_episodes": expected["num_episodes"],
         "num_state_samples": expected["num_state_samples"],
         "num_action_samples": expected["num_action_samples"],
@@ -351,3 +413,20 @@ def validate_production_train_norm_metadata(
                 f"production norm metadata {name} is not train-only/bound"
             )
     return expected
+
+
+def validate_production_train_norm_payload_statistics(
+    payload: object,
+    *,
+    expected_norm_stats: Mapping[str, Any],
+) -> None:
+    """Require every emitted norm statistic and forbid artifact-only extras."""
+
+    if not isinstance(payload, Mapping):
+        raise ProductionTrainNormError("production norm payload must be an object")
+    if set(payload) != {"norm_stats", "metadata"}:
+        raise ProductionTrainNormError("production norm payload schema differs")
+    if payload.get("norm_stats") != dict(expected_norm_stats):
+        raise ProductionTrainNormError(
+            "normalization values differ from independently recomputed train data"
+        )

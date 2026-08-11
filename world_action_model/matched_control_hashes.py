@@ -176,6 +176,51 @@ def canonical_json_dumps(value: Any) -> str:
     )
 
 
+def json_sha256(value: Any) -> str:
+    """SHA-256 of strict canonical JSON for cross-receipt contracts."""
+
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _write_json_exclusive_durable(path: Path, value: Any) -> None:
+    payload = (
+        json.dumps(
+            value,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(fd, payload[offset:])
+            if written <= 0:
+                raise OSError("short write while persisting matched-control report")
+            offset += written
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(path.parent, directory_flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def build_sample_identity(
     *, dataset_id: Any, episode_index: Any, frame_index: Any, global_index: Any
 ) -> dict[str, Any]:
@@ -313,6 +358,29 @@ class MatchedControlCollector:
             raise MatchedControlError(
                 "collector requires an explicit 64-hex control_config_sha256"
             )
+        self.shared_model_config_sha256 = config.get(
+            "shared_model_config_sha256"
+        )
+        self.transport_override = config.get("transport_override")
+        expected_transport = {
+            "soft_semantic": "soft",
+            "hard_st": "hard_st",
+            "hard_detached": "hard_detached",
+        }[self.variant_id]
+        if (
+            not isinstance(self.shared_model_config_sha256, str)
+            or not _HEX64_RE.fullmatch(self.shared_model_config_sha256)
+            or not isinstance(self.transport_override, Mapping)
+            or dict(self.transport_override)
+            != {
+                "variant_id": self.variant_id,
+                "contact_semantic_transport_mode": expected_transport,
+            }
+        ):
+            raise MatchedControlError(
+                "collector transport override/shared model contract differs"
+            )
+        self.transport_override = dict(self.transport_override)
         self.training_data_receipt_sha256 = config.get(
             "training_data_receipt_sha256"
         )
@@ -338,6 +406,42 @@ class MatchedControlCollector:
             raise MatchedControlError(
                 "production_split_seed requires training_data_receipt_sha256"
             )
+        self.production_preflight_receipt_sha256 = config.get(
+            "production_preflight_receipt_sha256"
+        )
+        self.run_contract = config.get("run_contract")
+        self.run_contract_sha256 = config.get("run_contract_sha256")
+        self.external_acceptance_sha256 = config.get(
+            "external_acceptance_sha256"
+        )
+        production_contract_values = (
+            self.production_preflight_receipt_sha256,
+            self.run_contract,
+            self.run_contract_sha256,
+            self.external_acceptance_sha256,
+        )
+        if any(value is not None for value in production_contract_values):
+            if any(value is None for value in production_contract_values):
+                raise MatchedControlError(
+                    "current-run contract fields must be supplied as one complete set"
+                )
+            if (
+                not isinstance(self.production_preflight_receipt_sha256, str)
+                or not _HEX64_RE.fullmatch(self.production_preflight_receipt_sha256)
+                or not isinstance(self.run_contract, Mapping)
+                or not self.run_contract
+                or not isinstance(self.run_contract_sha256, str)
+                or not _HEX64_RE.fullmatch(self.run_contract_sha256)
+                or json_sha256(self.run_contract) != self.run_contract_sha256
+                or not isinstance(self.external_acceptance_sha256, str)
+                or not _HEX64_RE.fullmatch(self.external_acceptance_sha256)
+            ):
+                raise MatchedControlError("invalid current-run matched-control contract")
+            self.run_contract = dict(self.run_contract)
+        elif self.training_data_receipt_sha256 is not None:
+            # Legacy production receipts remain readable for Ego v6, but the
+            # contact-asym25 v2 gate never accepts their report.
+            self.run_contract = None
         self.config_hash_scope = config.get("config_hash_scope")
         if not isinstance(self.config_hash_scope, Mapping) or set(
             self.config_hash_scope
@@ -505,12 +609,20 @@ class MatchedControlCollector:
             "world_size": self.world_size,
             "variant_config_sha256": self.variant_config_sha256,
             "control_config_sha256": self.control_config_sha256,
+            "shared_model_config_sha256": self.shared_model_config_sha256,
+            "transport_override": self.transport_override,
             "config_hash_scope": self.config_hash_scope,
             "git_commit": self.git_commit,
             "collector_code_sha256": self.collector_code_sha256,
             "training_data_receipt_sha256": self.training_data_receipt_sha256,
             "heldout_window_manifest_sha256": self.heldout_window_manifest_sha256,
             "production_split_seed": self.production_split_seed,
+            "production_preflight_receipt_sha256": (
+                self.production_preflight_receipt_sha256
+            ),
+            "run_contract": self.run_contract,
+            "run_contract_sha256": self.run_contract_sha256,
+            "external_acceptance_sha256": self.external_acceptance_sha256,
             "batch_ids": batch_ids,
             "diagnostic_data_paths": diagnostic_paths,
             "hashes": hashes,
@@ -617,9 +729,22 @@ def _read_variant_records(
                 "variant_config_sha256",
                 "control_config_sha256",
                 "collector_code_sha256",
+                "shared_model_config_sha256",
             ):
                 if not _HEX64_RE.fullmatch(str(record.get(name, ""))):
                     raise MatchedControlError(f"missing {name} in {path}:{line_number}")
+            expected_transport = {
+                "soft_semantic": "soft",
+                "hard_st": "hard_st",
+                "hard_detached": "hard_detached",
+            }[expected_variant]
+            if record.get("transport_override") != {
+                "variant_id": expected_variant,
+                "contact_semantic_transport_mode": expected_transport,
+            }:
+                raise MatchedControlError(
+                    f"transport override differs in {path}:{line_number}"
+                )
             if not isinstance(record.get("config_hash_scope"), dict) or set(
                 record["config_hash_scope"]
             ) != {"control", "variant"}:
@@ -655,6 +780,32 @@ def _read_variant_records(
                 raise MatchedControlError(
                     f"incomplete production receipt binding in {path}:{line_number}"
                 )
+            preflight_receipt = record.get("production_preflight_receipt_sha256")
+            run_contract = record.get("run_contract")
+            run_contract_sha256 = record.get("run_contract_sha256")
+            external_acceptance = record.get("external_acceptance_sha256")
+            current_run_values = (
+                preflight_receipt,
+                run_contract,
+                run_contract_sha256,
+                external_acceptance,
+            )
+            if any(value is not None for value in current_run_values):
+                if (
+                    any(value is None for value in current_run_values)
+                    or not isinstance(preflight_receipt, str)
+                    or not _HEX64_RE.fullmatch(preflight_receipt)
+                    or not isinstance(run_contract, dict)
+                    or not run_contract
+                    or not isinstance(run_contract_sha256, str)
+                    or not _HEX64_RE.fullmatch(run_contract_sha256)
+                    or json_sha256(run_contract) != run_contract_sha256
+                    or not isinstance(external_acceptance, str)
+                    or not _HEX64_RE.fullmatch(external_acceptance)
+                ):
+                    raise MatchedControlError(
+                        f"invalid current-run contract in {path}:{line_number}"
+                    )
             for name in ("seed", "global_step", "micro_step", "rank", "world_size"):
                 value = record.get(name)
                 if isinstance(value, bool) or not isinstance(value, int):
@@ -691,13 +842,14 @@ def compare_variant_traces(
     output_report: str | os.PathLike[str],
     collector_code_path: str | os.PathLike[str] = __file__,
     required_seeds: Sequence[int] = ALLOWED_SEEDS,
+    allow_distinct_variant_run_identities: bool = False,
+    write_report: bool = True,
 ) -> dict[str, Any]:
-    """Compare rank-local traces and always write a gate-consumable report."""
+    """Compare rank-local traces and optionally write a gate-consumable report."""
 
     report_path = Path(output_report).expanduser().resolve()
     if report_path == Path("/tmp") or Path("/tmp") in report_path.parents:
         raise MatchedControlError("comparison reports must not be written under /tmp")
-    report_path.parent.mkdir(parents=True, exist_ok=True)
     collector_path = Path(collector_code_path).expanduser().resolve()
     collector_code = {
         "path": os.path.relpath(collector_path, report_path.parent),
@@ -718,18 +870,26 @@ def compare_variant_traces(
         "seeds": [],
         "run_id": None,
         "run_nonce": None,
+        "run_id_by_variant": {},
+        "run_nonce_by_variant": {},
         "dataset_id": None,
         "dataset_ids": [],
         "variants": sorted(variants),
         "global_hashes": {},
         "trace_files": {},
         "variant_config_sha256": {},
+        "shared_model_config_sha256": None,
+        "transport_override_by_variant": {},
         "control_config_sha256": None,
         "config_hash_scope": None,
         "git_commit": None,
         "training_data_receipt_sha256": None,
         "heldout_window_manifest_sha256": None,
         "production_split_seed": None,
+        "production_preflight_receipt_sha256": None,
+        "run_contract": None,
+        "run_contract_sha256": None,
+        "external_acceptance_sha256_by_variant": {},
         "world_size": None,
         "rank_set": None,
         "topology": None,
@@ -785,12 +945,31 @@ def compare_variant_traces(
                 by_key[key] = record
             indexed[variant] = by_key
 
-        run_ids = {run_id for run_id, _, _ in observed_pairs}
-        run_nonces = {run_nonce for _, run_nonce, _ in observed_pairs}
-        if len(run_ids) != 1:
-            raise MatchedControlError("run_id differs across variants")
-        if len(run_nonces) != 1:
-            raise MatchedControlError("run_nonce differs across variants")
+        run_id_by_variant = {
+            variant: run_id for run_id, _, variant in observed_pairs
+        }
+        run_nonce_by_variant = {
+            variant: run_nonce for _, run_nonce, variant in observed_pairs
+        }
+        run_ids = set(run_id_by_variant.values())
+        run_nonces = set(run_nonce_by_variant.values())
+        if allow_distinct_variant_run_identities:
+            if (
+                len(run_ids) != len(indexed)
+                or len(run_nonces) != len(indexed)
+                or any(
+                    not re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}", value
+                    )
+                    for value in run_ids | run_nonces
+                )
+            ):
+                raise MatchedControlError(
+                    "current-run matched variants require distinct 16-128 character "
+                    "run IDs and nonces"
+                )
+        elif len(run_ids) != 1 or len(run_nonces) != 1:
+            raise MatchedControlError("run identity differs across variants")
         baseline_name = sorted(indexed)[0]
         baseline = indexed[baseline_name]
         baseline_keys = set(baseline)
@@ -808,6 +987,9 @@ def compare_variant_traces(
                 f"matched-control report requires one dataset_id, got {sorted(dataset_ids)}"
             )
         control_hashes = {record["control_config_sha256"] for record in all_records}
+        shared_model_hashes = {
+            record["shared_model_config_sha256"] for record in all_records
+        }
         hash_scopes = {
             json.dumps(record["config_hash_scope"], sort_keys=True, separators=(",", ":"))
             for record in all_records
@@ -824,8 +1006,21 @@ def compare_variant_traces(
         heldout_window_hashes = {
             record.get("heldout_window_manifest_sha256") for record in all_records
         }
+        preflight_receipt_hashes = {
+            record.get("production_preflight_receipt_sha256") for record in all_records
+        }
+        run_contracts = {
+            canonical_json_dumps(record.get("run_contract")) for record in all_records
+        }
+        run_contract_hashes = {
+            record.get("run_contract_sha256") for record in all_records
+        }
         if len(control_hashes) != 1:
             raise MatchedControlError("control_config_sha256 differs across variants")
+        if len(shared_model_hashes) != 1:
+            raise MatchedControlError(
+                "matched variants differ outside the reviewed transport override"
+            )
         if len(hash_scopes) != 1:
             raise MatchedControlError("config_hash_scope differs across variants")
         if len(git_commits) != 1:
@@ -842,9 +1037,22 @@ def compare_variant_traces(
             raise MatchedControlError(
                 "training-data receipt, split seed, or held-out windows differ across variants"
             )
+        if (
+            len(preflight_receipt_hashes) != 1
+            or len(run_contracts) != 1
+            or len(run_contract_hashes) != 1
+        ):
+            raise MatchedControlError(
+                "preflight or stable current-run contract differs across variants"
+            )
         matched_training_receipt_sha256 = next(iter(training_receipt_hashes))
         matched_production_split_seed = next(iter(production_split_seeds))
         matched_heldout_window_sha256 = next(iter(heldout_window_hashes))
+        matched_preflight_receipt_sha256 = next(iter(preflight_receipt_hashes))
+        matched_run_contract = strict_json_loads(
+            next(iter(run_contracts)).encode("utf-8"), name="matched run contract"
+        )
+        matched_run_contract_sha256 = next(iter(run_contract_hashes))
         if (matched_training_receipt_sha256 is None) != (
             matched_production_split_seed is None
         ) or (matched_training_receipt_sha256 is None) != (
@@ -853,6 +1061,47 @@ def compare_variant_traces(
             raise MatchedControlError(
                 "incomplete production matched-control training-data binding"
             )
+        current_run_fields = (
+            matched_preflight_receipt_sha256,
+            matched_run_contract,
+            matched_run_contract_sha256,
+        )
+        if any(value is not None for value in current_run_fields) and (
+            any(value is None for value in current_run_fields)
+            or not isinstance(matched_run_contract, dict)
+            or json_sha256(matched_run_contract) != matched_run_contract_sha256
+        ):
+            raise MatchedControlError("incomplete current-run contract binding")
+        if allow_distinct_variant_run_identities:
+            training_config_receipt = matched_run_contract.get(
+                "training_config_receipt"
+            )
+            stable_training_config = (
+                dict(training_config_receipt)
+                if isinstance(training_config_receipt, dict)
+                else None
+            )
+            if stable_training_config is not None:
+                stable_training_config["seed"] = (
+                    "__CONTACT_ASYM25_SPLIT_SEED__"
+                )
+            if (
+                matched_run_contract.get("preflight_receipt_sha256")
+                != matched_preflight_receipt_sha256
+                or matched_run_contract.get("control_config_sha256")
+                != next(iter(control_hashes))
+                or not isinstance(training_config_receipt, dict)
+                or isinstance(training_config_receipt.get("seed"), bool)
+                or training_config_receipt.get("seed")
+                != matched_production_split_seed
+                or json_sha256(training_config_receipt)
+                != matched_run_contract.get("training_config_sha256")
+                or json_sha256(stable_training_config)
+                != matched_run_contract.get("stable_training_config_sha256")
+            ):
+                raise MatchedControlError(
+                    "current-run preflight/control/training-config contract differs"
+                )
         world_sizes = {int(record["world_size"]) for record in all_records}
         if len(world_sizes) != 1:
             raise MatchedControlError("world_size changes within the matched-control report")
@@ -863,11 +1112,44 @@ def compare_variant_traces(
                 "report rank set is incomplete for its world_size"
             )
         variant_hashes: dict[str, str] = {}
+        transport_overrides: dict[str, dict[str, str]] = {}
+        external_acceptance_hashes: dict[str, str | None] = {}
         for variant, records in indexed.items():
             values = {record["variant_config_sha256"] for record in records.values()}
             if len(values) != 1:
                 raise MatchedControlError(f"variant config hash changes within {variant}")
             variant_hashes[variant] = next(iter(values))
+            override_values = {
+                canonical_json_dumps(record["transport_override"])
+                for record in records.values()
+            }
+            if len(override_values) != 1:
+                raise MatchedControlError(
+                    f"transport override changes within {variant}"
+                )
+            transport_overrides[variant] = strict_json_loads(
+                next(iter(override_values)).encode("utf-8"),
+                name=f"transport override {variant}",
+            )
+            acceptance_values = {
+                record.get("external_acceptance_sha256")
+                for record in records.values()
+            }
+            if len(acceptance_values) != 1:
+                raise MatchedControlError(
+                    f"external acceptance changes within {variant}"
+                )
+            external_acceptance_hashes[variant] = next(iter(acceptance_values))
+        if allow_distinct_variant_run_identities and (
+            any(
+                not isinstance(value, str) or not _HEX64_RE.fullmatch(value)
+                for value in external_acceptance_hashes.values()
+            )
+            or len(set(external_acceptance_hashes.values())) != len(indexed)
+        ):
+            raise MatchedControlError(
+                "current-run matched variants require distinct external acceptances"
+            )
         observed_seeds = sorted({key[0] for key in baseline_keys})
         if observed_seeds != sorted(int(seed) for seed in required_seeds):
             raise MatchedControlError(
@@ -930,13 +1212,19 @@ def compare_variant_traces(
             all_hashes_equal=True,
             all_hashes_equal_across_variants=True,
             seeds=observed_seeds,
-            run_id=next(iter(run_ids)),
-            run_nonce=next(iter(run_nonces)),
+            run_id=(None if allow_distinct_variant_run_identities else next(iter(run_ids))),
+            run_nonce=(
+                None if allow_distinct_variant_run_identities else next(iter(run_nonces))
+            ),
+            run_id_by_variant=run_id_by_variant,
+            run_nonce_by_variant=run_nonce_by_variant,
             dataset_id=next(iter(dataset_ids)),
             dataset_ids=sorted(dataset_ids),
             global_hashes=global_hashes,
             trace_files=trace_files,
             variant_config_sha256=variant_hashes,
+            shared_model_config_sha256=next(iter(shared_model_hashes)),
+            transport_override_by_variant=transport_overrides,
             control_config_sha256=next(iter(control_hashes)),
             config_hash_scope=strict_json_loads(
                 next(iter(hash_scopes)).encode("utf-8"),
@@ -946,6 +1234,12 @@ def compare_variant_traces(
             training_data_receipt_sha256=matched_training_receipt_sha256,
             heldout_window_manifest_sha256=matched_heldout_window_sha256,
             production_split_seed=matched_production_split_seed,
+            production_preflight_receipt_sha256=(
+                matched_preflight_receipt_sha256
+            ),
+            run_contract=matched_run_contract,
+            run_contract_sha256=matched_run_contract_sha256,
+            external_acceptance_sha256_by_variant=external_acceptance_hashes,
             world_size=report_world_size,
             rank_set=report_rank_set,
             topology={
@@ -960,8 +1254,6 @@ def compare_variant_traces(
     except (KeyError, TypeError, ValueError, OSError) as exc:
         report["errors"] = [str(exc)]
 
-    report_path.write_text(
-        json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    if write_report:
+        _write_json_exclusive_durable(report_path, report)
     return report

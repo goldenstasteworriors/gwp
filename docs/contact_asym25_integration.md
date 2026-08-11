@@ -9,16 +9,19 @@ deliberately incomplete/all-false and cannot authorize training.
 ## Fixed model route
 
 The config rejects environment attempts to change Q=12, target D=22,
-`contact_segment_v1_1`, `hard_st`, B=16, strict semantic routing, strict
-sidecars, or required targets. The action route is:
+`contact_segment_v1_1`, B=16, strict semantic routing, strict sidecars, or
+required targets. It requires an explicit `GWP_MATCHED_CONTROL_VARIANT_ID`
+and derives the only allowed transport override from it:
+`soft_semantic -> soft`, `hard_st -> hard_st`, or
+`hard_detached -> hard_detached`. The action route is:
 
 ```text
-state + reference + text -> contact planner -> canonical hard 22D
+state + reference + text -> contact planner -> selected canonical 22D transport
     -> 22-to-1024 encoder -> action
 ```
 
 Action tokens cannot directly attend reference tokens or raw planner hidden.
-Action-only inference caches the transported hard semantic prefix. Inference
+Action-only inference caches the transported semantic prefix. Inference
 still returns canonical25D only: this repository has no OmniPicker driver,
 reverse calibration mapper, or physical executor, so deployment is No-Go.
 
@@ -76,6 +79,60 @@ config, and training-gate manifest. It then verifies:
   seeds 6666/7777/8888;
 - artifact-bound annotation-agreement, hardware-verification, and matched-hash
   collector reports, plus all separated server/5B gate fields.
+
+The robot gate is `contact-asym25-training-gate/v2`; v1 is rejected. Its JSON,
+all evidence reports, and the six A/B/adjudicated CSV inputs are opened once
+with no-follow regular-file verification. Duplicate JSON keys, `NaN`,
+infinities, overflow such as `1e999`, boolean numeric fields, expired evidence,
+and a runtime nonce not found at the selected variant in the gate's reviewed
+identity mapping fail closed. The stored agreement summary is
+not trusted: preflight re-runs the existing formal v1.1 A/B reducer from the
+verified CSV bytes and checks the adjudicated parent/third-reviewer contract.
+
+The gate additionally binds a `matched-control-hash-collector/v2` report,
+trace-file manifest, global/hash-schema receipts, current HEAD collector bytes,
+launcher topology, and an external reviewer acceptance. Each transport variant
+uses a distinct run ID, run nonce, and external acceptance. The comparator
+requires a single shared model hash after replacing exactly the transport-mode
+field; any other model/config difference fails. For one production split seed,
+the offline comparison command is:
+
+```bash
+conda run -n gigaworld-policy python -B scripts/compare_matched_control_hashes.py \
+  --variant soft_semantic=/ABS/PATH/soft_traces \
+  --variant hard_st=/ABS/PATH/hard_st_traces \
+  --variant hard_detached=/ABS/PATH/hard_detached_traces \
+  --required-seed 6666 \
+  --distinct-variant-run-identities \
+  --output-report /ABS/PROJECT/EVIDENCE/matched_control_seed6666.json
+```
+
+换行位置：每个行尾反斜杠后换行；把 seed 和所有 `/ABS/...` 路径替换为本次运行的真实值，输出必须位于项目盘而不是 `/tmp`。
+报告路径采用独占创建；若已存在会直接拒绝，不能覆盖审计证据。
+
+Production config import no longer accepts a detached old report SHA as a
+substitute for current capture. It requires `GWP_MATCHED_CONTROL_OUTPUT_DIR`
+and binds the current trace rows to the current preflight, training-code and
+dataset-tree receipts, initial/base weights, bf16/action/contact schema,
+optimizer/scheduler/training hashes, runtime package/topology receipt, and
+train-window contract. The structured training-config receipt retains the
+actual seed and its full hash; a second stable hash replaces only the seed with
+the literal `__CONTACT_ASYM25_SPLIT_SEED__`, so the nine-run aggregate can
+prove that different seeds introduce no hidden training-config changes. The
+required current-run identities are:
+
+```bash
+export GWP_CONTACT_TRAINING_RUN_ID="RUN_ID_AT_LEAST_16_CHARS"
+export GWP_CONTACT_TRAINING_RUN_NONCE="RUN_NONCE_AT_LEAST_16_CHARS"
+export GWP_MATCHED_CONTROL_RUN_ID="$GWP_CONTACT_TRAINING_RUN_ID"
+export GWP_MATCHED_CONTROL_RUN_NONCE="$GWP_CONTACT_TRAINING_RUN_NONCE"
+export GWP_MATCHED_CONTROL_VARIANT_ID="hard_st"
+export GWP_MATCHED_CONTROL_SEED="6666"
+export GWP_MATCHED_CONTROL_DATASET_ID="REVIEWED_DATASET_ID"
+export GWP_MATCHED_CONTROL_OUTPUT_DIR="/ABS/PROJECT/OUTPUT/current_run_traces"
+```
+
+换行位置：以上每条 `export` 独占一行；`RUN_*`、transport variant、seed、dataset ID 和绝对输出路径必须替换为 gate/launcher 的真实绑定值。三个 transport 分别导入同一个共享 preflight receipt；variant、run ID/nonce 和外部 acceptance 则分别取 gate expectations 的对应映射值。
 
 The robot sidecar build config starts from
 `configs/contact_asym25_robot_sidecar.template.json`. `dataset_id` and

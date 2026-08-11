@@ -291,10 +291,16 @@ class CasualWATrainerMoT(Trainer):
         self.production_training_run_nonce = model_config.get(
             "production_training_run_nonce"
         )
+        self.production_training_run_id = model_config.get(
+            "production_training_run_id"
+        )
         self.production_experiment_family_id = model_config.get(
             "production_experiment_family_id"
         )
         self.production_variant_id = model_config.get("production_variant_id")
+        self.production_transport_variant_id = model_config.get(
+            "production_transport_variant_id"
+        )
         self.production_matched_control_receipt_sha256 = model_config.get(
             "production_matched_control_receipt_sha256"
         )
@@ -303,6 +309,34 @@ class CasualWATrainerMoT(Trainer):
         )
         self.production_action_schema_contract = model_config.get(
             "production_action_schema_contract"
+        )
+        self.production_run_contract = model_config.get("production_run_contract")
+        self.production_run_contract_sha256 = model_config.get(
+            "production_run_contract_sha256"
+        )
+        self.production_runtime_environment_receipt = model_config.get(
+            "production_runtime_environment_receipt"
+        )
+        self.production_optimizer_config_sha256 = model_config.get(
+            "production_optimizer_config_sha256"
+        )
+        self.production_scheduler_config_sha256 = model_config.get(
+            "production_scheduler_config_sha256"
+        )
+        self.production_training_config_sha256 = model_config.get(
+            "production_training_config_sha256"
+        )
+        self.production_train_window_receipt_sha256 = model_config.get(
+            "production_train_window_receipt_sha256"
+        )
+        self.production_base_model_bundle_sha256 = model_config.get(
+            "production_base_model_bundle_sha256"
+        )
+        matched_control_config = model_config.get("matched_control_collector")
+        self.production_matched_control_external_acceptance_sha256 = (
+            matched_control_config.get("external_acceptance_sha256")
+            if isinstance(matched_control_config, dict)
+            else None
         )
         self._production_checkpoint_bundle_sha256 = {}
         self._production_initial_weights_snapshot = None
@@ -334,6 +368,7 @@ class CasualWATrainerMoT(Trainer):
                 )
             for name, value in (
                 ("production_training_run_nonce", self.production_training_run_nonce),
+                ("production_training_run_id", self.production_training_run_id),
                 (
                     "production_experiment_family_id",
                     self.production_experiment_family_id,
@@ -342,6 +377,14 @@ class CasualWATrainerMoT(Trainer):
             ):
                 if not isinstance(value, str) or len(value) < 16:
                     raise ValueError(f"{name} must contain at least 16 characters")
+            if self.production_transport_variant_id not in {
+                "soft_semantic",
+                "hard_st",
+                "hard_detached",
+            }:
+                raise ValueError(
+                    "production_transport_variant_id is not an implemented transport"
+                )
             if self.production_training_precision != "bfloat16":
                 raise ValueError("production training precision must be bfloat16")
             if (
@@ -359,6 +402,88 @@ class CasualWATrainerMoT(Trainer):
                 )
             if not isinstance(self.production_action_schema_contract, dict):
                 raise ValueError("production action schema contract is required")
+            from world_action_model.contact_asym25_checkpoint_acceptance import (
+                PRODUCTION_RUN_CONTRACT_KEYS,
+                sha256_json,
+            )
+
+            if (
+                not isinstance(self.production_run_contract, dict)
+                or set(self.production_run_contract) != PRODUCTION_RUN_CONTRACT_KEYS
+                or sha256_json(self.production_run_contract)
+                != self.production_run_contract_sha256
+                or not isinstance(self.production_runtime_environment_receipt, dict)
+                or not self.production_runtime_environment_receipt
+                or sha256_json(self.production_runtime_environment_receipt)
+                != self.production_run_contract["runtime_environment_receipt_sha256"]
+            ):
+                raise ValueError("production run/environment contract differs")
+            training_config_receipt = self.production_run_contract.get(
+                "training_config_receipt"
+            )
+            if (
+                not isinstance(training_config_receipt, dict)
+                or not training_config_receipt
+                or isinstance(training_config_receipt.get("seed"), bool)
+                or training_config_receipt.get("seed")
+                != self.current_training_data_receipt.get("split_seed")
+                or sha256_json(training_config_receipt)
+                != self.production_training_config_sha256
+            ):
+                raise ValueError("production training config receipt differs")
+            stable_training_config = dict(training_config_receipt)
+            stable_training_config["seed"] = "__CONTACT_ASYM25_SPLIT_SEED__"
+            if sha256_json(stable_training_config) != self.production_run_contract[
+                "stable_training_config_sha256"
+            ]:
+                raise ValueError("stable production training config differs")
+            contract_mirrors = {
+                "optimizer_config_sha256": self.production_optimizer_config_sha256,
+                "scheduler_config_sha256": self.production_scheduler_config_sha256,
+                "training_config_sha256": self.production_training_config_sha256,
+                "train_window_receipt_sha256": self.production_train_window_receipt_sha256,
+                "base_model_bundle_sha256": self.production_base_model_bundle_sha256,
+            }
+            if any(
+                self.production_run_contract[name] != value
+                for name, value in contract_mirrors.items()
+            ):
+                raise ValueError("production checkpoint control contract differs")
+            if (
+                self.production_run_contract["training_code_receipt_sha256"]
+                != self.current_training_data_receipt.get(
+                    "training_code_receipt_sha256"
+                )
+                or self.production_run_contract["dataset_source_tree_sha256"]
+                != self.current_training_data_receipt.get(
+                    "dataset_source_tree_receipt", {}
+                ).get("tree_sha256")
+                or self.production_run_contract["preflight_receipt_sha256"]
+                != self.current_training_data_receipt.get(
+                    "production_preflight_receipt_sha256"
+                )
+                or self.production_run_contract["precision"]
+                != self.production_training_precision
+                or self.production_run_contract["action_schema_contract_sha256"]
+                != sha256_json(self.production_action_schema_contract)
+            ):
+                raise ValueError(
+                    "production run contract differs from live training inputs"
+                )
+            for name, value in (
+                ("production_run_contract_sha256", self.production_run_contract_sha256),
+                (
+                    "production_matched_control_external_acceptance_sha256",
+                    self.production_matched_control_external_acceptance_sha256,
+                ),
+                *contract_mirrors.items(),
+            ):
+                if (
+                    not isinstance(value, str)
+                    or len(value) != 64
+                    or any(character not in "0123456789abcdef" for character in value)
+                ):
+                    raise ValueError(f"{name} must be lowercase SHA-256")
             source_receipt = self.current_training_data_receipt.get(
                 "dataset_source_tree_receipt"
             )
@@ -437,6 +562,13 @@ class CasualWATrainerMoT(Trainer):
             self._production_initial_weights_snapshot = snapshot_artifact_tree(
                 transformer_pretrained
             )
+            if (
+                self._production_initial_weights_snapshot["tree_sha256"]
+                != self.production_base_model_bundle_sha256
+            ):
+                raise ValueError(
+                    "runtime initial weights differ from the reviewed base bundle"
+                )
         transformer_cfg = dict(model_config.get("transformer"))
         if self.current_training_data_receipt is not None:
             transformer_cfg.update(
@@ -515,17 +647,46 @@ class CasualWATrainerMoT(Trainer):
                 ) from exc
         current = self.current_training_data_receipt
         payload = {
-            "receipt_version": "contact-asym25-checkpoint-training-receipt/v2",
+            "receipt_version": "contact-asym25-checkpoint-training-receipt/v3",
             "checkpoint_step": int(step),
             "checkpoint_bundle_manifest_sha256": bundle_manifest_file_sha256,
             "checkpoint_bundle_sha256": bundle_manifest["bundle_sha256"],
             "parent_checkpoint_bundle_sha256": parent_sha256,
             "initial_weights_bundle_sha256": initial_sha256,
+            "base_model_bundle_sha256": self.production_base_model_bundle_sha256,
             "training_run_nonce": self.production_training_run_nonce,
+            "training_run_id": self.production_training_run_id,
             "experiment_family_id": self.production_experiment_family_id,
             "variant_id": self.production_variant_id,
+            "transport_variant_id": self.production_transport_variant_id,
             "matched_control_receipt_sha256": (
                 self.production_matched_control_receipt_sha256
+            ),
+            "matched_control_external_acceptance_sha256": (
+                self.production_matched_control_external_acceptance_sha256
+            ),
+            "production_run_contract": self.production_run_contract,
+            "production_run_contract_sha256": self.production_run_contract_sha256,
+            "runtime_environment_receipt": (
+                self.production_runtime_environment_receipt
+            ),
+            "runtime_environment_receipt_sha256": self.production_run_contract[
+                "runtime_environment_receipt_sha256"
+            ],
+            "optimizer_config_sha256": self.production_optimizer_config_sha256,
+            "scheduler_config_sha256": self.production_scheduler_config_sha256,
+            "training_config_sha256": self.production_training_config_sha256,
+            "training_config_receipt": self.production_run_contract[
+                "training_config_receipt"
+            ],
+            "stable_training_config_sha256": self.production_run_contract[
+                "stable_training_config_sha256"
+            ],
+            "control_config_sha256": self.production_run_contract[
+                "control_config_sha256"
+            ],
+            "train_window_receipt_sha256": (
+                self.production_train_window_receipt_sha256
             ),
             "split_seed": current["split_seed"],
             "training_precision": self.production_training_precision,

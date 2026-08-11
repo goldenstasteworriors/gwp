@@ -16,6 +16,7 @@ from world_action_model.contact_asym25_checkpoint_acceptance import (  # noqa: E
     ACCEPTANCE_VERSION,
     CheckpointAcceptanceError,
     strict_json_file,
+    validate_current_run_matched_report,
     validate_bundle_manifest,
     validate_training_receipt,
     write_json_exclusive,
@@ -33,6 +34,14 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--reviewer-identity", required=True)
     parser.add_argument("--reviewer-attestation-nonce", required=True)
+    parser.add_argument("--acceptance-run-id", required=True)
+    parser.add_argument("--acceptance-run-nonce", required=True)
+    parser.add_argument(
+        "--current-run-matched-report",
+        type=Path,
+        required=True,
+        help="Passed report produced from all current-run matched variant traces.",
+    )
     args = parser.parse_args()
 
     checkpoint = args.checkpoint_dir.expanduser().absolute()
@@ -56,15 +65,33 @@ def main() -> None:
         or receipt["checkpoint_bundle_sha256"] != bundle["bundle_sha256"]
     ):
         raise CheckpointAcceptanceError("training receipt bundle binding differs")
+    matched_report_path = args.current_run_matched_report.expanduser().absolute()
+    if checkpoint == matched_report_path.parent or checkpoint in matched_report_path.parents:
+        raise CheckpointAcceptanceError(
+            "current-run matched report must be external to checkpoint"
+        )
+    _, matched_report_sha256 = strict_json_file(
+        matched_report_path, "current-run matched-control report"
+    )
+    validate_current_run_matched_report(
+        matched_report_path,
+        expected_sha256=matched_report_sha256,
+        training_receipt=receipt,
+    )
     acceptance = {
         "acceptance_version": ACCEPTANCE_VERSION,
         "status": "accepted",
         "reviewer_identity": args.reviewer_identity,
         "reviewer_attestation_nonce": args.reviewer_attestation_nonce,
+        "acceptance_run_id": args.acceptance_run_id,
+        "acceptance_run_nonce": args.acceptance_run_nonce,
         "checkpoint_path_record_only": str(checkpoint),
         "checkpoint_step": receipt["checkpoint_step"],
         "split_seed": receipt["split_seed"],
         "training_run_nonce": receipt["training_run_nonce"],
+        "training_run_id": receipt["training_run_id"],
+        "current_run_matched_report_path_record_only": str(matched_report_path),
+        "current_run_matched_report_sha256": matched_report_sha256,
         "checkpoint_bundle_manifest_sha256": bundle_file_sha,
         "checkpoint_bundle_sha256": bundle["bundle_sha256"],
         "checkpoint_training_receipt_sha256": receipt_sha,

@@ -1,0 +1,21 @@
+{
+  "acceptance_version": "contact-asym25-gate-reviewer-acceptance/v1",
+  "status": "not_reviewed",
+  "accepted": false,
+  "reviewer_identity": null,
+  "acceptance_run_id": null,
+  "acceptance_run_nonce": null,
+  "evidence_valid_until_utc": null,
+  "reviewed_gate_contract_sha256": null,
+  "matched_control_expectations_sha256": null,
+  "matched_control_report_sha256": null,
+  "matched_control_run_contract_sha256": null,
+  "reviewed_run_contract": null,
+  "dataset_id": null,
+  "dataset_info_sha256": null,
+  "hardware_contract_sha256": null,
+  "norm_stats_sha256": null,
+  "action_schema_id": null,
+  "contact_schema_version": null,
+  "accepted_precision": null
+}

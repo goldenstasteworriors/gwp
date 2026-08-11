@@ -40,6 +40,7 @@ from world_action_model.contact_asym25_heldout_eval import (  # noqa: E402
     snapshot_artifact_tree,
     validate_three_seed_run_contracts,
     validate_matched_variant_run_contracts,
+    validate_nine_run_matrix,
     verify_artifact_tree_unchanged,
     write_per_window_csv,
     write_strict_json,
@@ -91,6 +92,20 @@ def _base_parser() -> argparse.ArgumentParser:
     matched.add_argument("--result", type=Path, action="append", required=True)
     matched.add_argument("--output", type=Path, required=True)
     matched.add_argument("--overwrite", action="store_true")
+
+    matrix = subparsers.add_parser(
+        "check-production-matrix",
+        help="Verify exactly 3 seeds x 3 transports and globally unique run/review identities.",
+    )
+    matrix.add_argument(
+        "--result",
+        type=Path,
+        action="append",
+        required=True,
+        help="Repeat exactly nine times, once per seed/transport result.",
+    )
+    matrix.add_argument("--output", type=Path, required=True)
+    matrix.add_argument("--overwrite", action="store_true")
 
     fingerprint = subparsers.add_parser(
         "fingerprint-tree",
@@ -429,11 +444,27 @@ def aggregate(args: argparse.Namespace) -> None:
         seed = bundle["preflight_receipt"]["split_seed"]
         rows = []
         for entry in bundle["checkpoint_manifest"]["checkpoints"]:
-            receipt, _ = strict_json_file(
+            receipt, receipt_sha256 = strict_json_file(
                 entry["checkpoint_training_receipt_path"],
                 "aggregate checkpoint training receipt",
             )
-            rows.append((receipt, entry["independent_acceptance_sha256"]))
+            if receipt_sha256 != entry["checkpoint_training_receipt_sha256"]:
+                raise HeldoutEvaluationError(
+                    "aggregate training receipt changed after result validation"
+                )
+            acceptance, acceptance_sha256 = strict_json_file(
+                entry["independent_acceptance_path"],
+                "aggregate independent checkpoint acceptance",
+            )
+            if (
+                acceptance_sha256 != entry["independent_acceptance_sha256"]
+                or acceptance.get("checkpoint_training_receipt_sha256")
+                != receipt_sha256
+            ):
+                raise HeldoutEvaluationError(
+                    "aggregate checkpoint acceptance changed after result validation"
+                )
+            rows.append((receipt, acceptance, acceptance_sha256))
         run_evidence[seed] = rows
     run_identity = validate_three_seed_run_contracts(run_evidence)
     evaluation_window_contracts = {
@@ -551,8 +582,12 @@ def check_matched_variants(args: argparse.Namespace) -> None:
         run_identities = {
             (
                 receipt["training_run_nonce"],
+                receipt["training_run_id"],
                 receipt["variant_id"],
+                receipt["transport_variant_id"],
                 receipt["matched_control_receipt_sha256"],
+                receipt["matched_control_external_acceptance_sha256"],
+                receipt["production_run_contract_sha256"],
             )
             for receipt in receipts
         }
@@ -563,7 +598,7 @@ def check_matched_variants(args: argparse.Namespace) -> None:
         representatives.append(receipts[0])
     contract = validate_matched_variant_run_contracts(representatives)
     output = {
-        "matched_variant_check_version": "contact-asym25-matched-variant-check/v1",
+        "matched_variant_check_version": "contact-asym25-matched-variant-check/v3",
         "status": "passed",
         **contract,
         "source_reports": [
@@ -571,10 +606,83 @@ def check_matched_variants(args: argparse.Namespace) -> None:
                 "path_record_only": str(bundle["path"]),
                 "sha256": bundle["result_sha256"],
                 "variant_id": receipt["variant_id"],
+                "transport_variant_id": receipt["transport_variant_id"],
                 "training_run_nonce": receipt["training_run_nonce"],
+                "training_run_id": receipt["training_run_id"],
             }
             for bundle, receipt in zip(bundles, representatives, strict=True)
         ],
+    }
+    digest = write_strict_json(output_path, output, overwrite=args.overwrite)
+    print(json.dumps({"output": str(output_path), "sha256": digest}, sort_keys=True))
+
+
+def check_production_matrix(args: argparse.Namespace) -> None:
+    from world_action_model.contact_asym25_checkpoint_acceptance import (
+        strict_json_file,
+    )
+    from world_action_model.contact_asym25_heldout_eval import (
+        load_evaluation_result_bundle,
+    )
+
+    output_path = args.output.expanduser().resolve(strict=False)
+    if output_path == Path("/tmp") or Path("/tmp") in output_path.parents:
+        raise HeldoutEvaluationError("production-matrix reports must not use /tmp")
+    if len(args.result) != 9:
+        raise HeldoutEvaluationError(
+            "production-matrix check requires exactly nine result files"
+        )
+    evidence = {}
+    source_reports = []
+    for result_path in args.result:
+        bundle = load_evaluation_result_bundle(result_path)
+        rows = []
+        for entry in bundle["checkpoint_manifest"]["checkpoints"]:
+            receipt, receipt_sha256 = strict_json_file(
+                entry["checkpoint_training_receipt_path"],
+                "matrix checkpoint training receipt",
+            )
+            acceptance, acceptance_sha256 = strict_json_file(
+                entry["independent_acceptance_path"],
+                "matrix independent checkpoint acceptance",
+            )
+            if (
+                receipt_sha256 != entry["checkpoint_training_receipt_sha256"]
+                or acceptance_sha256 != entry["independent_acceptance_sha256"]
+                or acceptance.get("checkpoint_training_receipt_sha256")
+                != receipt_sha256
+            ):
+                raise HeldoutEvaluationError(
+                    "matrix checkpoint evidence changed after result validation"
+                )
+            rows.append((receipt, acceptance, acceptance_sha256))
+        representative = rows[0][0]
+        key = (
+            representative["split_seed"],
+            representative["transport_variant_id"],
+        )
+        if key in evidence:
+            raise HeldoutEvaluationError(
+                "production matrix contains a duplicate seed/transport result"
+            )
+        evidence[key] = rows
+        source_reports.append(
+            {
+                "split_seed": key[0],
+                "transport_variant_id": key[1],
+                "path_record_only": str(bundle["path"]),
+                "sha256": bundle["result_sha256"],
+            }
+        )
+    contract = validate_nine_run_matrix(evidence)
+    output = {
+        "production_matrix_version": "contact-asym25-production-matrix/v1",
+        "status": "passed",
+        **contract,
+        "source_reports": sorted(
+            source_reports,
+            key=lambda row: (row["split_seed"], row["transport_variant_id"]),
+        ),
     }
     digest = write_strict_json(output_path, output, overwrite=args.overwrite)
     print(json.dumps({"output": str(output_path), "sha256": digest}, sort_keys=True))
@@ -590,6 +698,8 @@ def main() -> None:
         aggregate(args)
     elif args.command == "check-matched-variants":
         check_matched_variants(args)
+    elif args.command == "check-production-matrix":
+        check_production_matrix(args)
     elif args.command == "fingerprint-tree":
         fingerprint_tree(args)
     else:

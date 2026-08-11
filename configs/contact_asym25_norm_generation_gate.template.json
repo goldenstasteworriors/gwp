@@ -1,0 +1,19 @@
+{
+  "gate_version": "contact-asym25-train-norm-generation-gate/v1",
+  "allow_norm_generation": false,
+  "group_metadata_complete": false,
+  "split_seed": null,
+  "production_split_receipt": null,
+  "production_split_receipt_sha256": null,
+  "group_split_input_sha256": {
+    "inventory_csv_sha256": null,
+    "build_config_sha256": null,
+    "split_manifest_sha256": null
+  },
+  "source_dataset_tree_receipt": null,
+  "source_dataset_tree_receipt_sha256": null,
+  "generator_code_sha256": null,
+  "norm_contract_code_sha256": null,
+  "reviewed_by": null,
+  "reviewed_at_utc": null
+}

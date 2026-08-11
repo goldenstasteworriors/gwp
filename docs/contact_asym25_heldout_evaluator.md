@@ -42,6 +42,7 @@ The run identity is explicit and cannot be inferred from an output directory.
 export GWP_CONTACT_ASYM25_PREFLIGHT_RECEIPT="$PWD/evidence/contact_asym25/preflight_seed6666.json"
 export GWP_CONTACT_HELDOUT_WINDOW_MANIFEST="$PWD/evidence/contact_asym25/windows_seed6666.json"
 export GWP_CONTACT_TRAINING_RUN_NONCE="REVIEWED_UNIQUE_RUN_NONCE"
+export GWP_CONTACT_TRAINING_RUN_ID="REVIEWED_UNIQUE_RUN_ID"
 export GWP_CONTACT_EXPERIMENT_FAMILY_ID="CONTACT_ASYM25_FAMILY_2026"
 export GWP_CONTACT_VARIANT_ID="contact_asym25_hard_st"
 export GWP_CONTACT_MATCHED_CONTROL_RECEIPT_SHA256="64_HEX_REVIEWED_CONTROL_RECEIPT"
@@ -64,8 +65,22 @@ conda run -n gigaworld-policy python -B scripts/review_contact_asym25_checkpoint
   --checkpoint-dir /ABS/CHECKPOINT_ROOT/transformer \
   --output evidence/contact_asym25/reviewer/seed6666_step0.json \
   --reviewer-identity "INDEPENDENT_REVIEWER_ID" \
-  --reviewer-attestation-nonce "UNIQUE_REVIEW_NONCE_STEP0"
+  --reviewer-attestation-nonce "UNIQUE_REVIEW_NONCE_STEP0" \
+  --acceptance-run-id "UNIQUE_ACCEPTANCE_RUN_ID_STEP0" \
+  --acceptance-run-nonce "UNIQUE_ACCEPTANCE_RUN_NONCE_STEP0" \
+  --current-run-matched-report /ABS/RUN_EVIDENCE/matched_control_report.json
 ```
+
+Reviewer acceptance v2 re-reads the checkpoint bytes and producer receipt and
+binds the checkpoint bundle, split seed, training-run ID and nonce. Its
+reviewer-attestation nonce, acceptance-run ID and acceptance-run nonce are
+independently authored and unique for each of the nine seed/step acceptances.
+It also re-opens the current run's three transport-variant trace files,
+independently replays the matched-control reducer without overwriting the
+producer report, and requires the replayed report bytes to bind the selected
+training run/nonce, stable run contract, current training-data/preflight/window
+receipts, topology and external acceptance. A historical gate report cannot
+stand in for this current-run report. Acceptance v1 is rejected.
 
 Use the same receipt algorithm to fingerprint a base model or transformer
 checkpoint tree:
@@ -125,9 +140,11 @@ conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.
 Repeat independently for seeds 7777 and 8888. The offline aggregator loads no
 model; it replays all three receipts and window manifests, verifies each hashed
 per-window CSV, recomputes each per-seed metric block, and then reduces the
-three sets of additive rows. It additionally requires three distinct training
-run nonces, nine distinct reviewer acceptances, one experiment family/variant,
-and the same window/evaluator contract.
+three sets of additive rows. It additionally re-opens all nine acceptance
+files and requires distinct reviewer-attestation nonces and acceptance-run
+IDs/nonces, three distinct training-run IDs/nonces, one experiment
+family/variant and the same initial weights, training code, dataset source,
+action schema, precision and window/evaluator contract.
 
 ```bash
 conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.py \
@@ -138,14 +155,38 @@ conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.
   --output evidence/contact_asym25/aggregate_three_seeds.json
 ```
 
-For same-seed matched variants, run the separate offline comparison. It
+For the same seed's three matched transport variants, run the separate offline comparison. It
 requires the same preflight, fixed-window, matched-control and experiment-family
-receipts, but distinct variant IDs and training-run nonces.
+receipts, initial weights, training code, dataset source, action schema and
+precision, but distinct variant IDs and training-run IDs/nonces.
 
 ```bash
 conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.py \
   check-matched-variants \
+  --result evidence/contact_asym25/soft_semantic/contact_asym25_heldout_metrics.json \
   --result evidence/contact_asym25/hard_st/contact_asym25_heldout_metrics.json \
-  --result evidence/contact_asym25/soft/contact_asym25_heldout_metrics.json \
+  --result evidence/contact_asym25/hard_detached/contact_asym25_heldout_metrics.json \
   --output evidence/contact_asym25/matched_variant_check.json
+```
+
+After all seeds and transports pass their per-result checks, the final matrix
+checker must consume exactly nine results. It re-opens all 27 external
+checkpoint acceptances and rejects any reused training-run ID/nonce,
+reviewer-attestation nonce, acceptance-run ID/nonce or acceptance SHA. It also
+re-applies the per-transport three-seed and per-seed three-transport contracts,
+including byte-identical initial weights within every matched seed.
+
+```bash
+conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.py \
+  check-production-matrix \
+  --result evidence/contact_asym25/seed6666/soft_semantic/contact_asym25_heldout_metrics.json \
+  --result evidence/contact_asym25/seed6666/hard_st/contact_asym25_heldout_metrics.json \
+  --result evidence/contact_asym25/seed6666/hard_detached/contact_asym25_heldout_metrics.json \
+  --result evidence/contact_asym25/seed7777/soft_semantic/contact_asym25_heldout_metrics.json \
+  --result evidence/contact_asym25/seed7777/hard_st/contact_asym25_heldout_metrics.json \
+  --result evidence/contact_asym25/seed7777/hard_detached/contact_asym25_heldout_metrics.json \
+  --result evidence/contact_asym25/seed8888/soft_semantic/contact_asym25_heldout_metrics.json \
+  --result evidence/contact_asym25/seed8888/hard_st/contact_asym25_heldout_metrics.json \
+  --result evidence/contact_asym25/seed8888/hard_detached/contact_asym25_heldout_metrics.json \
+  --output evidence/contact_asym25/production_matrix.json
 ```

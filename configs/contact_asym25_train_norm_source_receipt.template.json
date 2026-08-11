@@ -14,8 +14,10 @@
     "scope": "meta-info+episode-metadata+data-parquet/v1",
     "tree_sha256": null,
     "file_count": 0,
-    "total_size_bytes": 0
+    "total_size_bytes": 0,
+    "files": []
   },
+  "physical_dim": 25,
   "model_dim": 32,
   "action_horizon": 48,
   "delta_mask": [
@@ -26,6 +28,8 @@
   ],
   "action_representation": "delta_for_true_delta_mask_dims_else_absolute_action",
   "boundary": "clamp_within_episode_repeat_last_frame (matches FastLeRobotDataset)",
+  "padding_contract": "physical_dims_0_24;model_padding_dims_25_31_exact_zero",
+  "grip_validity_contract": "robot25_grip_dims_18_24_all_valid_on_every_selected_train_row",
   "num_episodes": 0,
   "num_state_samples": 0,
   "num_action_samples": 0

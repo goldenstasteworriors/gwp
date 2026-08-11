@@ -63,6 +63,20 @@ comparator emits
 preflight can bind the report to that external receipt instead of allowing the
 report to certify itself.
 
+Contact-asym25 gate v2 uses the stricter current-run mode. Its three transport
+variants must have globally distinct run IDs, run nonces, and external
+acceptance SHAs. Besides the ordinary control hash, every trace carries a
+reviewed stable run contract covering current preflight/training code/data
+tree, initial/base weights, bf16 and action/contact schema, runtime package and
+launcher topology, optimizer/scheduler/training configuration, and the
+train-window receipt. The contract embeds the exact training config and both
+its actual-seed hash and a stable hash formed by replacing only `seed` with
+`__CONTACT_ASYM25_SPLIT_SEED__`. The comparator also normalizes exactly one model field,
+`contact_semantic_transport_mode`, and requires the remaining model-config
+hash to be identical. Thus an apparent match produced by changing any second
+model or training field is rejected even if the six sampled hashes happen to
+agree.
+
 The production expectation receipt also fixes the report byte SHA-256, exact
 variant-to-trace path/SHA mapping, trace-manifest SHA, global-hashes SHA, and
 hash-schema SHA. The preflight verifies report bytes before consuming fields,
@@ -92,7 +106,10 @@ preflight binding.
 All collector trace/report JSON is strict JSON and writers use
 `allow_nan=False`. Non-standard NaN/Infinity values (including exponent
 overflow such as `1e999`) and booleans masquerading as integer topology/seed
-fields are rejected. Production performs a minimal canonical-decimal
+fields are rejected. Offline reports are created with `O_EXCL`, followed by
+file and parent-directory `fsync`; an existing evidence path is never
+overwritten. The reviewer replay mode performs no directory creation or file
+write. Production performs a minimal canonical-decimal
 rank/world check before full artifact IO; the disabled path performs no
 collector-artifact IO and does not mutate config or RNG state.
 

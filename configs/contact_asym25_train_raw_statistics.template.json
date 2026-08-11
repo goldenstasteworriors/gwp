@@ -1,0 +1,32 @@
+{
+  "receipt_version": "contact-asym25-train-only-raw-sufficient-statistics/v1",
+  "numeric_contract": "robot25-pad32-float64-h48-clamp-exact-linear-quantile/v1",
+  "train_norm_source_receipt_sha256": null,
+  "split_seed": null,
+  "train_episode_ids": [],
+  "train_episode_ids_sha256": null,
+  "source_dataset_tree_sha256": null,
+  "source_data_files_sha256": null,
+  "selected_train_raw_sha256": null,
+  "selected_episode_rows": [],
+  "features": {
+    "observation.state": {
+      "count": 0,
+      "dimension": 32,
+      "sum": [],
+      "sum_squares": [],
+      "centered_sum_squares": [],
+      "min": [],
+      "max": []
+    },
+    "action": {
+      "count": 0,
+      "dimension": 32,
+      "sum": [],
+      "sum_squares": [],
+      "centered_sum_squares": [],
+      "min": [],
+      "max": []
+    }
+  }
+}

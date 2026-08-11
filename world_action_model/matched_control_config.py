@@ -16,6 +16,7 @@ from world_action_model.matched_control_hashes import (
     HASH_SCHEMA,
     IMPLEMENTED_RUNNER_VARIANTS,
     canonical_sha256,
+    json_sha256,
 )
 
 
@@ -35,6 +36,24 @@ _RUNTIME_RECEIPT_CONFIG_KEYS = {
     "runtime_stat_record_only",
     "verified_private_cache_parent",
     "verified_training_run_nonce",
+    "current_training_data_receipt",
+    "current_training_data_receipt_sha256",
+    "current_training_source_snapshot",
+    "production_training_run_id",
+    "production_training_run_nonce",
+    "production_variant_id",
+    "production_transport_variant_id",
+    "production_matched_control_external_acceptance_sha256",
+    "production_run_contract",
+    "production_run_contract_sha256",
+    "production_runtime_environment_receipt",
+    "production_optimizer_config_sha256",
+    "production_scheduler_config_sha256",
+    "production_training_config_sha256",
+    "production_train_window_receipt_sha256",
+    "production_base_model_bundle_sha256",
+    "production_episode_filter_receipt",
+    "production_episode_filter_receipt_sha256",
 }
 
 
@@ -103,6 +122,7 @@ def _validate_expected_evidence_binding(
     expected_hash_schema_sha256: str | None,
     expected_control_config_sha256: str | None,
     expected_variant_config_sha256: Mapping[str, str] | None,
+    expected_shared_model_config_sha256: str | None,
     expected_world_size: int | None,
     expected_rank_set: list[int] | None,
     expected_collector_version: str | None,
@@ -164,6 +184,11 @@ def _validate_expected_evidence_binding(
         r"[0-9a-f]{64}", expected_control_config_sha256
     ):
         raise ValueError("expected_control_config_sha256 must be a SHA256")
+    if expected_shared_model_config_sha256 is not None and (
+        not isinstance(expected_shared_model_config_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_shared_model_config_sha256)
+    ):
+        raise ValueError("expected_shared_model_config_sha256 must be a SHA256")
     variant_hashes = dict(expected_variant_config_sha256)
     if (
         set(variant_hashes) != set(IMPLEMENTED_RUNNER_VARIANTS)
@@ -245,6 +270,15 @@ def _validate_expected_evidence_binding(
         "expected_collector_source_sha256": expected_collector_source_sha256,
         "expected_control_config_sha256": expected_control_config_sha256,
         "expected_variant_config_sha256": variant_hashes,
+        **(
+            {}
+            if expected_shared_model_config_sha256 is None
+            else {
+                "expected_shared_model_config_sha256": (
+                    expected_shared_model_config_sha256
+                )
+            }
+        ),
     }
 
 
@@ -290,10 +324,15 @@ def configure_matched_control_from_environment(
     expected_hash_schema_sha256: str | None = None,
     expected_control_config_sha256: str | None = None,
     expected_variant_config_sha256: Mapping[str, str] | None = None,
+    expected_shared_model_config_sha256: str | None = None,
     expected_world_size: int | None = None,
     expected_rank_set: list[int] | None = None,
     expected_collector_version: str | None = None,
     expected_collector_source_sha256: str | None = None,
+    run_contract: Mapping[str, Any] | None = None,
+    expected_run_contract_sha256: str | None = None,
+    external_acceptance_sha256: str | None = None,
+    production_preflight_receipt_sha256: str | None = None,
 ) -> bool:
     """Wire dataset/transform/trainer tracing only when an output is requested.
 
@@ -325,11 +364,37 @@ def configure_matched_control_from_environment(
         expected_hash_schema_sha256=expected_hash_schema_sha256,
         expected_control_config_sha256=expected_control_config_sha256,
         expected_variant_config_sha256=expected_variant_config_sha256,
+        expected_shared_model_config_sha256=expected_shared_model_config_sha256,
         expected_world_size=expected_world_size,
         expected_rank_set=expected_rank_set,
         expected_collector_version=expected_collector_version,
         expected_collector_source_sha256=expected_collector_source_sha256,
     )
+    current_run_values = (
+        run_contract,
+        expected_run_contract_sha256,
+        external_acceptance_sha256,
+        production_preflight_receipt_sha256,
+    )
+    if any(value is not None for value in current_run_values):
+        if any(value is None for value in current_run_values):
+            raise ValueError(
+                "current-run collector bindings must be supplied as one complete set"
+            )
+        if (
+            not isinstance(run_contract, Mapping)
+            or not run_contract
+            or not isinstance(expected_run_contract_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_run_contract_sha256)
+            or json_sha256(run_contract) != expected_run_contract_sha256
+            or not isinstance(external_acceptance_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", external_acceptance_sha256)
+            or not isinstance(production_preflight_receipt_sha256, str)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", production_preflight_receipt_sha256
+            )
+        ):
+            raise ValueError("invalid current-run collector contract")
     dataset_id = _required_environment("GWP_MATCHED_CONTROL_DATASET_ID")
     if expected_dataset_id is not None:
         expected_dataset_id = str(expected_dataset_id).strip()
@@ -417,14 +482,53 @@ def configure_matched_control_from_environment(
         },
     }
     control_sha256 = canonical_sha256(control_payload)
+    portable_models = _portable_config_hash_value(config["models"])
+    if not isinstance(portable_models, dict) or not isinstance(
+        portable_models.get("transformer"), dict
+    ):
+        raise ValueError("matched-control model config must be a nested mapping")
+    expected_transport_mode = {
+        "soft_semantic": "soft",
+        "hard_st": "hard_st",
+        "hard_detached": "hard_detached",
+    }[variant_id]
+    actual_transport_mode = portable_models["transformer"].get(
+        "contact_semantic_transport_mode"
+    )
+    if actual_transport_mode != expected_transport_mode:
+        raise ValueError(
+            "effective transport mode differs from the matched-control variant"
+        )
+    for identity_key in (
+        "production_training_run_id",
+        "production_training_run_nonce",
+        "production_variant_id",
+        "production_matched_control_external_acceptance_sha256",
+    ):
+        portable_models.pop(identity_key, None)
+    portable_models["transformer"][
+        "contact_semantic_transport_mode"
+    ] = "__reviewed_transport_override__"
+    shared_model_config_sha256 = canonical_sha256(portable_models)
+    transport_override = {
+        "variant_id": variant_id,
+        "contact_semantic_transport_mode": actual_transport_mode,
+    }
     variant_sha256 = canonical_sha256(
         {
             "control_config_sha256": control_sha256,
             "variant_id": variant_id,
-            "models": config["models"],
+            "models": _portable_config_hash_value(config["models"]),
         }
     )
     if evidence_binding is not None:
+        if "expected_shared_model_config_sha256" in evidence_binding and (
+            shared_model_config_sha256
+            != evidence_binding["expected_shared_model_config_sha256"]
+        ):
+            raise ValueError(
+                "effective model config differs outside the transport override"
+            )
         if control_sha256 != evidence_binding["expected_control_config_sha256"]:
             raise ValueError("effective control config hash differs from the matched-control gate")
         if (
@@ -450,6 +554,8 @@ def configure_matched_control_from_environment(
         "variant_config_sha256": variant_sha256,
         "control_config_sha256": control_sha256,
         "config_hash_scope": CONFIG_HASH_SCOPE,
+        "shared_model_config_sha256": shared_model_config_sha256,
+        "transport_override": transport_override,
         "runtime_rank": runtime_topology["rank"],
         "runtime_world_size": runtime_topology["world_size"],
         "training_data_receipt_sha256": current_training_receipt_sha256,
@@ -458,6 +564,12 @@ def configure_matched_control_from_environment(
             None if current_training_receipt is None
             else current_training_receipt.get("split_seed")
         ),
+        "production_preflight_receipt_sha256": (
+            production_preflight_receipt_sha256
+        ),
+        "run_contract": None if run_contract is None else dict(run_contract),
+        "run_contract_sha256": expected_run_contract_sha256,
+        "external_acceptance_sha256": external_acceptance_sha256,
     }
     if evidence_binding is not None:
         config["models"]["matched_control_collector"].update(evidence_binding)
