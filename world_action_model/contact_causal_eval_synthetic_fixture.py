@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from typing import Any, Mapping
 
 import numpy as np
@@ -1963,6 +1964,7 @@ def build_synthetic_causal_evaluator_results(
     from world_action_model.contact_asym25_heldout_eval import (
         ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
         build_fixed_window_manifest,
+        build_environment_receipt,
         load_completed_group_split,
         public_tree_receipt,
         reduce_metric_rows,
@@ -1999,13 +2001,6 @@ def build_synthetic_causal_evaluator_results(
         route_packet_kind,
         sha256_json,
     )
-    from world_action_model.contact_transition_schema import (
-        EQUAL_BIT_NUM_BITS,
-        EQUAL_BIT_VALID_STATES,
-        unstructured_ids_to_code,
-        validated_equal_bit_mixing_matrix,
-    )
-
     repository_root = Path(fixture["repository_root"])
     fixture_root = Path(fixture["fixture_root"])
     source = current_head_source_tree_receipt(
@@ -2134,7 +2129,6 @@ def build_synthetic_causal_evaluator_results(
         row_count = len(window_rows) * len(CHECKPOINT_STEPS)
         evidence_steps = np.repeat(np.asarray(CHECKPOINT_STEPS, dtype=np.int64), 512)
         evidence_ids = [row["window_id"] for _ in CHECKPOINT_STEPS for row in window_rows]
-        actions = np.zeros((row_count, 48, 32), dtype=np.float32)
         action_target_once = np.stack(
             [packet["action"].cpu().numpy() for packet in target_packets]
         ).astype(np.float32)
@@ -2151,8 +2145,6 @@ def build_synthetic_causal_evaluator_results(
         dim_masks = np.tile(dim_mask_once, (3, 1))
         time_masks = np.tile(time_mask_once, (3, 1))
         scales = np.tile(scale_once, (3, 1))
-        logits = np.zeros((row_count, 12, 22), dtype=np.float32)
-        hard = np.zeros_like(logits)
         targets = np.tile(target_once, (3, 1, 1))
         masks = np.tile(mask_once, (3, 1, 1))
         confidences = np.tile(confidence_once, (3, 1, 1))
@@ -2186,112 +2178,63 @@ def build_synthetic_causal_evaluator_results(
             checkpoint_manifest_sha = _write_json(
                 checkpoint_manifest_path, checkpoint_manifest
             )
-            if route == "aux_only_direct_q12":
-                packets = np.empty((row_count, 0, 22), dtype=np.float32)
-            elif route == "hard_st_semantic":
-                packets = hard.copy()
-            else:
-                matrix = validated_equal_bit_mixing_matrix().astype(np.float32)
-                mixed = np.einsum("nqw,bw->nqb", logits, matrix, optimize=False)
-                bits = mixed >= 0.0
-                weights = 1 << np.arange(EQUAL_BIT_NUM_BITS, dtype=np.uint32)
-                raw_ids = (bits.astype(np.uint32) * weights).sum(-1, dtype=np.uint32)
-                canonical_ids = np.where(raw_ids >= EQUAL_BIT_VALID_STATES, 0, raw_ids)
-                packets = unstructured_ids_to_code(canonical_ids.astype(np.uint16))
-            synthetic_environment = {
-                "python": "synthetic-cpu-audit-record",
-                "platform": "synthetic-cpu-audit-record",
-                "packages": {
-                    "numpy": np.__version__,
-                    "torch": "record-only",
-                    "diffusers": "record-only",
-                    "pandas": "record-only",
-                },
-                "cuda_record_only": {
-                    "torch_cuda_version": "record-only",
-                    "cudnn_version": 1,
-                    "device_count": 1,
-                },
-                "evaluation_device": "cuda:0",
-                "model_dtype": "bfloat16",
-                "inference_steps": 1,
-                "deterministic_algorithms": True,
-                "augmentation_enabled": False,
-                "eval_crop_mode": "center",
-                "batch_size": 1,
-            }
-            prediction_source_receipt = {
-                "reader_role": "prediction_inputs_only",
-                "arrow_schema_columns": [
-                    "index", "episode_index", "frame_index", "timestamp",
-                    "task_index", "observation.state",
-                ],
-                "removed_target_columns": ["action"],
-                "action_column_read": False,
-                "contact_sidecar_read": False,
-            }
-            prediction_metadata = {
-                "format": PREDICTION_EVIDENCE_FORMAT,
-                "matrix_id": MATRIX_ID,
-                "seed": seed,
-                "causal_route_id": route,
-                "causal_preflight_sha256": causal_sha,
-                "hardened_preflight_sha256": hardened_sha,
-                "checkpoint_manifest_sha256": checkpoint_manifest_sha,
-                "fixed_window_manifest_sha256": windows_sha,
-                "fixed_window_schedule_sha256": sha256_json(
-                    [
-                        {
-                            "window_id": row["window_id"],
-                            "global_index": row["global_index"],
-                            "action_noise_seed": row["action_noise_seed"],
-                        }
-                        for row in window_rows
-                    ]
-                ),
-                "checkpoint_bindings": {
-                    str(step): {
-                        "whole_bundle_sha256": checkpoint_evidence[
-                            (seed, route, step)
-                        ][0]["checkpoint_artifact_hashes"]["whole_bundle_sha256"],
-                        "weight_tensor_sha256": checkpoint_evidence[
-                            (seed, route, step)
-                        ][0]["checkpoint_artifact_hashes"]["weight_tensor_sha256"],
-                        "acceptance_sha256": sha256_json(
-                            checkpoint_evidence[(seed, route, step)][1]
-                        ),
-                    }
-                    for step in CHECKPOINT_STEPS
-                },
-                "base_model_artifact_tree": base_receipt,
-                "environment_receipt": synthetic_environment,
-                "evaluator_source_receipt_sha256": source_sha,
-                "prediction_source_column_receipt": prediction_source_receipt,
-                "target_columns_or_sidecars_read": False,
-                "row_count": row_count,
-            }
-            prediction_buffer = io.BytesIO()
-            np.savez(
-                prediction_buffer,
-                metadata_json=np.frombuffer(
-                    json.dumps(
-                        prediction_metadata,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        allow_nan=False,
-                    ).encode("utf-8"),
-                    dtype=np.uint8,
-                ),
-                checkpoint_steps=evidence_steps,
-                window_ids=np.asarray(evidence_ids, dtype=np.str_),
-                action_predictions=actions,
-                semantic_aux_logits=logits,
-                contact_hard_semantics=hard,
-                route_packets=packets,
-            )
             prediction_path = route_root / "predictions.npz"
-            prediction_sha = hashlib.sha256(prediction_buffer.getvalue()).hexdigest()
-            prediction_path.write_bytes(prediction_buffer.getvalue())
+            pycache_prefix = route_root / ".original_prediction_pycache"
+            pycache_prefix.mkdir(mode=0o700, exist_ok=False)
+            prediction_command = [
+                sys.executable,
+                "-B",
+                str(repository_root / "scripts/evaluate_contact_causal_heldout.py"),
+                "_predict-phase",
+                "--causal-preflight-receipt", str(causal_path.absolute()),
+                "--hardened-preflight-receipt", str(hardened_path.absolute()),
+                "--window-manifest", str(windows_path.absolute()),
+                "--checkpoint-manifest", str(checkpoint_manifest_path.absolute()),
+                "--base-model", str(base_root.absolute()),
+                "--output", str(prediction_path.absolute()),
+                "--device", "cpu",
+                "--inference-steps", "1",
+                "--test-only-tiny-runtime",
+            ]
+            prediction_environment = dict(os.environ)
+            prediction_environment["CUDA_VISIBLE_DEVICES"] = ""
+            prediction_environment["PYTHONPYCACHEPREFIX"] = str(pycache_prefix)
+            try:
+                subprocess.run(
+                    prediction_command,
+                    cwd=repository_root,
+                    env=prediction_environment,
+                    check=True,
+                )
+            finally:
+                pycache_prefix.rmdir()
+            prediction_sha = _sha_file(prediction_path)
+            with np.load(prediction_path, allow_pickle=False) as archive:
+                prediction_metadata = json.loads(
+                    archive["metadata_json"].tobytes().decode("utf-8")
+                )
+                actual_steps = np.array(archive["checkpoint_steps"], copy=True)
+                actual_ids = np.array(archive["window_ids"], copy=True)
+                actions = np.array(archive["action_predictions"], copy=True)
+                logits = np.array(archive["semantic_aux_logits"], copy=True)
+                hard = np.array(archive["contact_hard_semantics"], copy=True)
+                packets = np.array(archive["route_packets"], copy=True)
+            if (
+                not np.array_equal(actual_steps, evidence_steps)
+                or actual_ids.tolist() != evidence_ids
+            ):
+                raise AssertionError("test-only prediction worker schedule differs")
+            synthetic_environment = prediction_metadata["environment_receipt"]
+            if synthetic_environment != {
+                **build_environment_receipt(
+                    device="cpu", dtype="float32", inference_steps=1
+                ),
+                "test_only_tiny_runtime": True,
+            }:
+                raise AssertionError("test-only prediction environment receipt differs")
+            prediction_source_receipt = prediction_metadata[
+                "prediction_source_column_receipt"
+            ]
             evidence_path = route_root / "route-output.npz"
             evidence_sha = write_route_output_evidence(
                 evidence_path,

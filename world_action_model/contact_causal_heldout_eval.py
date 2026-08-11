@@ -680,8 +680,13 @@ def _replay_prediction_evidence(
     )
     if replay.exists() or replay.is_symlink():
         raise CausalProductionError("independent prediction replay path already exists")
+    pycache_prefix = original.parent / (
+        ".independent_pycache_" + prediction_entry["sha256"][:20]
+    )
+    pycache_prefix.mkdir(mode=0o700, exist_ok=False)
     command = [
         sys.executable,
+        "-B",
         str(Path(__file__).resolve().parents[1] / "scripts/evaluate_contact_causal_heldout.py"),
         "_predict-phase",
         "--causal-preflight-receipt",
@@ -701,11 +706,15 @@ def _replay_prediction_evidence(
         "--inference-steps",
         str(result["environment_receipt"]["inference_steps"]),
     ]
+    if result["environment_receipt"]["test_only_tiny_runtime"] is True:
+        command.append("--test-only-tiny-runtime")
+    child_environment = dict(os.environ)
+    child_environment["PYTHONPYCACHEPREFIX"] = str(pycache_prefix)
     try:
         subprocess.run(
             command,
             cwd=Path(__file__).resolve().parents[1],
-            env=dict(os.environ),
+            env=child_environment,
             check=True,
         )
         replay_entry = {
@@ -727,6 +736,7 @@ def _replay_prediction_evidence(
     finally:
         if replay.is_file() and not replay.is_symlink():
             replay.unlink()
+        pycache_prefix.rmdir()
 
 
 def _tree_entry(value: object, name: str) -> dict[str, Any]:
@@ -826,7 +836,7 @@ def validate_result_v3(
             "python", "platform", "packages", "cuda_record_only",
             "evaluation_device", "model_dtype", "inference_steps",
             "deterministic_algorithms", "augmentation_enabled",
-            "eval_crop_mode", "batch_size",
+            "eval_crop_mode", "batch_size", "test_only_tiny_runtime",
         },
         "causal evaluator environment",
     )
@@ -841,27 +851,13 @@ def validate_result_v3(
         "causal evaluator CUDA record",
     )
     device = environment["evaluation_device"]
+    test_only_tiny_runtime = environment["test_only_tiny_runtime"]
     if (
         not isinstance(environment["python"], str)
         or not isinstance(environment["platform"], str)
         or any(value is not None and not isinstance(value, str) for value in packages.values())
-        or cuda["torch_cuda_version"] is None
-        or not isinstance(cuda["torch_cuda_version"], str)
-        or isinstance(cuda["cudnn_version"], bool)
-        or not isinstance(cuda["cudnn_version"], int)
-        or cuda["cudnn_version"] <= 0
-        or isinstance(cuda["device_count"], bool)
-        or not isinstance(cuda["device_count"], int)
-        or cuda["device_count"] <= 0
+        or not isinstance(test_only_tiny_runtime, bool)
         or not isinstance(device, str)
-        or (
-            device != "cuda"
-            and not (
-                device.startswith("cuda:")
-                and device[5:].isdigit()
-            )
-        )
-        or environment["model_dtype"] != "bfloat16"
         or isinstance(environment["inference_steps"], bool)
         or not isinstance(environment["inference_steps"], int)
         or environment["inference_steps"] <= 0
@@ -871,6 +867,41 @@ def validate_result_v3(
         or environment["batch_size"] != 1
     ):
         raise CausalProductionError("causal evaluator environment contract differs")
+    if test_only_tiny_runtime:
+        if (
+            device != "cpu"
+            or environment["model_dtype"] != "float32"
+            or (
+                cuda["torch_cuda_version"] is not None
+                and not isinstance(cuda["torch_cuda_version"], str)
+            )
+            or (
+                cuda["cudnn_version"] is not None
+                and (
+                    isinstance(cuda["cudnn_version"], bool)
+                    or not isinstance(cuda["cudnn_version"], int)
+                    or cuda["cudnn_version"] <= 0
+                )
+            )
+            or cuda["device_count"] != 0
+        ):
+            raise CausalProductionError("test-only tiny evaluator environment differs")
+    elif (
+        (
+            device != "cuda"
+            and not (device.startswith("cuda:") and device[5:].isdigit())
+        )
+        or environment["model_dtype"] != "bfloat16"
+        or cuda["torch_cuda_version"] is None
+        or not isinstance(cuda["torch_cuda_version"], str)
+        or isinstance(cuda["cudnn_version"], bool)
+        or not isinstance(cuda["cudnn_version"], int)
+        or cuda["cudnn_version"] <= 0
+        or isinstance(cuda["device_count"], bool)
+        or not isinstance(cuda["device_count"], int)
+        or cuda["device_count"] <= 0
+    ):
+        raise CausalProductionError("production causal evaluator CUDA contract differs")
     causal_preflight_entry = _artifact_entry(
         result["causal_preflight_receipt"], "causal preflight receipt"
     )
@@ -1026,6 +1057,15 @@ def validate_result_v3(
     validate_preflight_receipt_v2(causal_preflight)
     if causal_preflight_sha256 != causal_preflight_entry["sha256"]:
         raise CausalProductionError("causal evaluator preflight bytes changed")
+    if test_only_tiny_runtime and (
+        causal_preflight["production_data_admission"] is not False
+        or causal_preflight["allow_5b_training"] is not False
+        or causal_preflight["allow_server_training"] is not False
+        or result["benefit_claimed"] is not False
+    ):
+        raise CausalProductionError(
+            "test-only tiny replay cannot enter production or benefit admission"
+        )
     try:
         hardened, hardened_sha256 = load_and_replay_preflight_receipt(
             hardened_entry["path_record_only"]

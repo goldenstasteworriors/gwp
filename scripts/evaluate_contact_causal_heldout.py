@@ -16,6 +16,24 @@ import sys
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _reject_project_bytecode_cache(root: Path) -> None:
+    """Prevent tracked-source imports from being shadowed by repository pyc files."""
+
+    sys.dont_write_bytecode = True
+    for current, directory_names, file_names in os.walk(root, followlinks=False):
+        relative = Path(current).relative_to(root)
+        directory_names[:] = [
+            name
+            for name in directory_names
+            if not (relative == Path(".") and name in {".git", "outputs"})
+        ]
+        if "__pycache__" in directory_names or any(name.endswith(".pyc") for name in file_names):
+            raise RuntimeError("causal evaluator forbids repository bytecode caches")
+
+
+_reject_project_bytecode_cache(REPOSITORY_ROOT)
+
+
 def _stdlib_bootstrap_evaluator_head(root: Path) -> str:
     """Verify the HEAD-declared evaluator tree before NumPy/project imports."""
 
@@ -326,9 +344,22 @@ def predict_phase(args: argparse.Namespace) -> None:
     if len(selected_windows) != 512:
         raise CausalProductionError("prediction worker requires 512 fixed windows")
     base_snapshot = snapshot_artifact_tree(args.base_model)
+    test_only_tiny_runtime = args.test_only_tiny_runtime
+    if test_only_tiny_runtime and (
+        causal["production_data_admission"] is not False
+        or causal["allow_5b_training"] is not False
+        or causal["allow_server_training"] is not False
+        or args.device != "cpu"
+    ):
+        raise CausalProductionError(
+            "test-only tiny replay requires a non-production CPU preflight"
+        )
     environment = build_environment_receipt(
-        device=args.device, dtype="bfloat16", inference_steps=args.inference_steps
+        device=args.device,
+        dtype=("float32" if test_only_tiny_runtime else "bfloat16"),
+        inference_steps=args.inference_steps,
     )
+    environment["test_only_tiny_runtime"] = test_only_tiny_runtime
     cache_parent = output.parent / ".prediction_private_hf_cache"
     cache_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     cache_parent.chmod(0o700)
@@ -337,13 +368,19 @@ def predict_phase(args: argparse.Namespace) -> None:
     ).hexdigest()
     from world_action_model.contact_causal_eval_runtime import (
         CausalProductionHeldoutRuntime,
+        CausalTestOnlyTinyReplayRuntime,
     )
 
-    runtime = CausalProductionHeldoutRuntime(
+    runtime_class = (
+        CausalTestOnlyTinyReplayRuntime
+        if test_only_tiny_runtime
+        else CausalProductionHeldoutRuntime
+    )
+    runtime = runtime_class(
         preflight_receipt=hardened,
         base_model_path=args.base_model,
         device=args.device,
-        dtype="bfloat16",
+        dtype=("float32" if test_only_tiny_runtime else "bfloat16"),
         inference_steps=args.inference_steps,
         verified_private_cache_parent=str(cache_parent),
         verified_run_nonce=evaluator_nonce,
@@ -477,13 +514,17 @@ def evaluate(args: argparse.Namespace) -> None:
         dtype="bfloat16",
         inference_steps=args.inference_steps,
     )
+    environment_receipt["test_only_tiny_runtime"] = False
     selected_windows = [window for window in windows["windows"] if window["seed"] == seed]
     if len(selected_windows) != 512:
         raise CausalProductionError("causal evaluator needs 256 val + 256 test windows")
 
     prediction_path = output_dir / "contact_causal_predictions.npz"
+    pycache_prefix = output_dir / ".prediction_worker_pycache"
+    pycache_prefix.mkdir(mode=0o700, exist_ok=False)
     command = [
         sys.executable,
+        "-B",
         str(Path(__file__).absolute()),
         "_predict-phase",
         "--causal-preflight-receipt", str(args.causal_preflight_receipt.absolute()),
@@ -495,12 +536,17 @@ def evaluate(args: argparse.Namespace) -> None:
         "--device", args.device,
         "--inference-steps", str(args.inference_steps),
     ]
-    subprocess.run(
-        command,
-        cwd=REPOSITORY_ROOT,
-        env=dict(os.environ),
-        check=True,
-    )
+    child_environment = dict(os.environ)
+    child_environment["PYTHONPYCACHEPREFIX"] = str(pycache_prefix)
+    try:
+        subprocess.run(
+            command,
+            cwd=REPOSITORY_ROOT,
+            env=child_environment,
+            check=True,
+        )
+    finally:
+        pycache_prefix.rmdir()
     prediction_metadata, prediction_arrays, prediction_sha = (
         _load_prediction_evidence(prediction_path)
     )
@@ -897,6 +943,11 @@ def parser() -> argparse.ArgumentParser:
     predict.add_argument("--output", type=Path, required=True)
     predict.add_argument("--device", required=True)
     predict.add_argument("--inference-steps", type=int, required=True)
+    predict.add_argument(
+        "--test-only-tiny-runtime",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     merge = commands.add_parser("aggregate")
     merge.add_argument("--result", type=Path, action="append", required=True)
     merge.add_argument("--output", type=Path, required=True)

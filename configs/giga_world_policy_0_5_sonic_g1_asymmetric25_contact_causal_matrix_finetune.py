@@ -6,6 +6,9 @@ historical contact mechanism production config and it forbids legacy aliases.
 
 import os
 
+if os.environ.get("GWP_CONTACT_CAUSAL_TEST_ONLY_TINY_RUNTIME"):
+    raise ValueError("production causal config forbids the test-only tiny runtime")
+
 from world_action_model.contact_causal_gate_bootstrap import (
     bootstrap_robot_v3_stdlib,
 )
@@ -416,4 +419,5 @@ config["contact_causal_main_integration"] = {
     "allow_5b_training": False,
     "allow_server_training": False,
     "benefit_claimed": False,
+    "test_only_tiny_runtime": False,
 }

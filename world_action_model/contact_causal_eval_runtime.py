@@ -216,6 +216,260 @@ def validate_metric_target_packet(value: object) -> Mapping[str, Any]:
     return value
 
 
+class CausalTestOnlyTinyReplayRuntime:
+    """CPU-only replay model for implementation acceptance, never production.
+
+    The test runtime uses the production verified, pre-construction target-free
+    Arrow projection and safe checkpoint tensor loader.  It replaces only the
+    5B/VAE compute with a three-parameter model whose state is the actual tiny
+    checkpoint mapping used by the CPU admission fixture.
+    """
+
+    _PARAMETER_SCHEMA = {
+        "contact_planner_tiny_weight": ((3,), "torch.float32"),
+        "contact_condition_encoder.weight": ((1, 1), "torch.float32"),
+        "contact_condition_encoder.bias": ((1,), "torch.float32"),
+    }
+
+    def __init__(
+        self,
+        *,
+        preflight_receipt: Mapping[str, Any],
+        verified_private_cache_parent: str,
+        verified_run_nonce: str,
+        device: str,
+        dtype: str,
+        inference_steps: int,
+        **_: Any,
+    ) -> None:
+        import torch
+
+        from world_action_model.contact_causal_preflight import (
+            build_robot_runtime_source_receipts_v1,
+        )
+        from world_action_model.datasets.wam_lerobot_dataset import WAMLeRobotDataset
+
+        if (
+            device != "cpu"
+            or dtype != "float32"
+            or isinstance(inference_steps, bool)
+            or not isinstance(inference_steps, int)
+            or inference_steps <= 0
+        ):
+            raise HeldoutEvaluationError(
+                "test-only tiny replay requires CPU/float32 and positive inference steps"
+            )
+        self.torch = torch
+        self.preflight = dict(preflight_receipt)
+        self.device = torch.device("cpu")
+        self.dtype = torch.float32
+        self.inference_steps = inference_steps
+        torch.use_deterministic_algorithms(True)
+        data_root = Path(self.preflight["data_root"])
+        runtime_sources = build_robot_runtime_source_receipts_v1(
+            hardened_preflight_receipt=self.preflight,
+            t5_embedding_dir=data_root / "t5_embedding",
+        )
+        self.inference_dataset = WAMLeRobotDataset(
+            data_path=str(data_root),
+            data_size=None,
+            delta_info=None,
+            delta_frames={"observation.state": [0]},
+            force_cache_sync=False,
+            training_source_runtime_receipt=runtime_sources[
+                "training_source_runtime_receipt"
+            ],
+            t5_runtime_source_receipt=runtime_sources["t5_runtime_source_receipt"],
+            verified_private_cache_parent=verified_private_cache_parent,
+            verified_training_run_nonce=verified_run_nonce,
+            skip_video_decoding=True,
+            video_backend="pyav",
+            t5_load_from="dir",
+            t5_cfg={
+                "t5_embedding_dir": str(data_root / "t5_embedding"),
+                "t5_embedding_pattern": "episode_{episode_index:06d}.pt",
+                "t5_embedding_key": "t5_embedding",
+            },
+            t5_cache_size=128,
+            robotype="sonic_g1_asymmetric25",
+            source_column_projection=(
+                "index",
+                "episode_index",
+                "frame_index",
+                "timestamp",
+                "task_index",
+                "observation.state",
+            ),
+        )
+        self.inference_dataset.open_target_free_inference_view()
+        self.prediction_source_column_receipt = {
+            "reader_role": "prediction_inputs_only",
+            "arrow_schema_columns": list(
+                self.inference_dataset._target_free_source_columns
+            ),
+            "removed_target_columns": list(
+                self.inference_dataset._target_free_removed_source_columns
+            ),
+            "action_column_read": False,
+            "contact_sidecar_read": False,
+        }
+        self.transformer = None
+        self.causal_route: str | None = None
+        self._pending_window_id: str | None = None
+
+    @staticmethod
+    def _scalar_int(value: object, name: str) -> int:
+        if hasattr(value, "item"):
+            value = value.item()
+        if isinstance(value, bool):
+            raise HeldoutEvaluationError(f"test-only tiny {name} cannot be boolean")
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise HeldoutEvaluationError(f"invalid test-only tiny {name}") from exc
+
+    def load_inference_window(self, window: Mapping[str, Any]) -> dict[str, Any]:
+        raw = self.inference_dataset._get_data(int(window["global_index"]))
+        if (
+            self._scalar_int(raw.get("episode_index"), "episode")
+            != int(window["episode_id"])
+            or self._scalar_int(raw.get("frame_index"), "frame")
+            != int(window["frame_index"])
+            or self._scalar_int(raw.get("index"), "index")
+            != int(window["global_index"])
+        ):
+            raise HeldoutEvaluationError("test-only tiny fixed-window identity differs")
+        if any(
+            key == "action" or key.startswith("action_") or key.startswith("contact_")
+            for key in raw
+        ):
+            raise HeldoutEvaluationError("test-only target-free source emitted a target")
+        state = self.torch.as_tensor(raw["observation.state"], dtype=self.dtype)
+        prompt = self.torch.as_tensor(raw["t5_embedding"], dtype=self.dtype)
+        packet = {
+            "window_id": window["window_id"],
+            "ref_images": self.torch.zeros((5, 3, 8, 8), dtype=self.dtype),
+            "prompt_embeds": prompt,
+            "state": state,
+            "embodiment_id": self.torch.tensor(0, dtype=self.torch.long),
+            "action_dim_mask": self.torch.ones(MODEL_ACTION_DIM, dtype=self.dtype),
+        }
+        validate_target_free_inference_packet(packet)
+        self._pending_window_id = window["window_id"]
+        return packet
+
+    def load_checkpoint(
+        self, checkpoint_path: str, *, checkpoint_receipt: Mapping[str, Any]
+    ) -> None:
+        from world_action_model.contact_causal_checkpoint import (
+            load_pinned_safe_weight_mapping,
+        )
+        from world_action_model.contact_causal_production import (
+            model_parameter_and_buffer_digests,
+        )
+
+        torch = self.torch
+
+        class TinyCausalReplayModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.contact_planner_tiny_weight = torch.nn.Parameter(
+                    torch.zeros(3, dtype=torch.float32)
+                )
+                self.contact_condition_encoder = torch.nn.Linear(1, 1, bias=True)
+
+        self.unload_checkpoint()
+        checkpoint_root = Path(checkpoint_path).expanduser().absolute()
+        weight_entry = checkpoint_receipt["checkpoint_file"]
+        weight_path = Path(weight_entry["path_record_only"]).absolute()
+        if weight_path.parent != checkpoint_root:
+            raise HeldoutEvaluationError("test-only checkpoint path differs from receipt")
+        mapping = load_pinned_safe_weight_mapping(
+            weight_path,
+            expected_sha256=weight_entry["sha256"],
+            expected_serialization=weight_entry["serialization"],
+        )
+        actual_schema = {
+            name: (tuple(tensor.shape), str(tensor.dtype))
+            for name, tensor in mapping.items()
+        }
+        if actual_schema != self._PARAMETER_SCHEMA:
+            raise HeldoutEvaluationError("test-only tiny checkpoint tensor schema differs")
+        model = TinyCausalReplayModel()
+        incompatible = model.load_state_dict(mapping, strict=True)
+        if incompatible.missing_keys or incompatible.unexpected_keys:
+            raise HeldoutEvaluationError("test-only tiny checkpoint state differs")
+        parameter_sha256, buffer_sha256 = model_parameter_and_buffer_digests(model)
+        if (
+            parameter_sha256
+            != checkpoint_receipt["parameter_topology"]["parameter_tensor_sha256"]
+            or buffer_sha256
+            != checkpoint_receipt["parameter_topology"]["buffer_tensor_sha256"]
+        ):
+            raise HeldoutEvaluationError("test-only tiny checkpoint digest differs")
+        model.requires_grad_(False)
+        model.eval()
+        self.transformer = model
+        self.causal_route = ensure_exact_causal_route(
+            checkpoint_receipt["route"]["causal_route_id"]
+        )
+
+    def predict(
+        self, transformed: Mapping[str, Any], *, action_noise_seed: int
+    ) -> dict[str, np.ndarray | None]:
+        del action_noise_seed
+        validate_target_free_inference_packet(transformed)
+        if self._pending_window_id != transformed["window_id"]:
+            raise HeldoutEvaluationError("test-only tiny inference packet is stale")
+        if self.transformer is None or self.causal_route is None:
+            raise HeldoutEvaluationError("test-only tiny checkpoint is not loaded")
+        # The zero-valued result is produced by an actual forward expression
+        # over both the verified checkpoint parameters and target-free inputs.
+        zero = sum(parameter.sum() for parameter in self.transformer.parameters()) * 0.0
+        zero = zero + transformed["state"].float().sum() * 0.0
+        zero = zero + transformed["prompt_embeds"].float().sum() * 0.0
+        action = (zero + self.torch.zeros((HORIZON_FRAMES, MODEL_ACTION_DIM))).numpy()
+        logits = (zero + self.torch.zeros((12, 22))).numpy()
+        hard = (zero + self.torch.zeros((12, 22))).numpy()
+        packet = None
+        if self.causal_route == "hard_st_semantic":
+            packet = hard.copy()
+        elif self.causal_route == "equal_bit_unstructured_hard_st":
+            from world_action_model.contact_transition_schema import (
+                EQUAL_BIT_NUM_BITS,
+                EQUAL_BIT_VALID_STATES,
+                unstructured_ids_to_code,
+                validated_equal_bit_mixing_matrix,
+            )
+
+            mixed = np.einsum(
+                "qw,bw->qb", logits,
+                validated_equal_bit_mixing_matrix().astype(np.float32),
+                optimize=False,
+            )
+            weights = 1 << np.arange(EQUAL_BIT_NUM_BITS, dtype=np.uint32)
+            raw_ids = ((mixed >= 0).astype(np.uint32) * weights).sum(
+                -1, dtype=np.uint32
+            )
+            canonical = np.where(raw_ids >= EQUAL_BIT_VALID_STATES, 0, raw_ids)
+            packet = unstructured_ids_to_code(canonical.astype(np.uint16))
+        self._pending_window_id = None
+        return {
+            "action_prediction": action.astype(np.float32, copy=False),
+            "contact_logits": logits.astype(np.float32, copy=False),
+            "contact_hard_semantic": hard.astype(np.float32, copy=False),
+            "route_packet": packet,
+        }
+
+    def unload_checkpoint(self) -> None:
+        self.transformer = None
+        self.causal_route = None
+
+    def close(self) -> None:
+        self.unload_checkpoint()
+        self.inference_dataset.close()
+
+
 class CausalProductionHeldoutRuntime(ProductionHeldoutRuntime):
     """Run the mature action evaluator and expose the exact route packet."""
 
