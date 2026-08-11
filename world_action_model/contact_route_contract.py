@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from enum import Enum
 from typing import Any, Mapping
 
 from world_action_model.contact_transition_schema import (
+    EQUAL_BIT_CODEC_VERSION,
+    EQUAL_BIT_MIXING_MATRIX_SHA256,
     EQUAL_BIT_VALID_STATES,
+    HARD_SEGMENT_GRAMMAR_VERSION,
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
     contact_transport_capacity_metadata,
@@ -20,7 +24,8 @@ from world_action_model.contact_transition_schema import (
 )
 
 
-CONTACT_CAUSAL_ROUTE_CONTRACT_VERSION = "contact_causal_route_contract_v1"
+CONTACT_CAUSAL_ROUTE_CONTRACT_VERSION = "contact_causal_route_contract_v2"
+CONTACT_PACKET_RECEIPT_VERSION = "contact_action_packet_receipt_v1"
 SPEC_ONLY_IMPLEMENTATION_STATUS = "implemented_cpu_route_unadmitted"
 
 
@@ -30,6 +35,15 @@ class ContactCausalRoute(str, Enum):
     HARD_DETACHED_SEMANTIC = "hard_detached_semantic"
     AUX_ONLY_DIRECT_Q12 = "aux_only_direct_q12"
     EQUAL_BIT_UNSTRUCTURED_HARD_ST = "equal_bit_unstructured_hard_st"
+
+
+SPEC_ONLY_TRAINER_ROUTES = frozenset(
+    {
+        ContactCausalRoute.AUX_ONLY_DIRECT_Q12,
+        ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST,
+        ContactCausalRoute.HARD_ST_SEMANTIC,
+    }
+)
 
 
 _SEMANTIC_ROUTE_BY_TRANSPORT = {
@@ -50,6 +64,85 @@ def canonical_json_bytes(value: object) -> bytes:
 
 def sha256_json(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def contact_packet_receipt(
+    *,
+    route_receipt: Mapping[str, Any],
+    packet_bytes: bytes,
+    packet_dtype: str,
+    packet_shape: tuple[int, ...] | list[int],
+) -> Mapping[str, Any]:
+    """Bind canonical packet bytes to the model's immutable route contract."""
+
+    route_receipt_sha256 = route_receipt.get("receipt_sha256")
+    if not isinstance(route_receipt_sha256, str) or len(route_receipt_sha256) != 64:
+        raise ValueError("packet receipt requires a canonical route receipt")
+    payload = {
+        "receipt_version": CONTACT_PACKET_RECEIPT_VERSION,
+        "route": route_receipt.get("route"),
+        "route_contract_version": route_receipt.get("contract_version"),
+        "route_receipt_sha256": route_receipt_sha256,
+        "packet_dtype": str(packet_dtype),
+        "packet_shape": [int(value) for value in packet_shape],
+        "packet_bytes_sha256": hashlib.sha256(packet_bytes).hexdigest(),
+    }
+    return {**payload, "receipt_sha256": sha256_json(payload)}
+
+
+def validate_spec_only_trainer_route_config(
+    model_config: Mapping[str, Any],
+) -> ContactCausalRoute | None:
+    """Fail closed on split-brain spec route and auxiliary-loss settings."""
+
+    transformer_config = model_config.get("transformer", {})
+    top_raw = model_config.get("contact_causal_route")
+    transformer_raw = transformer_config.get("contact_causal_route")
+    top_present = top_raw is not None and str(top_raw).strip() != ""
+    transformer_present = transformer_raw is not None and str(transformer_raw).strip() != ""
+    if not top_present and not transformer_present:
+        return None
+    if not top_present or not transformer_present:
+        raise ValueError(
+            "spec-only contact route must be explicit at both models and transformer levels"
+        )
+    try:
+        top_route = ContactCausalRoute(str(top_raw).strip())
+    except ValueError as exc:
+        raise ValueError(f"unknown top-level contact route {top_raw!r}") from exc
+    transformer_route = resolve_contact_causal_route(
+        transformer_raw,
+        contact_semantic_bottleneck=bool(
+            transformer_config.get("contact_semantic_bottleneck", False)
+        ),
+        contact_semantic_transport_mode=str(
+            transformer_config.get("contact_semantic_transport_mode", "soft")
+        ),
+    )
+    if top_route is not transformer_route or top_route not in SPEC_ONLY_TRAINER_ROUTES:
+        if top_route is not transformer_route:
+            raise ValueError(
+                "top-level contact route differs from the transformer resolved route"
+            )
+        return None
+    try:
+        loss_weight = float(model_config.get("contact_loss_weight", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("spec-only contact loss weight must be finite and positive") from exc
+    if not math.isfinite(loss_weight) or loss_weight <= 0.0:
+        raise ValueError("spec-only contact loss weight must be finite and positive")
+    if not bool(model_config.get("require_contact_targets", False)):
+        raise ValueError("spec-only contact routes require contact targets")
+    if not bool(model_config.get("require_positive_contact_supervision", False)):
+        raise ValueError("spec-only contact routes require positive masked supervision")
+    if str(model_config.get("contact_schema_version", "")) != SEGMENT_SCHEMA_VERSION:
+        raise ValueError("spec-only contact routes require v1.1 segment targets")
+    if top_route in {
+        ContactCausalRoute.AUX_ONLY_DIRECT_Q12,
+        ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST,
+    } and str(model_config.get("contact_condition_mode", "predicted")) != "predicted":
+        raise ValueError(f"route {top_route.value!r} rejects oracle conditioning")
+    return top_route
 
 
 def resolve_contact_causal_route(
@@ -145,6 +238,8 @@ def validate_contact_route_model_config(
             raise ValueError(
                 "equal_bit_unstructured_hard_st is receipt-bound to Q=12/B=16"
             )
+    if route is ContactCausalRoute.HARD_ST_SEMANTIC and contact_time_bins != 16:
+        raise ValueError("explicit hard_st_semantic is receipt-bound to B=16")
 
 
 def route_uses_standalone_planner(route: ContactCausalRoute | None) -> bool:
@@ -238,5 +333,20 @@ def contact_route_metadata(
             else "legacy_semantic_packet_kv_without_reference_aux_logits_output_only"
         ),
         "capacity": capacity,
+        "hard_semantic_grammar_version": (
+            HARD_SEGMENT_GRAMMAR_VERSION
+            if transport in {"hard_st", "hard_detached"}
+            and time_bins == 16
+            and not direct
+            and not equal_bit
+            else None
+        ),
+        "equal_bit_codec_version": EQUAL_BIT_CODEC_VERSION if equal_bit else None,
+        "equal_bit_mixing_matrix_sha256": (
+            EQUAL_BIT_MIXING_MATRIX_SHA256 if equal_bit else None
+        ),
+        "cache_packet_receipt_version": (
+            CONTACT_PACKET_RECEIPT_VERSION if not direct else None
+        ),
     }
     return {**payload, "receipt_sha256": sha256_json(payload)}

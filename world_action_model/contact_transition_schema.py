@@ -118,6 +118,7 @@ EQUAL_BIT_NUM_BITS = 16
 EQUAL_BIT_CODE_WIDTH = SEGMENT_TARGET_DIM
 EQUAL_BIT_BIT_ORDER = "little_endian_lsb_first"
 EQUAL_BIT_MIXING_LAYOUT = "row_major_int8_twos_complement"
+HARD_SEGMENT_GRAMMAR_VERSION = "contact_segment_hard_grammar_b16_v1"
 # Receipt-bound fixed Rademacher matrix.  It was generated once from the
 # documented seed using SHA-256 counter blocks, checked to have row rank 16,
 # and is now a literal so library/RNG changes cannot alter the codec.
@@ -151,6 +152,19 @@ EQUAL_BIT_MIXING_MATRIX_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 
+def validated_equal_bit_mixing_matrix() -> np.ndarray:
+    """Return a copy of the receipt-bound matrix after byte/rank validation."""
+
+    matrix = np.asarray(EQUAL_BIT_MIXING_MATRIX, dtype=np.int8)
+    if matrix.shape != (EQUAL_BIT_NUM_BITS, EQUAL_BIT_CODE_WIDTH):
+        raise RuntimeError("equal-bit mixing matrix shape differs from its codec contract")
+    if hashlib.sha256(matrix.tobytes(order="C")).hexdigest() != EQUAL_BIT_MIXING_MATRIX_SHA256:
+        raise RuntimeError("equal-bit mixing matrix bytes differ from their fixed digest")
+    if np.linalg.matrix_rank(matrix.astype(np.float64)) != EQUAL_BIT_NUM_BITS:
+        raise RuntimeError("equal-bit mixing matrix is not full row rank")
+    return matrix.copy()
+
+
 def unstructured_capacity_metadata(
     K: int = EQUAL_BIT_VALID_STATES,
     Q: int = 12,
@@ -169,13 +183,9 @@ def unstructured_capacity_metadata(
         raise ValueError(
             f"the v1 equal-bit codec fixes width={EQUAL_BIT_CODE_WIDTH}, got {width}"
         )
-    matrix = np.asarray(EQUAL_BIT_MIXING_MATRIX, dtype=np.int8)
+    matrix = validated_equal_bit_mixing_matrix()
     matrix_bytes = matrix.tobytes(order="C")
     matrix_sha256 = hashlib.sha256(matrix_bytes).hexdigest()
-    if matrix.shape != (EQUAL_BIT_NUM_BITS, EQUAL_BIT_CODE_WIDTH):
-        raise RuntimeError("equal-bit mixing matrix shape differs from its codec contract")
-    if matrix_sha256 != EQUAL_BIT_MIXING_MATRIX_SHA256:
-        raise RuntimeError("equal-bit mixing matrix bytes differ from their fixed digest")
     bits_per_query = math.log2(K)
     return {
         "codec_version": EQUAL_BIT_CODEC_VERSION,
@@ -203,6 +213,7 @@ def unstructured_capacity_metadata(
         "mixing_matrix_bytes_hex": matrix_bytes.hex(),
         "mixing_matrix_sha256": matrix_sha256,
         "mixing_matrix_row_rank": EQUAL_BIT_NUM_BITS,
+        "hard_packet_validator": "validate_unstructured_code_v1",
     }
 
 
@@ -233,12 +244,16 @@ def unstructured_code_to_ids(code: np.ndarray) -> np.ndarray:
     """Encode a canonical v1 code, rejecting non-binary or non-zero padding."""
 
     value = np.asarray(code)
-    if value.shape[-1] != EQUAL_BIT_CODE_WIDTH:
+    if value.ndim < 1 or value.shape[-1] != EQUAL_BIT_CODE_WIDTH:
         raise ValueError(
             f"equal-bit code must end in width {EQUAL_BIT_CODE_WIDTH}, got {value.shape}"
         )
     if not np.isfinite(value).all():
         raise ValueError("equal-bit code requires finite values")
+    if value.dtype.kind != "f":
+        raise TypeError("equal-bit code must use a floating dtype")
+    if np.signbit(value[value == 0]).any():
+        raise ValueError("equal-bit code requires canonical positive zero")
     if not np.logical_or(value[..., :EQUAL_BIT_NUM_BITS] == 0, value[..., :EQUAL_BIT_NUM_BITS] == 1).all():
         raise ValueError("equal-bit code prefix must contain only zero/one")
     if not (value[..., EQUAL_BIT_NUM_BITS:] == 0).all():
@@ -250,6 +265,76 @@ def unstructured_code_to_ids(code: np.ndarray) -> np.ndarray:
     if (raw >= EQUAL_BIT_VALID_STATES).any():
         raise ValueError("equal-bit code contains a non-canonical invalid id")
     return raw.astype(np.uint16)
+
+
+def validate_hard_contact_segment_code(
+    code: np.ndarray,
+    *,
+    time_bins: int = 16,
+) -> np.ndarray:
+    """Validate exactly the finite hard semantic grammar emitted by transport.
+
+    The accepted per-query domain is the single canonical absent packet plus
+    every categorical product and valid time/censor state.  This is a decoder,
+    not a logits re-transport check: every value must already be canonical.
+    """
+
+    value = np.asarray(code)
+    if value.ndim < 1 or value.shape[-1] != SEGMENT_TARGET_DIM:
+        raise ValueError(
+            f"hard contact code must end in width {SEGMENT_TARGET_DIM}, got {value.shape}"
+        )
+    if value.dtype.kind != "f":
+        raise TypeError("hard contact code must use a floating dtype")
+    if not np.isfinite(value).all():
+        raise ValueError("hard contact code requires finite values")
+    if np.signbit(value[value == 0]).any():
+        raise ValueError("hard contact code requires canonical positive zero")
+    time_bins = int(time_bins)
+    if time_bins != 16:
+        raise ValueError("the receipt-bound hard grammar validator requires B=16")
+
+    flat = value.reshape(-1, SEGMENT_TARGET_DIM)
+    presence = flat[:, SEGMENT_FIELD_SLICES["presence"]].reshape(-1)
+    if not np.logical_or(presence == 0, presence == 1).all():
+        raise ValueError("hard contact presence must be binary")
+    absent = presence == 0
+    if absent.any() and not (flat[absent, 1:] == 0).all():
+        raise ValueError("absent hard contact packets must be all positive zero")
+
+    present = flat[presence == 1]
+    for field in SEGMENT_CATEGORICAL_FIELDS:
+        field_value = present[:, SEGMENT_FIELD_SLICES[field]]
+        if not np.logical_or(field_value == 0, field_value == 1).all() or not (
+            field_value.sum(axis=-1) == 1
+        ).all():
+            raise ValueError(f"hard contact field {field!r} must be exactly one-hot")
+    for field in ("left_censored", "right_censored"):
+        field_value = present[:, SEGMENT_FIELD_SLICES[field]]
+        if not np.logical_or(field_value == 0, field_value == 1).all():
+            raise ValueError(f"hard contact field {field!r} must be binary")
+
+    if present.size:
+        lattice = (
+            np.arange(time_bins, dtype=value.dtype)
+            / np.asarray(time_bins - 1, dtype=value.dtype)
+        )
+        start = present[:, SEGMENT_FIELD_SLICES["start_tau"]].reshape(-1)
+        end = present[:, SEGMENT_FIELD_SLICES["end_tau"]].reshape(-1)
+        if not (start[:, None] == lattice[None, :]).any(axis=-1).all() or not (
+            end[:, None] == lattice[None, :]
+        ).any(axis=-1).all():
+            raise ValueError("hard contact times must lie exactly on the B=16 lattice")
+        left = present[:, SEGMENT_FIELD_SLICES["left_censored"]].reshape(-1).astype(bool)
+        right = present[:, SEGMENT_FIELD_SLICES["right_censored"]].reshape(-1).astype(bool)
+        if (left & (start != 0)).any():
+            raise ValueError("left-censored hard contacts require start_tau=+0")
+        if (right & (end != 1)).any():
+            raise ValueError("right-censored hard contacts require end_tau=1")
+        uncensored = ~(left | right)
+        if (uncensored & (start > end)).any():
+            raise ValueError("uncensored hard contacts require start_tau<=end_tau")
+    return value
 
 
 def contact_transport_capacity_metadata(

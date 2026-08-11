@@ -10,6 +10,7 @@ import ast
 import hashlib
 import inspect
 from pathlib import Path
+import subprocess
 import types
 from typing import Any
 
@@ -19,10 +20,12 @@ import torch
 from world_action_model.contact_route_contract import (
     ContactCausalRoute,
     canonical_json_bytes,
+    contact_packet_receipt,
     contact_route_metadata,
     resolve_contact_causal_route,
     sha256_json,
     validate_contact_route_model_config,
+    validate_spec_only_trainer_route_config,
 )
 from world_action_model.contact_transition_schema import (
     EQUAL_BIT_MIXING_MATRIX,
@@ -36,14 +39,20 @@ from world_action_model.contact_transition_schema import (
     unstructured_capacity_metadata,
     unstructured_code_to_ids,
     unstructured_ids_to_code,
+    validate_hard_contact_segment_code,
+    validated_equal_bit_mixing_matrix,
 )
+from world_action_model.matched_control_hashes import IMPLEMENTED_RUNNER_VARIANTS
 from world_action_model.models.transformer_wa_casual_mot import (
     CasualWorldActionTransformer_MoT,
     build_mot_attention_mask,
 )
+from world_action_model.contact_supervision_contract import (
+    validate_positive_contact_supervision,
+)
 
 
-AUDIT_VERSION = "contact_causal_route_cpu_audit_v1"
+AUDIT_VERSION = "contact_causal_route_cpu_audit_v2"
 AUDIT_SEED = 38_202_608_11
 CLAMP_TOLERANCE = 1e-6
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -222,6 +231,273 @@ def _equal_packets() -> tuple[torch.Tensor, torch.Tensor]:
     return first, second
 
 
+def _all_hard_semantic_states_b16() -> np.ndarray:
+    """Enumerate the exact one-query hard semantic grammar (48,673 states)."""
+
+    timing_states = []
+    for start in range(16):
+        for end in range(start, 16):
+            timing_states.append((start, end, 0, 0))
+    timing_states.extend((0, end, 1, 0) for end in range(16))
+    timing_states.extend((start, 15, 0, 1) for start in range(16))
+    timing_states.append((0, 15, 1, 1))
+    states = np.zeros((EQUAL_BIT_VALID_STATES, SEGMENT_TARGET_DIM), dtype=np.float32)
+    cursor = 1
+    for side in range(3):
+        for site in range(6):
+            for role in range(4):
+                for mode in range(4):
+                    for start, end, left, right in timing_states:
+                        row = states[cursor]
+                        row[SEGMENT_FIELD_SLICES["presence"]] = 1
+                        row[SEGMENT_FIELD_SLICES["side"].start + side] = 1
+                        row[SEGMENT_FIELD_SLICES["site"].start + site] = 1
+                        row[SEGMENT_FIELD_SLICES["object_role"].start + role] = 1
+                        row[SEGMENT_FIELD_SLICES["contact_mode"].start + mode] = 1
+                        row[SEGMENT_FIELD_SLICES["start_tau"]] = start / 15.0
+                        row[SEGMENT_FIELD_SLICES["end_tau"]] = end / 15.0
+                        row[SEGMENT_FIELD_SLICES["left_censored"]] = left
+                        row[SEGMENT_FIELD_SLICES["right_censored"]] = right
+                        cursor += 1
+    if cursor != EQUAL_BIT_VALID_STATES:
+        raise AssertionError("hard semantic grammar enumeration count differs")
+    return states
+
+
+def _cache_domain_audit(
+    model: CasualWorldActionTransformer_MoT,
+    cache: dict[str, Any],
+    route: ContactCausalRoute,
+) -> dict[str, bool]:
+    packet_key = (
+        "contact_code"
+        if route is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST
+        else "contact_semantic"
+    )
+    original = cache[packet_key]
+    checks: dict[str, bool] = {}
+
+    def reject(name: str, packet: torch.Tensor, *, self_consistent: bool = False) -> None:
+        probe = dict(cache)
+        probe[packet_key] = packet
+        if self_consistent:
+            probe["contact_packet_receipt"] = contact_packet_receipt(
+                route_receipt=model.contact_route_metadata,
+                packet_bytes=model._canonical_packet_bytes(packet),
+                packet_dtype=str(packet.dtype),
+                packet_shape=tuple(packet.shape),
+            )
+        try:
+            model._validate_contact_action_only_cache(probe)
+        except RuntimeError:
+            checks[name] = True
+        else:
+            raise AssertionError(f"cache domain accepted negative case {name}")
+
+    reject("wrong_shape_rejected", original[..., :-1])
+    reject("wrong_dtype_rejected", original.to(torch.float64))
+    bad = original.clone()
+    bad.reshape(-1)[0] = float("nan")
+    reject("nonfinite_rejected", bad)
+    bad = original.clone()
+    zero_index = torch.nonzero(bad == 0, as_tuple=False)[0]
+    bad[tuple(zero_index)] = -0.0
+    reject("signed_negative_zero_rejected", bad)
+
+    if route is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST:
+        bad = original.clone()
+        bad[0, 0, 0] = 0.5
+        reject("fractional_bit_rejected", bad)
+        bad = original.clone()
+        bad[0, 0, EQUAL_BIT_NUM_BITS] = 1
+        reject("nonzero_padding_rejected", bad)
+        bad = original.clone()
+        raw_invalid = EQUAL_BIT_VALID_STATES
+        bad[0, 0, :EQUAL_BIT_NUM_BITS] = torch.tensor(
+            [(raw_invalid >> bit) & 1 for bit in range(EQUAL_BIT_NUM_BITS)],
+            dtype=bad.dtype,
+        )
+        reject("invalid_little_endian_id_rejected", bad)
+        valid_changed = _equal_packets()[1].to(dtype=original.dtype)
+    else:
+        valid = _semantic_packets()[1].to(dtype=original.dtype)
+        bad = valid.clone()
+        bad[0, 0, SEGMENT_FIELD_SLICES["presence"]] = 0.5
+        reject("nonbinary_presence_rejected", bad)
+        bad = original.clone()
+        bad[0, 0, SEGMENT_FIELD_SLICES["side"].start] = 1
+        reject("noncanonical_absent_rejected", bad)
+        bad = valid.clone()
+        bad[0, 0, SEGMENT_FIELD_SLICES["side"]] = 0
+        reject("categorical_not_one_hot_rejected", bad)
+        bad = valid.clone()
+        bad[0, 0, SEGMENT_FIELD_SLICES["side"].start + 1] = 1
+        reject("categorical_multi_hot_rejected", bad)
+        bad = valid.clone()
+        bad[0, 0, SEGMENT_FIELD_SLICES["start_tau"]] = 0.1
+        reject("off_lattice_tau_rejected", bad)
+        bad = valid.clone()
+        bad[0, 0, SEGMENT_FIELD_SLICES["start_tau"]] = 1
+        bad[0, 0, SEGMENT_FIELD_SLICES["end_tau"]] = 0
+        reject("unordered_uncensored_tau_rejected", bad)
+        bad = valid.clone()
+        bad[0, 0, SEGMENT_FIELD_SLICES["left_censored"]] = 1
+        bad[0, 0, SEGMENT_FIELD_SLICES["start_tau"]] = 1
+        reject("left_censor_tau_mismatch_rejected", bad)
+        bad = valid.clone()
+        bad[0, 0, SEGMENT_FIELD_SLICES["right_censored"]] = 1
+        bad[0, 0, SEGMENT_FIELD_SLICES["end_tau"]] = 0
+        reject("right_censor_tau_mismatch_rejected", bad)
+        valid_changed = valid
+
+    changed = dict(cache)
+    changed["contact_packet_receipt"] = dict(cache["contact_packet_receipt"])
+    changed["contact_packet_receipt"]["packet_bytes_sha256"] = "0" * 64
+    try:
+        model._validate_contact_action_only_cache(changed)
+    except RuntimeError:
+        checks["receipt_payload_tamper_rejected"] = True
+    else:
+        raise AssertionError("cache accepted a tampered packet receipt")
+    reject(
+        "self_consistent_replacement_rejected_by_model_receipt",
+        valid_changed,
+        self_consistent=True,
+    )
+    return checks
+
+
+def _matrix_checkpoint_audit() -> dict[str, bool]:
+    model = _tiny_model(ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST)
+    state = model.state_dict()
+    if "equal_bit_mixing_matrix" in state:
+        raise AssertionError("equal-bit matrix leaked into state_dict")
+    injected = dict(state)
+    injected["equal_bit_mixing_matrix"] = torch.zeros(16, 22)
+    try:
+        model.load_state_dict(injected, strict=True)
+    except RuntimeError:
+        strict_key_rejected = True
+    else:
+        raise AssertionError("strict state load accepted a mutable matrix key")
+    with torch.no_grad():
+        model.equal_bit_mixing_matrix[0, 0] *= -1
+    try:
+        model.transport_unstructured_contact_logits(torch.zeros(1, 12, 22))
+    except RuntimeError:
+        mutation_rejected = True
+    else:
+        raise AssertionError("runtime matrix mutation did not invalidate transport")
+    with torch.no_grad():
+        model.equal_bit_mixing_matrix.copy_(
+            torch.from_numpy(validated_equal_bit_mixing_matrix())
+        )
+    model.transport_unstructured_contact_logits(torch.zeros(1, 12, 22))
+    model.contact_route_metadata = dict(model.contact_route_metadata)
+    model.contact_route_metadata["equal_bit_mixing_matrix_sha256"] = "0" * 64
+    try:
+        model.transport_unstructured_contact_logits(torch.zeros(1, 12, 22))
+    except RuntimeError:
+        route_metadata_mutation_rejected = True
+    else:
+        raise AssertionError("runtime route receipt mutation did not invalidate transport")
+    model.contact_route_metadata = contact_route_metadata(
+        ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST,
+        num_queries=12,
+        time_bins=16,
+    )
+    model.transport_unstructured_contact_logits(torch.zeros(1, 12, 22))
+    return {
+        "nonpersistent_state_dict": True,
+        "strict_mutable_matrix_key_rejected": strict_key_rejected,
+        "runtime_matrix_mutation_rejected": mutation_rejected,
+        "source_reset_validated": True,
+        "runtime_route_metadata_mutation_rejected": route_metadata_mutation_rejected,
+        "source_route_metadata_reset_validated": True,
+    }
+
+
+def _trainer_fail_closed_audit() -> dict[str, bool | int]:
+    route = ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST.value
+    base = {
+        "contact_causal_route": route,
+        "contact_loss_weight": 0.25,
+        "contact_schema_version": "contact_segment_v1_1",
+        "contact_condition_mode": "predicted",
+        "require_contact_targets": True,
+        "require_positive_contact_supervision": True,
+        "transformer": {
+            "contact_causal_route": route,
+            "contact_semantic_bottleneck": True,
+            "contact_semantic_transport_mode": "hard_st",
+        },
+    }
+    if validate_spec_only_trainer_route_config(base) is not ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST:
+        raise AssertionError("valid spec trainer route did not resolve")
+    checks: dict[str, bool | int] = {"matched_route_accepted": True}
+
+    cases = {}
+    case = {**base, "contact_causal_route": ContactCausalRoute.HARD_ST_SEMANTIC.value}
+    cases["route_mismatch_rejected"] = case
+    case = dict(base)
+    case.pop("contact_causal_route")
+    cases["missing_top_route_rejected"] = case
+    case = {**base, "transformer": dict(base["transformer"])}
+    case["transformer"].pop("contact_causal_route")
+    cases["missing_transformer_route_rejected"] = case
+    for label, weight in (("zero_weight_rejected", 0.0), ("nan_weight_rejected", float("nan"))):
+        cases[label] = {**base, "contact_loss_weight": weight}
+    for label, config in cases.items():
+        try:
+            validate_spec_only_trainer_route_config(config)
+        except ValueError:
+            checks[label] = True
+        else:
+            raise AssertionError(f"trainer contract accepted negative case {label}")
+    target = torch.zeros(1, 12, SEGMENT_TARGET_DIM)
+    try:
+        validate_positive_contact_supervision(target, torch.zeros_like(target))
+    except ValueError:
+        checks["all_zero_mask_rejected"] = True
+    else:
+        raise AssertionError("all-zero contact mask was audited as positive")
+    checks["positive_mask_count"] = validate_positive_contact_supervision(
+        target, torch.ones_like(target)
+    )
+    return checks
+
+
+def _production_non_admission_audit() -> dict[str, Any]:
+    expected = ("soft_semantic", "hard_st", "hard_detached")
+    exact_runner_set = tuple(IMPLEMENTED_RUNNER_VARIANTS) == expected
+    protected_paths = (
+        "world_action_model/matched_control_hashes.py",
+        "world_action_model/matched_control_config.py",
+        "world_action_model/contact_asym25_preflight.py",
+        "world_action_model/contact_asym25_checkpoint_acceptance.py",
+        "scripts/preflight_contact_asym25_finetune.py",
+        "configs/giga_world_policy_0_5_sonic_g1_asymmetric25_contact_finetune.py",
+        "configs/contact_asym25_training_gate.template.json",
+        "configs/contact_asym25_gate_reviewer_acceptance.template.json",
+    )
+    result = subprocess.run(
+        ["git", "diff", "--quiet", LEGACY_GOLDEN_BASELINE_COMMIT, "--", *protected_paths],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+    )
+    gate_zero_diff = result.returncode == 0
+    if not exact_runner_set or not gate_zero_diff:
+        raise AssertionError("spec routes changed production runner admission/gate files")
+    return {
+        "production_runner_exact_set": list(expected),
+        "production_runner_exact_set_unchanged": exact_runner_set,
+        "production_gate_protected_paths": list(protected_paths),
+        "production_gate_zero_diff_from_baseline": gate_zero_diff,
+        "report_is_not_admission": True,
+        "production_admitted": False,
+    }
+
+
 def _mask_audit() -> dict[str, Any]:
     direct = build_mot_attention_mask(
         2, 3, 1, 1, 1, 2, torch.device("cpu"), torch.float32,
@@ -310,7 +586,7 @@ def _codec_audit(equal_model) -> dict[str, Any]:
     semantic = dict(
         contact_transport_capacity_metadata(mode="hard_st", time_bins=16, num_queries=12)
     )
-    matrix = np.asarray(EQUAL_BIT_MIXING_MATRIX, dtype=np.int8)
+    matrix = validated_equal_bit_mixing_matrix()
     if np.linalg.matrix_rank(matrix.astype(np.float64)) != EQUAL_BIT_NUM_BITS:
         raise AssertionError("fixed equal-bit mixing matrix is not full row rank")
     matrix_sha = hashlib.sha256(matrix.tobytes(order="C")).hexdigest()
@@ -324,6 +600,20 @@ def _codec_audit(equal_model) -> dict[str, Any]:
     unique_forward_states = int(np.unique(row_bytes).size)
     legal_ids = np.arange(EQUAL_BIT_VALID_STATES, dtype=np.uint16)
     legal_roundtrip = unstructured_code_to_ids(unstructured_ids_to_code(legal_ids))
+    signed_zero_code = unstructured_ids_to_code([0])
+    signed_zero_code[0, -1] = -0.0
+    try:
+        unstructured_code_to_ids(signed_zero_code)
+    except ValueError:
+        pure_decoder_signed_zero_rejected = True
+    else:
+        raise AssertionError("pure equal-bit decoder accepted signed negative zero")
+    hard_semantic_states = _all_hard_semantic_states_b16()
+    validate_hard_contact_segment_code(hard_semantic_states, time_bins=16)
+    hard_row_bytes = hard_semantic_states.view(
+        np.dtype((np.void, hard_semantic_states.dtype.itemsize * SEGMENT_TARGET_DIM))
+    )
+    hard_unique_states = int(np.unique(hard_row_bytes).size)
     illegal = codes[EQUAL_BIT_VALID_STATES:]
     zero_code = unstructured_ids_to_code([0])[0]
     raw_bit_matrix = (
@@ -350,6 +640,11 @@ def _codec_audit(equal_model) -> dict[str, Any]:
         ),
         "all_zero_values_positive": bool(not np.signbit(codes[codes == 0]).any()),
         "padding_six_dimensions_zero": bool((codes[..., EQUAL_BIT_NUM_BITS:] == 0).all()),
+        "pure_decoder_signed_zero_rejected": pure_decoder_signed_zero_rejected,
+        "hard_semantic_grammar_unique_states_per_query": hard_unique_states,
+        "hard_semantic_grammar_all_zero_values_positive": bool(
+            not np.signbit(hard_semantic_states[hard_semantic_states == 0]).any()
+        ),
         "exhaustive_model_codec_matches_id_codec": bool(
             np.array_equal(model_codes_array, codes)
         ),
@@ -362,6 +657,8 @@ def _codec_audit(equal_model) -> dict[str, Any]:
     }
     if unique_forward_states != EQUAL_BIT_VALID_STATES:
         raise AssertionError("equal-bit forward alphabet is not exactly 48,673 states")
+    if hard_unique_states != EQUAL_BIT_VALID_STATES:
+        raise AssertionError("hard semantic grammar is not exactly 48,673 states")
     if not checks["exhaustive_model_codec_matches_id_codec"] or not checks[
         "exhaustive_model_codec_byte_exact"
     ]:
@@ -497,12 +794,13 @@ def _ast_route_audit() -> dict[str, Any]:
     leaked_identifiers = sorted(identifier_names.intersection(forbidden))
     if leaked_parameters or leaked_identifiers:
         raise AssertionError("raw planner/reference identifier enters encode_action_tokens")
+    passed = not leaked_parameters and not leaked_identifiers
     return {
         "function": "CasualWorldActionTransformer_MoT.encode_action_tokens",
         "parameter_names": sorted(parameter_names),
         "forbidden_parameter_names": sorted(forbidden),
         "forbidden_identifiers_present": [],
-        "passed": True,
+        "passed": passed,
     }
 
 
@@ -666,6 +964,7 @@ def _strict_route_audit(
         or {"contact_semantic", "contact_logits"}.intersection(cache)
     ):
         raise AssertionError("equal-bit cache contains a raw planner bypass")
+    cache_domain = _cache_domain_audit(model, cache, route)
     tampered_cache = dict(cache)
     tampered_cache["contact_route_receipt_sha256"] = "0" * 64
     try:
@@ -724,10 +1023,124 @@ def _strict_route_audit(
         "cache_keys": sorted(cache),
         "cache_sequence_lengths": cache_sequence_lengths,
         "cache_tamper_rejected": cache_tamper_rejected,
+        "cache_domain_fail_closed": cache_domain,
         "strict_image_condition_rejected": image_condition_rejected,
         "oracle_rejected": oracle_rejected,
         "interpretation": "route_sensitivity_only_not_physical_feasibility",
     }
+
+
+def _reduce_invariant_results(report: dict[str, Any]) -> dict[str, bool]:
+    """Reduce every auditable contract section to named pass/fail invariants."""
+
+    direct = report[ContactCausalRoute.AUX_ONLY_DIRECT_Q12.value]
+    semantic = report[ContactCausalRoute.HARD_ST_SEMANTIC.value]
+    equal = report[ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST.value]
+    codec = report["codec"]["checks"]
+    legacy = report["legacy_compatibility"]
+    trainer = report["trainer_fail_closed"]
+    production = report["non_admission"]
+    route_receipts_canonical = all(
+        receipt["receipt_sha256"]
+        == sha256_json(
+            {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+        )
+        for receipt in report["route_receipts"].values()
+    )
+    results = {
+        "contract_negative_cases": all(report["contract_fail_closed"].values()),
+        "strict_attention_mask": all(report["attention_mask"].values()),
+        "equal_codec_exact_capacity": (
+            codec["unique_forward_byte_states_per_query"] == EQUAL_BIT_VALID_STATES
+            and codec["hard_semantic_grammar_unique_states_per_query"]
+            == EQUAL_BIT_VALID_STATES
+            and codec["capacity_bits_match_semantic_b16"] <= 1e-9
+        ),
+        "equal_codec_domain_and_gradient": all(
+            bool(codec[name])
+            for name in (
+                "legal_id_roundtrip",
+                "all_invalid_ids_canonicalize_to_zero",
+                "all_zero_values_positive",
+                "padding_six_dimensions_zero",
+                "pure_decoder_signed_zero_rejected",
+                "hard_semantic_grammar_all_zero_values_positive",
+                "exhaustive_model_codec_matches_id_codec",
+                "exhaustive_model_codec_byte_exact",
+                "hard_st_gradient_finite",
+                "hard_st_gradient_nonzero",
+                "forward_values_binary",
+                "forward_padding_positive_zero",
+                "nan_inf_rejected",
+            )
+        ),
+        "matrix_checkpoint_runtime_bound": all(report["matrix_checkpoint"].values()),
+        "legacy_bitwise_and_state_dict": (
+            all(legacy[name]["bitwise_equal"] for name in ("soft", "hard_st", "hard_detached"))
+            and all(
+                legacy[name]["state_dict_keys_sha256"] == LEGACY_STATE_DICT_KEYS_SHA256
+                for name in ("soft", "hard_st", "hard_detached")
+            )
+            and legacy["hard_forward_packets_bitwise_equal"]
+            and legacy["hard_st_gradient_finite"]
+            and legacy["hard_detached_gradient_blocked"]
+        ),
+        "no_raw_parameter_route": bool(report["ast_parameter_route"]["passed"]),
+        "direct_planner_action_invariant": (
+            direct["planner_perturb_action_max_abs"] == 0.0
+            and direct["planner_perturb_contact_aux_max_abs"] > 0.0
+            and not direct["action_loss_planner_nonzero_grad_parameters"]
+            and direct["cached_uncached_action_max_abs"] <= CLAMP_TOLERANCE
+            and direct["cache_tamper_rejected"]
+            and direct["oracle_rejected"]
+        ),
+        "hard_semantic_strict_route": (
+            semantic["fixed_packet_changed_reference_action_max_abs"] <= CLAMP_TOLERANCE
+            and semantic["fixed_packet_changed_future_action_max_abs"] <= CLAMP_TOLERANCE
+            and semantic["packet_intervention_action_max_abs"] > 0.0
+            and semantic["action_loss_planner_finite_nonzero_gradient_parameters"] > 0
+            and semantic["cached_uncached_action_max_abs"] <= CLAMP_TOLERANCE
+            and semantic["cache_tamper_rejected"]
+            and semantic["strict_image_condition_rejected"]
+            and all(semantic["cache_domain_fail_closed"].values())
+        ),
+        "equal_bit_strict_route": (
+            equal["fixed_packet_changed_reference_action_max_abs"] <= CLAMP_TOLERANCE
+            and equal["fixed_packet_changed_future_action_max_abs"] <= CLAMP_TOLERANCE
+            and equal["packet_intervention_action_max_abs"] > 0.0
+            and equal["action_loss_planner_finite_nonzero_gradient_parameters"] > 0
+            and equal["cached_uncached_action_max_abs"] <= CLAMP_TOLERANCE
+            and equal["cache_tamper_rejected"]
+            and equal["strict_image_condition_rejected"]
+            and equal["oracle_rejected"]
+            and all(equal["cache_domain_fail_closed"].values())
+        ),
+        "trainer_route_weight_and_mask_fail_closed": (
+            all(bool(value) for name, value in trainer.items() if name != "positive_mask_count")
+            and trainer["positive_mask_count"] > 0
+        ),
+        "production_exact_set_gate_zero_diff": (
+            production["production_runner_exact_set_unchanged"]
+            and production["production_gate_zero_diff_from_baseline"]
+            and production["report_is_not_admission"]
+            and not production["production_admitted"]
+        ),
+        "route_receipt_binds_actual_equal_codec_matrix": (
+            report["route_receipts"][
+                ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST.value
+            ]["equal_bit_mixing_matrix_sha256"]
+            == EQUAL_BIT_MIXING_MATRIX_SHA256
+            and report["route_receipts"][
+                ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST.value
+            ]["capacity"]["mixing_matrix_sha256"]
+            == EQUAL_BIT_MIXING_MATRIX_SHA256
+        ),
+        "config_and_route_receipt_hashes_recomputed": (
+            report["config_receipt_sha256"] == sha256_json(report["config_receipt"])
+            and route_receipts_canonical
+        ),
+    }
+    return {name: bool(value) for name, value in results.items()}
 
 
 def run_contact_route_cpu_audit() -> dict[str, Any]:
@@ -761,6 +1174,7 @@ def run_contact_route_cpu_audit() -> dict[str, Any]:
                 "configs/giga_world_policy_0_5_sonic_g1_contact_causal_controls.py",
                 "world_action_model/contact_transition_schema.py",
                 "world_action_model/contact_route_contract.py",
+                "world_action_model/contact_supervision_contract.py",
                 "world_action_model/contact_route_audit.py",
                 "world_action_model/models/transformer_wa_casual_mot.py",
                 "world_action_model/trainer/wa_casual_trainer_mot.py",
@@ -771,7 +1185,7 @@ def run_contact_route_cpu_audit() -> dict[str, Any]:
     report = {
         "audit_version": AUDIT_VERSION,
         "scope": "cpu_route_mechanics_only_no_benefit_or_physics_claim",
-        "passed": True,
+        "admission_scope": "audit_report_is_evidence_only_never_production_admission",
         "config_receipt": config_receipt,
         "config_receipt_sha256": sha256_json(config_receipt),
         "route_receipts": route_receipts,
@@ -781,6 +1195,9 @@ def run_contact_route_cpu_audit() -> dict[str, Any]:
         "contract_fail_closed": _contract_fail_closed_audit(),
         "attention_mask": _mask_audit(),
         "codec": _codec_audit(equal_model),
+        "matrix_checkpoint": _matrix_checkpoint_audit(),
+        "trainer_fail_closed": _trainer_fail_closed_audit(),
+        "non_admission": _production_non_admission_audit(),
         "legacy_compatibility": _legacy_compatibility_audit(inputs),
         "ast_parameter_route": _ast_route_audit(),
         "aux_only_direct_q12": _direct_route_audit(inputs),
@@ -791,5 +1208,7 @@ def run_contact_route_cpu_audit() -> dict[str, Any]:
             ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST, inputs
         ),
     }
+    report["invariant_results"] = _reduce_invariant_results(report)
+    report["passed"] = all(report["invariant_results"].values())
     report["report_sha256"] = hashlib.sha256(canonical_json_bytes(report)).hexdigest()
     return report
