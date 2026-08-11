@@ -21,6 +21,8 @@ transformer_pretrained = _required("GWP05_TRANSFORMER_PRETRAINED")
 wan_pretrained = _env("GWP_WAN_PRETRAINED", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 project_dir = _env("GWP05_PROJECT_DIR", "outputs/gwp0_5_sonic_g1_finetune")
 gpu_ids = [int(x) for x in _env("GWP_GPU_IDS", "0,1,2,3").split(",")]
+physical_action_dim = int(_env("GWP_PHYSICAL_ACTION_DIM", "30"))
+image_augmentation_enabled = _env("GWP_IMAGE_AUGMENTATION", "1") == "1"
 view_keys = ["observation.images.ego_view"]
 image_frame_offsets = [0, 12, 24, 36, 48]
 
@@ -79,7 +81,7 @@ config = dict(
                 robotype_to_embodiment_id={"sonic_g1": 0},
                 robotype_default_embodiment_id=0,
                 model_action_dim=32,
-                delta_mask_by_embodiment_id={"0": [False] * 30},
+                delta_mask_by_embodiment_id={"0": [False] * physical_action_dim},
                 norm_use_quantiles=True,
                 # This small dataset has near-constant 6D rotation components;
                 # clamp quantile normalization so rare floating-point tails do
@@ -95,7 +97,7 @@ config = dict(
                 # Hue and horizontal flips are intentionally disabled because
                 # bottle color and left/right arm identity are task semantics.
                 image_augmentation=dict(
-                    enabled=True,
+                    enabled=image_augmentation_enabled,
                     crop_scale=0.95,
                     rotation_degrees=5.0,
                     brightness=0.3,
