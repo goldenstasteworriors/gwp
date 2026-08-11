@@ -2836,6 +2836,8 @@ def run_serialized_full_evaluator_acceptance(
         / "third_party/giga-datasets/giga_datasets/datasets",
         "world_action_model.datasets": repository_root
         / "world_action_model/datasets",
+        "world_action_model.transforms": repository_root
+        / "world_action_model/transforms",
     }
     for name, source in package_init_stubs.items():
         if name in sys.modules:
@@ -2845,6 +2847,17 @@ def run_serialized_full_evaluator_acceptance(
         module = types.ModuleType(name)
         module.__path__ = [str(source)]
         sys.modules[name] = module
+    if "giga_train" in sys.modules:
+        raise RuntimeError("full evaluator imported giga_train too early")
+
+    class _ImportOnlyRegistry:
+        @staticmethod
+        def register(value):
+            return value
+
+    giga_train_stub = types.ModuleType("giga_train")
+    giga_train_stub.TRANSFORMS = _ImportOnlyRegistry()
+    sys.modules["giga_train"] = giga_train_stub
 
     from world_action_model.contact_causal_heldout_eval import (
         build_aggregate_v5,
@@ -2960,6 +2973,9 @@ def run_serialized_full_evaluator_acceptance(
             name: "package_init_only; actual target/core submodules loaded from path"
             for name in package_init_stubs
         },
+        "giga_train_stub_scope": (
+            "TRANSFORMS registration import only; actual transform methods executed"
+        ),
     }
     _write_json(Path(output_path), report)
     return report
