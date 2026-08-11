@@ -1,11 +1,11 @@
 # Idea C：visibility-gated boundary/rim/liquid/stream/contact auxiliary 与 censored contact events
 
-> 日期：2026-08-11  
-> 分支：`codex/idea-c-visibility-contact-aux-20260811`  
-> 基线提交：`d9234a6f5566c6d22f0ca8ca5d39988de1fe0e88`  
-> idea_id：`5757566f-4c34-4cf1-aecf-0dfac76a8ab9`  
-> discussion_id（最近一次）：`e1e27a11-cb4b-4ac8-bef8-28dd3e51f634`  
-> 初次 discussion_id：`7ef28570-2d28-45c8-8b9b-8e9d74fcb3cf`  
+> 日期：2026-08-11
+> 分支：`codex/idea-c-visibility-contact-aux-20260811`
+> 基线提交：`d9234a6f5566c6d22f0ca8ca5d39988de1fe0e88`
+> idea_id：`5757566f-4c34-4cf1-aecf-0dfac76a8ab9`
+> discussion_id（最近一次）：`e1e27a11-cb4b-4ac8-bef8-28dd3e51f634`
+> 初次 discussion_id：`7ef28570-2d28-45c8-8b9b-8e9d74fcb3cf`
 > 决策：**训练 / 论文主张 No-Go；仅“正式标注审计 + oracle ceiling 设计”Conditional Go。**
 
 ## 1. 一句话结论
@@ -439,4 +439,3 @@ finite grammar 负责“谁与谁、哪个 functional site、哪种 contact mode
 | sim oracle 准备度 | No-Go：spec 完整但资产、adapter、GPU PBD、标定 receipt 不齐 |
 | 与主 finite-contact WAM 的兼容性 | 有条件兼容：aux 必须 training-only，动作仍只读 hard 22-D grammar |
 | 总决策 | **No-Go for training/claim；Conditional Go for annotation + oracle audit only** |
-
