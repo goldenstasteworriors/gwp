@@ -1,0 +1,160 @@
+{
+  "schema_version": "wam-sim-oracle-local-readiness/v1",
+  "audit_id": "op33-local-readiness-20260811",
+  "audited_at_local_date": "2026-08-11",
+  "audit_method": "filesystem and package-metadata inspection only; no simulator import, launch, render, physics step, package installation, GPU query, or GPU workload",
+  "overall_status": "no_go",
+  "allowed_now": [
+    "spec_generation",
+    "schema_validation",
+    "synthetic_metric_verifier_test"
+  ],
+  "prohibited_now": [
+    "simulation_launch",
+    "fluid_rollout",
+    "gpu_use",
+    "training",
+    "claiming_any_simulated_result"
+  ],
+  "engines": [
+    {
+      "id": "isaac_sim_5_1",
+      "local_probe": {
+        "environment": "/home/ykj/miniconda3/envs/isaacsim5.1",
+        "package": "isaacsim",
+        "version": "5.1.0.0",
+        "isaaclab_distribution_version": "0.47.2",
+        "probe_type": "importlib.metadata_only"
+      },
+      "documented_capabilities": {
+        "rigid_contacts": true,
+        "contact_points_normals_impulses": true,
+        "rgb_depth_instance_segmentation": true,
+        "pbd_particle_liquid": true,
+        "viscosity_parameter": true,
+        "particle_cpu_supported": false
+      },
+      "status": "conditional_no_go",
+      "blockers": [
+        "Official PBD particle documentation requires GPU simulation; GPU use was explicitly forbidden for this audit.",
+        "No exact left-RH56DFTP/right-OmniPicker assembled asset was found.",
+        "No benchmark adapter exports same-state liquid flux, contained volume, stream occupancy, and mass residual.",
+        "No transparent/opaque vessel pair has been checked for watertight collision interiors or liquid containment.",
+        "No same-state RGB/depth/segmentation/contact synchronization receipt exists."
+      ]
+    },
+    {
+      "id": "mujoco_3_5",
+      "local_probe": {
+        "environment": "/home/ykj/miniconda3",
+        "package": "mujoco",
+        "version": "3.5.0",
+        "probe_type": "importlib.metadata_only"
+      },
+      "documented_capabilities": {
+        "rigid_contacts": true,
+        "contact_points_and_forces": true,
+        "urdf_mjcf_loading": true,
+        "flex_deformables": true,
+        "native_viscous_free_surface_liquid_for_pour_benchmark": false
+      },
+      "status": "no_go_for_liquid_oracle",
+      "blockers": [
+        "The audited official MuJoCo model reference documents rigid contact and flex/deformable elements, not a native viscosity-controlled free-surface liquid path with flux and contained-volume truth.",
+        "Available G1 MJCF/URDF files do not contain the required asymmetric hand assembly.",
+        "A particle approximation built ad hoc would not be accepted as a validated liquid oracle."
+      ]
+    },
+    {
+      "id": "genesis_world",
+      "local_probe": {
+        "environment": null,
+        "package": "genesis-world",
+        "version": null,
+        "probe_type": "importlib.util.find_spec_and_conda_inventory",
+        "installed": false
+      },
+      "documented_capabilities": {
+        "rigid_contacts": true,
+        "sph_mpm_pbd_liquid": true,
+        "particle_emitters": true,
+        "contact_force_and_tactile_sensors": true
+      },
+      "status": "not_evaluable_locally",
+      "blockers": [
+        "No local installation was found and installation was forbidden.",
+        "No exact asymmetric G1 asset or validated vessel/liquid scene was found for this engine.",
+        "Documented capability is not a project-specific validation receipt."
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "id": "unitree_g1_dual_inspire_usd",
+      "path": "/home/ykj/project/lab/sim_data_collect/third_party/unitree_sim_isaaclab/assets/robots/g1-29dof-inspire-base-fix-usd/g1_29dof_with_inspire_rev_1_0.usd",
+      "sha256": "366f6257af7a6a96c5239cc59b75669c5d466f2763ef4d6acad74b2842674028",
+      "size_bytes": 40069859,
+      "status": "rejected_wrong_embodiment",
+      "reason": "G1 with Inspire hands; the required right effector is OmniPicker. It cannot be relabeled as OmniPicker."
+    },
+    {
+      "id": "left_inspire_urdf",
+      "path": "/home/ykj/project/lab/sim_data_collect/third_party/xr_teleoperate/assets/inspire_hand/inspire_hand_left.urdf",
+      "sha256": "bfd26847a64b3794aabdeaeda6c790866b5d702c919d765fecf56fb584212367",
+      "size_bytes": 16757,
+      "status": "partial_only",
+      "reason": "Left-hand geometry and joints exist, but no tactile sensor/cell definitions were found and no G1+left-RH56/right-OmniPicker assembly or calibration receipt exists."
+    },
+    {
+      "id": "g1_29dof_urdf",
+      "path": "/home/ykj/project/unitree_rl_gym/resources/robots/g1_description/g1_29dof.urdf",
+      "sha256": "f055210bb33df3513a639573c6886ebd18f52fc70b507ef18930b51efb82cf2e",
+      "size_bytes": 37077,
+      "status": "body_only_partial",
+      "reason": "Useful body model, but not the required calibrated asymmetric end-effector assembly."
+    },
+    {
+      "id": "omnipicker_driver_source",
+      "path": "/home/ykj/project/jc01/jc_driver/drivers/omnipicker/omnipicker.cpp",
+      "sha256": "62d5642331930efbc0f62a110de6ad6c519dd4eab3c334ed78e93f04fbbd6459",
+      "size_bytes": 3616,
+      "status": "not_a_sim_asset",
+      "reason": "Driver code provides no link geometry, collision meshes, inertias, joint limits, transmission, or wrist transform."
+    },
+    {
+      "id": "labutopia_beaker_01_usd",
+      "path": "/home/ykj/project/lab/sim_data_collect/assets/labutopia/Beaker_01.usd",
+      "sha256": "30fbe68518083a7923d24a9547b56b54584c67c00012efb5c58c2026bd674120",
+      "size_bytes": 159357,
+      "status": "visual_rigid_candidate_only",
+      "reason": "Single beaker asset; no audited transparent/opaque pair, watertight interior, rim semantic geometry, volume calibration, or liquid containment receipt."
+    }
+  ],
+  "local_project_evidence": [
+    {
+      "repository": "/home/ykj/project/lab/sim_data_collect",
+      "git_head": "768b10fd38893e3843a268b56efaa72899953c23",
+      "finding": "Current custom task is right-arm/right-Inspire single-beaker grasping; it is not asymmetric bimanual pouring."
+    },
+    {
+      "repository": "/home/ykj/project/lab/sim_data_collect/third_party/LabUtopia",
+      "git_head": "8df72784265c375a327ffa3f0a0cf8c676f229a7",
+      "finding": "PourController advances a wrist-joint state machine and declares completion by pose/time; audited code exposes no liquid particles, flux, viscosity, contained volume, spill, or mass conservation state."
+    },
+    {
+      "repository": "/home/ykj/project/lab/sim_data_collect/third_party/unitree_sim_isaaclab",
+      "git_head": "e30c25b1dffdf92ada1d6c8c1fe9a47bdde0fecc",
+      "finding": "Provides G1+Inspire assets/tasks, not the exact asymmetric assembly."
+    }
+  ],
+  "minimum_reopen_gates": [
+    "Obtain an authoritative OmniPicker URDF/USD/MJCF or CAD-derived model with license, two-jaw collision geometry, inertias, aperture joint semantics, limits, and G1 right-wrist transform.",
+    "Assemble G1 + left RH56DFTP + right OmniPicker without modifying source assets in place; record every source hash and conversion tool/version.",
+    "Add RH56 link-level contact regions; do not claim tactile-cell simulation unless a calibrated taxel model and real/sim mapping are supplied.",
+    "Provide two source and two target vessel instances covering transparent and opaque materials, each with watertight collision interior, rim semantic curve, calibrated capacity, and scale receipt.",
+    "Implement a native liquid adapter that exports particle/cell state, viscosity, source-rim flux, contained volumes, outside volume, and mass residual at native physics rate.",
+    "Prove same-state RGB/depth/instance/contact/liquid outputs and camera-state skew <=0.005 s.",
+    "Run engine verification only after explicit authorization for the required simulator/GPU environment; this audit grants none.",
+    "Pass execution-mode validation before producing any benchmark rollout or WAM oracle claim."
+  ]
+}
