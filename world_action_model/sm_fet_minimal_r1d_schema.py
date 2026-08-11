@@ -12,6 +12,7 @@ clamped, modulo-reduced, or completion-filled data.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, IntEnum
@@ -54,9 +55,11 @@ PUBLIC_STATE_BYTES: Final = 226
 SHARED_SEMANTIC_SCHEMA_ID: Final = "sm_fet_r1d_shared_semantic_key_v1"
 TEXT_GOAL_SCHEMA_ID: Final = "sm_fet_r1d_text_goal_v1"
 METRIC_MANIFEST_SCHEMA_ID: Final = "sm_fet_r1d_metric_codebook_manifest_v1"
+AXIS_TABLE_UNIT_TOLERANCE: Final = float.fromhex("0x1.0000000000000p-40")
 
 _IDENTIFIER_RE = re.compile(r"^[a-z0-9._/-]{1,64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_FLOAT_HEX_RE = re.compile(r"^-?0x[0-9a-f]+\.[0-9a-f]+p[+-]?[0-9]+$")
 
 
 class SchemaError(ValueError):
@@ -233,7 +236,7 @@ class Locator:
     depth: int
     axis: int = 0
     roll: int = 0
-    primitive: int = 0
+    primitive: PathPrimitive | int = 0
     extent: int = 0
 
 
@@ -289,6 +292,15 @@ class ResourceClaim:
 
 
 @dataclass(frozen=True, slots=True)
+class ResourceValidationContext:
+    controller_target_enums: tuple[int, ...]
+    constant_target_enums: tuple[int, ...]
+    actuator_resource_ids: tuple[int, ...]
+    canonical_bytes: bytes
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class LocatorEvidence:
     """Reviewed evidence used before constructing a hard locator.
 
@@ -301,7 +313,7 @@ class LocatorEvidence:
     depth: int | None
     axis: int | None = None
     roll: int | None = None
-    primitive: int | None = None
+    primitive: PathPrimitive | None = None
     extent: int | None = None
     reviewed_known: bool = False
     expired: bool = False
@@ -331,9 +343,55 @@ class PublicExecutionState:
     sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class PublicStateValidationPolicy:
+    quaternion_unit_tolerance: float
+    public_state_max_age_ns: int
+    verify_position_tolerance_m: float
+    verify_axis_tolerance_rad: float
+    verify_frame_tolerance_rad: float
+    held_binding_kinds: tuple[tuple[int, ...], tuple[int, ...]]
+    canonical_bytes: bytes
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrameBasis:
+    x: tuple[float, float, float]
+    y: tuple[float, float, float]
+    z: tuple[float, float, float]
+
+
+@dataclass(frozen=True, slots=True)
+class RigidTransform:
+    translation: tuple[float, float, float]
+    rotation: FrameBasis
+
+
+@dataclass(frozen=True, slots=True)
+class GoalProjection:
+    kind: LocatorKind
+    position: tuple[float, float, float]
+    axis: tuple[float, float, float] | None = None
+    frame: FrameBasis | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PathPose:
+    parameter: float
+    position: tuple[float, float, float]
+    frame: FrameBasis
+
+
 def _strict_int(value: object, code: str, name: str, *, minimum: int, maximum: int) -> int:
     if type(value) is not int or not minimum <= value <= maximum:
         raise SchemaError(code, f"{name} must be an integer in [{minimum},{maximum}]")
+    return value
+
+
+def _strict_bool(value: object, code: str, name: str) -> bool:
+    if type(value) is not bool:
+        raise SchemaError(code, f"{name} must be bool")
     return value
 
 
@@ -375,10 +433,13 @@ def _validate_locator(locator: Locator, *, verify: bool) -> None:
     for name, value, maximum in (
         ("axis", locator.axis, 512),
         ("roll", locator.roll, 32),
-        ("primitive", locator.primitive, 4),
         ("extent", locator.extent, 8),
     ):
         _strict_int(value, "FIELD_RANGE", f"locator.{name}", minimum=0, maximum=maximum)
+    if locator.primitive != 0 and type(locator.primitive) is not PathPrimitive:
+        raise SchemaError("FIELD_RANGE", "locator.primitive must be PathPrimitive or integer PAD=0")
+    if locator.primitive == 0 and type(locator.primitive) is not int:
+        raise SchemaError("FIELD_RANGE", "locator.primitive PAD must be integer zero")
     if verify and kind is LocatorKind.PATH:
         raise SchemaError("VERIFY_PATH_FORBIDDEN", "VERIFY does not admit PATH")
     canonical = {
@@ -517,7 +578,7 @@ def pack_wire(packet: EventPacket) -> bytes:
 def _wire_enum(enum_type: type[IntEnum], value: int, code: str, name: str) -> IntEnum:
     try:
         return enum_type(value)
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:
         raise SchemaError(code, f"invalid {name} code {value}") from exc
 
 
@@ -548,7 +609,7 @@ def _unpack_constraint(raw: bytes) -> Constraint:
             depth,
             axis,
             roll,
-            primitive,
+            PathPrimitive(primitive) if primitive else 0,
             extent,
         ),
         _wire_enum(Role, secondary, "SECONDARY_RELATION", "secondary role"),
@@ -656,6 +717,7 @@ def unpack_wire(wire: bytes) -> EventPacket:
 
 
 def locator_rank(locator: Locator, *, verify: bool) -> int:
+    _strict_bool(verify, "LOCATOR_KIND", "verify")
     _validate_locator(locator, verify=verify)
     translation = (locator.uv - 1) * 32 + (locator.depth - 1)
     if locator.kind is LocatorKind.POINT:
@@ -679,6 +741,7 @@ def locator_rank(locator: Locator, *, verify: bool) -> int:
 
 
 def unrank_locator(rank: int, *, verify: bool) -> Locator:
+    _strict_bool(verify, "INVALID_LOCATOR_RANK", "verify")
     limit = L_VERIFY if verify else L_NONVERIFY
     _strict_int(rank, "INVALID_LOCATOR_RANK", "locator rank", minimum=0, maximum=limit - 1)
     width = VERIFY_VARIANTS if verify else NONVERIFY_VARIANTS
@@ -711,7 +774,7 @@ def unrank_locator(rank: int, *, verify: bool) -> Locator:
             depth,
             axis=axis_minus_one + 1,
             roll=roll_minus_one + 1,
-            primitive=primitive_minus_one + 1,
+            primitive=PathPrimitive(primitive_minus_one + 1),
             extent=extent_minus_one + 1,
         )
     if locator_rank(locator, verify=verify) != rank:
@@ -741,6 +804,8 @@ def _unrank_secondary(rank: int, primary: Role) -> tuple[Role, Relation]:
 
 
 def payload_rank(constraint: Constraint, *, verify: bool, validated: bool = False) -> int:
+    _strict_bool(verify, "INVALID_PAYLOAD_RANK", "verify")
+    _strict_bool(validated, "INVALID_PAYLOAD_RANK", "validated")
     if not validated:
         _validate_constraint_fields(constraint, verify=verify)
     part_index = 0 if verify else int(constraint.part) - 2
@@ -754,6 +819,9 @@ def payload_rank(constraint: Constraint, *, verify: bool, validated: bool = Fals
 
 
 def unrank_payload(rank: int, constraint_type: ConstraintType, *, verify: bool) -> Constraint:
+    _strict_bool(verify, "INVALID_PAYLOAD_RANK", "verify")
+    if type(constraint_type) is not ConstraintType:
+        raise SchemaError("INVALID_PAYLOAD_RANK", "constraint_type must be ConstraintType")
     limit = V if verify else N
     _strict_int(rank, "INVALID_PAYLOAD_RANK", "payload rank", minimum=0, maximum=limit - 1)
     high, secondary_rank = divmod(rank, 22)
@@ -822,6 +890,7 @@ def unrank_combination(rank: int, cardinality: int) -> tuple[int, int]:
 
 
 def topology_capacity(*, verify: bool, cardinality: int) -> int:
+    _strict_bool(verify, "INVALID_PAYLOAD_RANK", "verify")
     _strict_int(cardinality, "INVALID_PAYLOAD_RANK", "cardinality", minimum=2, maximum=N)
     if verify:
         return 3 * cardinality + 3 * cardinality * cardinality + cardinality * (cardinality - 1)
@@ -829,9 +898,12 @@ def topology_capacity(*, verify: bool, cardinality: int) -> int:
 
 
 def rank_topology(member: TopologyMember, *, verify: bool, cardinality: int) -> int:
+    _strict_bool(verify, "INVALID_PAYLOAD_RANK", "verify")
     topologies = VERIFY_TOPOLOGIES if verify else NONVERIFY_TOPOLOGIES
     if not isinstance(member, TopologyMember) or member.topology not in topologies:
         raise SchemaError("FUNCTION_ASSIGNMENT", "topology is not admitted")
+    if any(type(item) is not ConstraintType for item in member.topology):
+        raise SchemaError("FUNCTION_ASSIGNMENT", "topology members must be ConstraintType")
     if len(member.payload_ranks) != len(member.topology):
         raise SchemaError("INVALID_PAYLOAD_RANK", "payload count differs from topology")
     for rank in member.payload_ranks:
@@ -859,6 +931,7 @@ def rank_topology(member: TopologyMember, *, verify: bool, cardinality: int) -> 
 
 
 def unrank_topology(rank: int, *, verify: bool, cardinality: int) -> TopologyMember:
+    _strict_bool(verify, "INVALID_PAYLOAD_RANK", "verify")
     capacity = topology_capacity(verify=verify, cardinality=cardinality)
     _strict_int(rank, "INVALID_PAYLOAD_RANK", "bundle rank", minimum=0, maximum=capacity - 1)
     topologies = VERIFY_TOPOLOGIES if verify else NONVERIFY_TOPOLOGIES
@@ -1045,6 +1118,21 @@ def profile_bundle_capacity(
             raise SchemaError("PROFILE_COUNT", f"{name} must have exact keys {sorted(expected)}")
         for key, value in mapping.items():
             _strict_int(value, "PROFILE_COUNT", f"{name}.{key}", minimum=0, maximum=MAX_GLOBAL_RANK)
+    for pair, count in compatible_pairs.items():
+        left, right = pair.split("-", 1)
+        maximum = sizes[left] * sizes[right]
+        if count > maximum:
+            raise SchemaError(
+                "PROFILE_COUNT",
+                f"C({left},{right})={count} exceeds |{left}|*|{right}|={maximum}",
+            )
+    for name, count in compatible_unordered.items():
+        maximum = sizes[name] * (sizes[name] - 1) // 2
+        if count > maximum:
+            raise SchemaError(
+                "PROFILE_COUNT",
+                f"U({name})={count} exceeds C(|{name}|,2)={maximum}",
+            )
     if verify:
         return (
             sizes["LS"]
@@ -1184,7 +1272,35 @@ def canonical_json_bytes(value: object) -> bytes:
         raise SchemaError("JSON_TYPE", "value is outside the canonical JSON domain") from exc
 
 
+def parse_strict_json_bytes(raw: bytes) -> object:
+    """Parse UTF-8 JSON while rejecting duplicate properties at every depth."""
+
+    if type(raw) is not bytes:
+        raise SchemaError("JSON_TYPE", "strict JSON input must be bytes")
+
+    def pairs_hook(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise SchemaError("JSON_DUPLICATE_KEY", f"duplicate object property {key!r}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> object:
+        raise SchemaError("JSON_TYPE", f"non-finite JSON constant {value!r}")
+
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        return json.loads(text, object_pairs_hook=pairs_hook, parse_constant=reject_constant)
+    except SchemaError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SchemaError("JSON_TYPE", "invalid UTF-8 JSON bytes") from exc
+
+
 def _exact_dict(value: object, keys: set[str], *, prefix: str) -> dict[str, Any]:
+    if type(value) is bytes:
+        value = parse_strict_json_bytes(value)
     if type(value) is not dict:
         raise SchemaError("JSON_TYPE", f"{prefix} must be a JSON object")
     actual = set(value)
@@ -1312,6 +1428,27 @@ def shared_semantic_key_hash(value: object, *, exhaustive_no_active: bool = Fals
     ).hexdigest()
 
 
+def validate_shared_semantic_key_json(
+    raw: bytes,
+    *,
+    exhaustive_no_active: bool = False,
+) -> bytes:
+    return validate_shared_semantic_key(
+        parse_strict_json_bytes(raw),
+        exhaustive_no_active=exhaustive_no_active,
+    )
+
+
+def shared_semantic_key_hash_json(
+    raw: bytes,
+    *,
+    exhaustive_no_active: bool = False,
+) -> str:
+    return hashlib.sha256(
+        validate_shared_semantic_key_json(raw, exhaustive_no_active=exhaustive_no_active)
+    ).hexdigest()
+
+
 def validate_text_goal(value: object, *, ontology_registry: Mapping[str, str]) -> bytes:
     """Validate text against an immutable ``symbol -> resolver kind`` registry.
 
@@ -1351,6 +1488,16 @@ def text_goal_hash(value: object, *, ontology_registry: Mapping[str, str]) -> st
     return hashlib.sha256(validate_text_goal(value, ontology_registry=ontology_registry)).hexdigest()
 
 
+def validate_text_goal_json(raw: bytes, *, ontology_registry: Mapping[str, str]) -> bytes:
+    return validate_text_goal(parse_strict_json_bytes(raw), ontology_registry=ontology_registry)
+
+
+def text_goal_hash_json(raw: bytes, *, ontology_registry: Mapping[str, str]) -> str:
+    return hashlib.sha256(
+        validate_text_goal_json(raw, ontology_registry=ontology_registry)
+    ).hexdigest()
+
+
 def _float32_values(raw: bytes, count: int, *, context: str) -> tuple[float, ...]:
     if len(raw) != count * 4:
         raise SchemaError("LENGTH", f"{context} float payload has wrong length")
@@ -1373,13 +1520,108 @@ def _validate_quaternion(values: Sequence[float], tolerance: float, *, context: 
         raise SchemaError("STATE_QUATERNION_CANONICAL", f"{context} sign is noncanonical")
 
 
+_PUBLIC_STATE_POLICY_KEYS = {
+    "schema_id",
+    "quaternion_unit_tolerance_hex",
+    "public_state_max_age_ns",
+    "verify_position_tolerance_m_hex",
+    "verify_axis_tolerance_rad_hex",
+    "verify_frame_tolerance_rad_hex",
+    "left_held_binding_kinds",
+    "right_held_binding_kinds",
+}
+
+
+def _positive_canonical_float_hex(value: object, *, name: str) -> float:
+    if type(value) is not str or _FLOAT_HEX_RE.fullmatch(value) is None:
+        raise SchemaError("VALIDATION_POLICY", f"{name} must be canonical binary64 hex")
+    try:
+        decoded = float.fromhex(value)
+    except (ValueError, OverflowError) as exc:
+        raise SchemaError("VALIDATION_POLICY", f"{name} is malformed") from exc
+    if not math.isfinite(decoded) or decoded <= 0.0 or decoded.hex() != value:
+        raise SchemaError("VALIDATION_POLICY", f"{name} is not canonical finite positive binary64")
+    return decoded
+
+
+def validate_public_state_validation_policy(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+) -> PublicStateValidationPolicy:
+    """Validate the immutable policy artifact bound by a static profile receipt."""
+
+    obj = _exact_dict(
+        parse_strict_json_bytes(raw),
+        _PUBLIC_STATE_POLICY_KEYS,
+        prefix="public state validation policy",
+    )
+    if obj["schema_id"] != "sm_fet_r1d_public_state_validation_policy_v1":
+        raise SchemaError("VALIDATION_POLICY", "validation policy schema mismatch")
+    canonical = canonical_json_bytes(obj)
+    digest = hashlib.sha256(canonical).hexdigest()
+    _sha_field(expected_sha256, name="expected validation policy hash", code="VALIDATION_POLICY")
+    if digest != expected_sha256:
+        raise SchemaError("VALIDATION_POLICY", "validation policy hash mismatch")
+    tolerance_names = (
+        "quaternion_unit_tolerance_hex",
+        "verify_position_tolerance_m_hex",
+        "verify_axis_tolerance_rad_hex",
+        "verify_frame_tolerance_rad_hex",
+    )
+    tolerances = tuple(_positive_canonical_float_hex(obj[name], name=name) for name in tolerance_names)
+    max_age_ns = _strict_int(
+        obj["public_state_max_age_ns"],
+        "VALIDATION_POLICY",
+        "public_state_max_age_ns",
+        minimum=0,
+        maximum=(1 << 63) - 1,
+    )
+    kind_lists: list[tuple[int, ...]] = []
+    for name in ("left_held_binding_kinds", "right_held_binding_kinds"):
+        values = obj[name]
+        if type(values) is not list:
+            raise SchemaError("VALIDATION_POLICY", f"{name} must be a sorted integer array")
+        parsed = tuple(
+            _strict_int(value, "VALIDATION_POLICY", name, minimum=1, maximum=255)
+            for value in values
+        )
+        if parsed != tuple(sorted(set(parsed))):
+            raise SchemaError("VALIDATION_POLICY", f"{name} must be sorted and duplicate-free")
+        kind_lists.append(parsed)
+    return PublicStateValidationPolicy(
+        tolerances[0],
+        max_age_ns,
+        tolerances[1],
+        tolerances[2],
+        tolerances[3],
+        (kind_lists[0], kind_lists[1]),
+        canonical,
+        digest,
+    )
+
+
+def _resolve_bound_validation_policy(
+    validation_policy: PublicStateValidationPolicy,
+    profile_receipt: object,
+) -> PublicStateValidationPolicy:
+    if type(validation_policy) is not PublicStateValidationPolicy:
+        raise SchemaError("VALIDATION_POLICY", "validation requires a validated policy")
+    profile = _validated_profile_receipt_object(profile_receipt)
+    if validation_policy.sha256 != profile["public_state_validation_policy_sha256"]:
+        raise SchemaError("VALIDATION_POLICY", "policy is not bound by static profile receipt")
+    return validate_public_state_validation_policy(
+        validation_policy.canonical_bytes,
+        expected_sha256=profile["public_state_validation_policy_sha256"],
+    )
+
+
 def validate_public_execution_state(
     state_bytes: bytes,
     *,
     now_ns: int,
-    max_age_ns: int,
-    quaternion_unit_tolerance: float,
-    allowed_held_binding_kinds: Mapping[Assignment, Collection[int]],
+    validation_policy: PublicStateValidationPolicy,
+    profile_receipt: object,
     expected_sha256: str | None = None,
 ) -> PublicExecutionState:
     """Validate and parse exact ``public_execution_state_v1`` binary bytes."""
@@ -1389,16 +1631,10 @@ def validate_public_execution_state(
     if state_bytes[:9] != PUBLIC_STATE_MAGIC or struct.unpack_from("<H", state_bytes, 9)[0] != 1:
         raise SchemaError("STATE_PAD", "public state magic/version mismatch")
     _strict_int(now_ns, "STATE_STALE", "now_ns", minimum=-(1 << 63), maximum=(1 << 63) - 1)
-    _strict_int(max_age_ns, "STATE_STALE", "max_age_ns", minimum=0, maximum=(1 << 63) - 1)
-    if type(quaternion_unit_tolerance) not in (int, float) or isinstance(
-        quaternion_unit_tolerance, bool
-    ):
-        raise SchemaError("STATE_QUATERNION_CANONICAL", "quaternion tolerance must be finite")
-    tolerance = float(quaternion_unit_tolerance)
-    if not math.isfinite(tolerance) or tolerance <= 0.0:
-        raise SchemaError("STATE_QUATERNION_CANONICAL", "quaternion tolerance must be positive")
+    validation_policy = _resolve_bound_validation_policy(validation_policy, profile_receipt)
+    tolerance = validation_policy.quaternion_unit_tolerance
     anchor = struct.unpack_from("<q", state_bytes, 11)[0]
-    if anchor > now_ns or now_ns - anchor > max_age_ns:
+    if anchor > now_ns or now_ns - anchor > validation_policy.public_state_max_age_ns:
         raise SchemaError("STATE_STALE", "anchor timestamp is future or stale")
     offset = 19
     proprio = _float32_values(state_bytes[offset : offset + 100], 25, context="canonical_proprio")
@@ -1417,16 +1653,7 @@ def validate_public_execution_state(
         _validate_quaternion(camera[3:7], tolerance, context="T_base_camera quaternion")
     held_values: list[HeldPublicState | None] = []
     assignments = (Assignment.LEFT_RH56, Assignment.RIGHT_OMNIPICKER)
-    if not isinstance(allowed_held_binding_kinds, Mapping):
-        raise SchemaError("STATE_PAD", "allowed held-binding kinds must be profile mapping")
-    if set(allowed_held_binding_kinds) != set(assignments):
-        raise SchemaError("STATE_PAD", "held-binding map must have exact LEFT/RIGHT keys")
-    for assignment, kinds in allowed_held_binding_kinds.items():
-        if not isinstance(kinds, Collection) or isinstance(kinds, (str, bytes)):
-            raise SchemaError("STATE_PAD", f"{assignment.name} held kinds must be a finite collection")
-        for kind in kinds:
-            _strict_int(kind, "STATE_PAD", f"{assignment.name} held binding kind", minimum=1, maximum=255)
-    for assignment in assignments:
+    for assignment_index, assignment in enumerate(assignments):
         start = offset
         valid = state_bytes[offset]
         offset += 1
@@ -1448,8 +1675,8 @@ def validate_public_execution_state(
                 raise SchemaError("STATE_PAD", "invalid held entry payload must be positive-zero")
             held_values.append(None)
             continue
-        allowed = allowed_held_binding_kinds.get(assignment)
-        if allowed is None or type(binding_kind) is not int or binding_kind not in allowed:
+        allowed = validation_policy.held_binding_kinds[assignment_index]
+        if binding_kind not in allowed:
             raise SchemaError("STATE_PAD", "held binding kind is not in immutable profile enum")
         if controlled_part not in range(2, 9):
             raise SchemaError("STATE_PAD", "valid held entry requires controlled part code 2..8")
@@ -1478,9 +1705,84 @@ def validate_public_execution_state(
     )
 
 
-def validate_resource_claim(claim: ResourceClaim) -> None:
-    if not isinstance(claim, ResourceClaim):
+_RESOURCE_CONTEXT_KEYS = {
+    "schema_id",
+    "controller_target_enums",
+    "constant_target_enums",
+    "actuator_resource_ids",
+}
+
+
+def validate_resource_validation_context(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+) -> ResourceValidationContext:
+    obj = _exact_dict(
+        parse_strict_json_bytes(raw),
+        _RESOURCE_CONTEXT_KEYS,
+        prefix="resource validation context",
+    )
+    if obj["schema_id"] != "sm_fet_r1d_resource_validation_context_v1":
+        raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "resource context schema mismatch")
+    canonical = canonical_json_bytes(obj)
+    digest = hashlib.sha256(canonical).hexdigest()
+    _sha_field(expected_sha256, name="expected resource context hash", code="PROFILE_RECEIPT")
+    if digest != expected_sha256:
+        raise SchemaError("PROFILE_RECEIPT", "resource context hash mismatch")
+    parsed_lists: list[tuple[int, ...]] = []
+    for name in ("controller_target_enums", "constant_target_enums", "actuator_resource_ids"):
+        values = obj[name]
+        if type(values) is not list:
+            raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", f"{name} must be integer array")
+        parsed = tuple(
+            _strict_int(
+                value,
+                "PROFILE_UNKNOWN_NOT_ADMITTED",
+                name,
+                minimum=0,
+                maximum=65535,
+            )
+            for value in values
+        )
+        if parsed != tuple(sorted(set(parsed))):
+            raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", f"{name} must be sorted and unique")
+        parsed_lists.append(parsed)
+    return ResourceValidationContext(
+        parsed_lists[0], parsed_lists[1], parsed_lists[2], canonical, digest
+    )
+
+
+def _validate_resource_context(
+    context: ResourceValidationContext,
+    profile_receipt: object,
+) -> ResourceValidationContext:
+    if type(context) is not ResourceValidationContext:
+        raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "resource context is not validated type")
+    profile = _validated_profile_receipt_object(profile_receipt)
+    if context.sha256 != profile["resource_validation_context_sha256"]:
+        raise SchemaError("PROFILE_RECEIPT", "resource context is not bound by static profile")
+    return validate_resource_validation_context(
+        context.canonical_bytes,
+        expected_sha256=profile["resource_validation_context_sha256"],
+    )
+
+
+def validate_resource_claim(
+    claim: ResourceClaim,
+    *,
+    constraint: Constraint,
+    context: ResourceValidationContext,
+    verify: bool,
+    profile_receipt: object,
+) -> tuple[int, TargetNamespace, TargetSelector, bytes]:
+    """Validate selector bytes against the exact canonical wire constraint."""
+
+    if type(claim) is not ResourceClaim:
         raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "claim must be ResourceClaim")
+    _strict_bool(verify, "PROFILE_UNKNOWN_NOT_ADMITTED", "verify")
+    context = _validate_resource_context(context, profile_receipt)
+    _validate_constraint_fields(constraint, verify=verify)
     _strict_int(claim.resource_id, "PROFILE_UNKNOWN_NOT_ADMITTED", "resource_id", minimum=0, maximum=65535)
     if type(claim.claim_mode) is not ClaimMode:
         raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "claim_mode is not frozen enum")
@@ -1500,36 +1802,99 @@ def validate_resource_claim(claim: ResourceClaim) -> None:
     }
     if len(claim.target_key) != expected_lengths[claim.target_selector]:
         raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "target_key length disagrees with selector")
+    translation_rank = (constraint.locator.uv - 1) * 32 + constraint.locator.depth - 1
+    full_locator_rank = locator_rank(constraint.locator, verify=verify)
+    if claim.target_selector is TargetSelector.CONTROLLER_ENUM:
+        controller_enum = int.from_bytes(claim.target_key, "little", signed=False)
+        if controller_enum not in context.controller_target_enums:
+            raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "controller target enum is not frozen")
+    elif claim.target_selector is TargetSelector.CONSTANT:
+        constant = int.from_bytes(claim.target_key, "little", signed=False)
+        if constant not in context.constant_target_enums:
+            raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "constant target enum is not frozen")
+    elif claim.target_selector is TargetSelector.LOCATOR_POINT:
+        if int.from_bytes(claim.target_key, "little", signed=False) != translation_rank:
+            raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "LOCATOR_POINT key differs from wire")
+    elif claim.target_selector is TargetSelector.LOCATOR_AXIS:
+        if constraint.locator.kind is LocatorKind.POINT:
+            raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "POINT has no canonical axis selector")
+        point, axis = struct.unpack("<IH", claim.target_key)
+        if point != translation_rank or axis != constraint.locator.axis or not 1 <= axis <= 512:
+            raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "LOCATOR_AXIS key differs from wire")
+    elif claim.target_selector is TargetSelector.LOCATOR_FULL:
+        if int.from_bytes(claim.target_key, "little", signed=False) != full_locator_rank:
+            raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "LOCATOR_FULL key differs from wire")
+    else:
+        expected = struct.pack(
+            "<BBBBBQ",
+            int(constraint.primary_role),
+            int(constraint.part),
+            int(constraint.secondary_role),
+            int(constraint.relation),
+            int(constraint.locator.kind),
+            full_locator_rank,
+        )
+        if claim.target_key != expected:
+            raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "ENTITY_LOCATOR key differs from wire")
     if claim.target_namespace is TargetNamespace.MONITORED_ENTITY and claim.claim_mode is not ClaimMode.READ_ONLY:
         raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "monitored entity must be READ_ONLY")
     if claim.target_namespace is TargetNamespace.APERTURE_ACTUATION and claim.target_selector is not TargetSelector.CONTROLLER_ENUM:
         raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "aperture target must use finite controller enum")
+    return claim.resource_target_id
+
+
+def _validate_resource_claim_set(
+    constraint: Constraint,
+    claims: Sequence[ResourceClaim],
+    *,
+    context: ResourceValidationContext,
+    verify: bool,
+    profile_receipt: object,
+) -> None:
+    if type(claims) not in (tuple, list) or not claims:
+        raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "constraint requires finite claim templates")
+    resource_ids: list[int] = []
+    targets: list[tuple[int, TargetNamespace, TargetSelector, bytes]] = []
+    for claim in claims:
+        targets.append(
+            validate_resource_claim(
+                claim,
+                constraint=constraint,
+                context=context,
+                verify=verify,
+                profile_receipt=profile_receipt,
+            )
+        )
+        resource_ids.append(claim.resource_id)
+    if len(set(resource_ids)) != len(resource_ids) or len(set(targets)) != len(targets):
+        raise SchemaError(
+            "PROFILE_UNKNOWN_NOT_ADMITTED",
+            "one constraint has duplicate/ambiguous templates for a resource",
+        )
 
 
 def validate_physical_resource_claims(
     constraint: Constraint,
     claims: Sequence[ResourceClaim],
     *,
-    actuator_resource_ids: Collection[int],
+    context: ResourceValidationContext,
+    verify: bool,
+    profile_receipt: object,
 ) -> None:
     constraint_type = _constraint_type(constraint)
-    if not isinstance(actuator_resource_ids, Collection) or isinstance(
-        actuator_resource_ids, (str, bytes)
-    ):
-        raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "actuator resource IDs must be finite")
-    for resource_id in actuator_resource_ids:
-        _strict_int(
-            resource_id,
-            "PROFILE_UNKNOWN_NOT_ADMITTED",
-            "actuator resource ID",
-            minimum=0,
-            maximum=65535,
-        )
+    _strict_bool(verify, "PROFILE_UNKNOWN_NOT_ADMITTED", "verify")
+    if verify and constraint_type in (ConstraintType.LO, ConstraintType.RO):
+        raise SchemaError("FUNCTION_ASSIGNMENT", "VERIFY physical claim cannot belong to OPERATE")
+    context = _validate_resource_context(context, profile_receipt)
+    _validate_resource_claim_set(
+        constraint,
+        claims,
+        context=context,
+        verify=verify,
+        profile_receipt=profile_receipt,
+    )
     if constraint_type is ConstraintType.ZM:
-        if type(claims) not in (tuple, list) or not claims:
-            raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "MONITOR requires finite evidence claim")
         for claim in claims:
-            validate_resource_claim(claim)
             if (
                 claim.claim_mode is not ClaimMode.READ_ONLY
                 or claim.target_namespace is not TargetNamespace.MONITORED_ENTITY
@@ -1539,26 +1904,27 @@ def validate_physical_resource_claims(
                     "MONITOR may claim only READ_ONLY monitored evidence",
                 )
         return
-    if type(claims) not in (tuple, list) or not claims:
-        raise SchemaError("PROFILE_NO_ACTUATOR_CLAIM", "physical constraint has no claims")
-    for claim in claims:
-        validate_resource_claim(claim)
     required_mode = (
         {ClaimMode.EXCLUSIVE_TARGET}
         if constraint.function is ConstraintFunction.OPERATE
         else {ClaimMode.EXCLUSIVE_TARGET, ClaimMode.HOLD_SAME_TARGET}
     )
     if not any(
-        claim.claim_mode in required_mode and claim.resource_id in actuator_resource_ids
+        claim.claim_mode in required_mode and claim.resource_id in context.actuator_resource_ids
         for claim in claims
     ):
         raise SchemaError("PROFILE_NO_ACTUATOR_CLAIM", "physical O/S lacks required actuator claim")
 
 
 def validate_resource_compatibility(
+    left_constraint: Constraint,
     left: Sequence[ResourceClaim],
+    right_constraint: Constraint,
     right: Sequence[ResourceClaim],
     *,
+    context: ResourceValidationContext,
+    verify: bool,
+    profile_receipt: object,
     compatible_wrist_target_pairs: Collection[
         frozenset[tuple[int, TargetNamespace, TargetSelector, bytes]]
     ] = (),
@@ -1567,12 +1933,24 @@ def validate_resource_compatibility(
         compatible_wrist_target_pairs, (str, bytes)
     ):
         raise SchemaError("PROFILE_UNKNOWN_NOT_ADMITTED", "wrist compatibility must be finite")
-    for claim in (*left, *right):
-        validate_resource_claim(claim)
+    _strict_bool(verify, "PROFILE_UNKNOWN_NOT_ADMITTED", "verify")
+    context = _validate_resource_context(context, profile_receipt)
+    _validate_resource_claim_set(
+        left_constraint,
+        left,
+        context=context,
+        verify=verify,
+        profile_receipt=profile_receipt,
+    )
+    _validate_resource_claim_set(
+        right_constraint,
+        right,
+        context=context,
+        verify=verify,
+        profile_receipt=profile_receipt,
+    )
     for first in left:
         for second in right:
-            if first.resource_id != second.resource_id:
-                continue
             if (
                 first.target_namespace is TargetNamespace.APERTURE_ACTUATION
                 and second.target_namespace is TargetNamespace.APERTURE_ACTUATION
@@ -1587,6 +1965,485 @@ def validate_resource_compatibility(
                 not in compatible_wrist_target_pairs
             ):
                 raise SchemaError("PROFILE_RESOURCE_MUTEX", "distinct wrist targets require explicit profile compatibility")
+            if (
+                first.resource_id == second.resource_id
+                and first.claim_mode is not ClaimMode.READ_ONLY
+                and second.claim_mode is not ClaimMode.READ_ONLY
+                and first.resource_target_id != second.resource_target_id
+            ):
+                raise SchemaError(
+                    "PROFILE_RESOURCE_MUTEX",
+                    "same finite resource has distinct action/hold targets",
+                )
+
+
+AXIS_VERTICAL_EPSILON_SQUARED: Final = float.fromhex("0x1.0000000000000p-80")
+FRAME_ORTHONORMAL_TOLERANCE: Final = float.fromhex("0x1.0000000000000p-40")
+RASTER_VERTICES: Final = (
+    (0.0, 0.0),
+    (1.0, 0.0),
+    (1.0, 0.5),
+    (0.0, 0.5),
+    (0.0, 1.0),
+    (1.0, 1.0),
+)
+AXIS_CENTERS_LE_F64_SHA256: Final = "d9d9319054b954fceb759dd6c9c348f588813176b50466e54950691f0d14a5de"
+FRAME_SURFACE_LE_F64_SHA256: Final = "0e0e05bad6118cd3b597f895a6ebf997842208f99a1f3580e834f1edd80073f9"
+PATH_SURFACE_LE_F64_SHA256: Final = "191a9bdbdb35e030de8b915a441a1bdfce8d0bf691132d95c1e359c5c38eb41a"
+
+
+def _strict_float(
+    value: object,
+    *,
+    code: str,
+    name: str,
+    reject_negative_zero: bool = True,
+) -> float:
+    if type(value) is not float or not math.isfinite(value):
+        raise SchemaError(code, f"{name} must be finite binary64")
+    if reject_negative_zero and value == 0.0 and math.copysign(1.0, value) < 0.0:
+        raise SchemaError(code, f"{name} must not be negative zero")
+    return value
+
+
+def _vector3(
+    value: object,
+    *,
+    code: str,
+    name: str,
+    reject_negative_zero: bool = True,
+) -> tuple[float, float, float]:
+    if type(value) is not tuple or len(value) != 3:
+        raise SchemaError(code, f"{name} must be an exact length-3 tuple")
+    return (
+        _strict_float(
+            value[0], code=code, name=f"{name}[0]", reject_negative_zero=reject_negative_zero
+        ),
+        _strict_float(
+            value[1], code=code, name=f"{name}[1]", reject_negative_zero=reject_negative_zero
+        ),
+        _strict_float(
+            value[2], code=code, name=f"{name}[2]", reject_negative_zero=reject_negative_zero
+        ),
+    )
+
+
+def _dot(left: tuple[float, float, float], right: tuple[float, float, float]) -> float:
+    return left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+
+
+def _cross(left: tuple[float, float, float], right: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    )
+
+
+def _norm(value: tuple[float, float, float]) -> float:
+    return math.sqrt(_dot(value, value))
+
+
+def _normalize(value: tuple[float, float, float], *, code: str, name: str) -> tuple[float, float, float]:
+    length = _norm(value)
+    if not math.isfinite(length) or length == 0.0:
+        raise SchemaError(code, f"{name} must be finite and nonzero")
+    return (value[0] / length, value[1] / length, value[2] / length)
+
+
+def generated_axis_centers() -> tuple[tuple[float, float, float], ...]:
+    centers: list[tuple[float, float, float]] = []
+    for elevation_index in range(16):
+        elevation = -math.pi / 2.0 + math.pi * (elevation_index + 0.5) / 16.0
+        for azimuth_index in range(32):
+            azimuth = -math.pi + 2.0 * math.pi * (azimuth_index + 0.5) / 32.0
+            centers.append(
+                (
+                    math.cos(elevation) * math.cos(azimuth),
+                    math.cos(elevation) * math.sin(azimuth),
+                    math.sin(elevation),
+                )
+            )
+    return tuple(centers)
+
+
+def quantize_normalized_uv(u: float, v: float) -> int:
+    u = _strict_float(u, code="METRIC_UNKNOWN", name="u")
+    v = _strict_float(v, code="METRIC_UNKNOWN", name="v")
+    if not 0.0 <= u <= 1.0 or not 0.0 <= v <= 1.0:
+        raise SchemaError("METRIC_UNKNOWN", "normalized UV is outside [0,1]")
+    column = 63 if u == 1.0 else math.floor(u * 64.0)
+    row = 63 if v == 1.0 else math.floor(v * 64.0)
+    return 1 + 64 * row + column
+
+
+def quantize_pixel_center(pixel_x: float, pixel_y: float, *, width: int, height: int) -> int:
+    pixel_x = _strict_float(pixel_x, code="METRIC_UNKNOWN", name="pixel_x")
+    pixel_y = _strict_float(pixel_y, code="METRIC_UNKNOWN", name="pixel_y")
+    _strict_int(width, "CODEBOOK_W_H_MISSING_OR_MISMATCH", "width", minimum=1, maximum=(1 << 32) - 1)
+    _strict_int(height, "CODEBOOK_W_H_MISSING_OR_MISMATCH", "height", minimum=1, maximum=(1 << 32) - 1)
+    if not 0.0 <= pixel_x < width or not 0.0 <= pixel_y < height:
+        raise SchemaError("METRIC_UNKNOWN", "pixel center is outside preprocessed raster")
+    return quantize_normalized_uv((pixel_x + 0.5) / width, (pixel_y + 0.5) / height)
+
+
+def quantize_metric_cell(value: float, edges: tuple[float, ...], *, expected_bins: int) -> int:
+    value = _strict_float(value, code="METRIC_UNKNOWN", name="metric value")
+    _strict_int(expected_bins, "CODEBOOK_TABLES", "expected_bins", minimum=1, maximum=65535)
+    if type(edges) is not tuple or len(edges) != expected_bins + 1:
+        raise SchemaError("CODEBOOK_TABLES", "metric edges have wrong canonical shape")
+    parsed = tuple(
+        _strict_float(edge, code="CODEBOOK_TABLES", name=f"edge[{index}]")
+        for index, edge in enumerate(edges)
+    )
+    if not _strictly_increasing(parsed):
+        raise SchemaError("CODEBOOK_TABLES", "metric edges are not strictly increasing")
+    if value < parsed[0] or value > parsed[-1]:
+        raise SchemaError("METRIC_UNKNOWN", "metric value is outside admitted range")
+    if value == parsed[-1]:
+        return expected_bins
+    return bisect_right(parsed, value)
+
+
+def quantize_depth(depth_camera_z_m: float, depth_edges: tuple[float, ...]) -> int:
+    if type(depth_edges) is not tuple or any(
+        type(value) is not float or not math.isfinite(value) or value < 0.0
+        for value in depth_edges
+    ):
+        raise SchemaError("CODEBOOK_TABLES", "depth edges must be nonnegative binary64")
+    return quantize_metric_cell(depth_camera_z_m, depth_edges, expected_bins=32)
+
+
+def quantize_extent(extent_m: float, extent_edges: tuple[float, ...]) -> int:
+    if type(extent_edges) is not tuple or any(
+        type(value) is not float or not math.isfinite(value) or value <= 0.0
+        for value in extent_edges
+    ):
+        raise SchemaError("CODEBOOK_TABLES", "extent edges must be positive binary64")
+    return quantize_metric_cell(extent_m, extent_edges, expected_bins=8)
+
+
+def decode_translation_center(
+    uv_code: int,
+    depth_code: int,
+    *,
+    width: int,
+    height: int,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    depth_centers: tuple[float, ...],
+) -> tuple[float, float, float]:
+    _strict_int(uv_code, "FIELD_RANGE", "uv_code", minimum=1, maximum=4096)
+    _strict_int(depth_code, "FIELD_RANGE", "depth_code", minimum=1, maximum=32)
+    _strict_int(width, "CODEBOOK_W_H_MISSING_OR_MISMATCH", "width", minimum=1, maximum=(1 << 32) - 1)
+    _strict_int(height, "CODEBOOK_W_H_MISSING_OR_MISMATCH", "height", minimum=1, maximum=(1 << 32) - 1)
+    fx = _strict_float(fx, code="CODEBOOK_TABLES", name="fx")
+    fy = _strict_float(fy, code="CODEBOOK_TABLES", name="fy")
+    cx = _strict_float(cx, code="CODEBOOK_TABLES", name="cx")
+    cy = _strict_float(cy, code="CODEBOOK_TABLES", name="cy")
+    if fx <= 0.0 or fy <= 0.0 or type(depth_centers) is not tuple or len(depth_centers) != 32:
+        raise SchemaError("CODEBOOK_TABLES", "intrinsics/depth centers are invalid")
+    centers = tuple(
+        _strict_float(value, code="CODEBOOK_TABLES", name=f"depth_center[{index}]")
+        for index, value in enumerate(depth_centers)
+    )
+    uv_index = uv_code - 1
+    row, column = divmod(uv_index, 64)
+    u_center = (column + 0.5) / 64.0
+    v_center = (row + 0.5) / 64.0
+    pixel_x = u_center * width - 0.5
+    pixel_y = v_center * height - 0.5
+    z_center = centers[depth_code - 1]
+    return (
+        (pixel_x - cx) * z_center / fx,
+        (pixel_y - cy) * z_center / fy,
+        z_center,
+    )
+
+
+def _snap_binary64_edge(value: float, edges: tuple[float, ...]) -> float:
+    """Recover an exact materialized edge after bounded binary64 trig roundoff."""
+
+    for edge in edges:
+        tolerance = 8.0 * max(math.ulp(value), math.ulp(edge))
+        if abs(value - edge) <= tolerance:
+            return edge
+    return value
+
+
+def quantize_axis(direction: tuple[float, float, float]) -> int:
+    unit = _normalize(
+        _vector3(direction, code="METRIC_UNKNOWN", name="axis"),
+        code="METRIC_UNKNOWN",
+        name="axis",
+    )
+    # Python binary64 operations are sequenced explicitly; no fused multiply-add.
+    x2 = unit[0] * unit[0]
+    y2 = unit[1] * unit[1]
+    rho2 = x2 + y2
+    if rho2 <= AXIS_VERTICAL_EPSILON_SQUARED:
+        azimuth_index = 0
+        elevation_index = 15 if unit[2] > 0.0 else 0
+    else:
+        azimuth = math.atan2(unit[1], unit[0])
+        if azimuth == math.pi:
+            azimuth = -math.pi
+        elevation = math.asin(max(-1.0, min(1.0, unit[2])))
+        azimuth_edges = tuple(-math.pi + 2.0 * math.pi * index / 32.0 for index in range(33))
+        elevation_edges = tuple(-math.pi / 2.0 + math.pi * index / 16.0 for index in range(17))
+        azimuth = _snap_binary64_edge(azimuth, azimuth_edges)
+        elevation = _snap_binary64_edge(elevation, elevation_edges)
+        azimuth_index = min(31, bisect_right(azimuth_edges, azimuth) - 1)
+        elevation_index = min(15, bisect_right(elevation_edges, elevation) - 1)
+    return 1 + 32 * elevation_index + azimuth_index
+
+
+def decode_axis_center(axis_code: int) -> tuple[float, float, float]:
+    _strict_int(axis_code, "FIELD_RANGE", "axis_code", minimum=1, maximum=512)
+    return generated_axis_centers()[axis_code - 1]
+
+
+def zero_roll_basis(axis_code: int) -> FrameBasis:
+    z_axis = decode_axis_center(axis_code)
+    seeds = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    seed_index = min(range(3), key=lambda index: (abs(_dot(seeds[index], z_axis)), index))
+    x_axis = _normalize(
+        _cross(seeds[seed_index], z_axis),
+        code="FRAME_INVALID",
+        name="zero-roll x",
+    )
+    y_axis = _cross(z_axis, x_axis)
+    frame = FrameBasis(x_axis, y_axis, z_axis)
+    validate_frame_basis(frame)
+    return frame
+
+
+def validate_frame_basis(frame: FrameBasis) -> None:
+    if type(frame) is not FrameBasis:
+        raise SchemaError("FRAME_INVALID", "frame must be FrameBasis")
+    x_axis = _vector3(
+        frame.x, code="FRAME_INVALID", name="frame.x", reject_negative_zero=False
+    )
+    y_axis = _vector3(
+        frame.y, code="FRAME_INVALID", name="frame.y", reject_negative_zero=False
+    )
+    z_axis = _vector3(
+        frame.z, code="FRAME_INVALID", name="frame.z", reject_negative_zero=False
+    )
+    tolerance = FRAME_ORTHONORMAL_TOLERANCE
+    if any(abs(_norm(axis) - 1.0) > tolerance for axis in (x_axis, y_axis, z_axis)):
+        raise SchemaError("FRAME_INVALID", "frame axis is not unit")
+    if any(abs(value) > tolerance for value in (_dot(x_axis, y_axis), _dot(x_axis, z_axis), _dot(y_axis, z_axis))):
+        raise SchemaError("FRAME_INVALID", "frame axes are not orthogonal")
+    if _dot(_cross(x_axis, y_axis), z_axis) < 1.0 - tolerance:
+        raise SchemaError("FRAME_INVALID", "frame is not right-handed")
+
+
+def decode_frame(axis_code: int, roll_code: int) -> FrameBasis:
+    _strict_int(roll_code, "FIELD_RANGE", "roll_code", minimum=1, maximum=32)
+    base = zero_roll_basis(axis_code)
+    theta = 2.0 * math.pi * (roll_code - 1) / 32.0
+    x_axis = tuple(
+        math.cos(theta) * base.x[index] + math.sin(theta) * base.y[index]
+        for index in range(3)
+    )
+    y_axis = _cross(base.z, x_axis)
+    frame = FrameBasis(x_axis, y_axis, base.z)
+    validate_frame_basis(frame)
+    return frame
+
+
+def quantize_roll(axis_code: int, x_direction: tuple[float, float, float]) -> int:
+    base = zero_roll_basis(axis_code)
+    direction = _normalize(
+        _vector3(x_direction, code="METRIC_UNKNOWN", name="roll x direction"),
+        code="METRIC_UNKNOWN",
+        name="roll x direction",
+    )
+    coordinate_x = _dot(direction, base.x)
+    coordinate_y = _dot(direction, base.y)
+    if coordinate_x == 0.0 and coordinate_y == 0.0:
+        raise SchemaError("METRIC_UNKNOWN", "roll direction is parallel to axis")
+    theta = math.atan2(coordinate_y, coordinate_x)
+    if theta < 0.0:
+        theta += 2.0 * math.pi
+    if theta == 2.0 * math.pi:
+        theta = 0.0
+    edges = tuple(2.0 * math.pi * index / 32.0 for index in range(33))
+    theta = _snap_binary64_edge(theta, edges)
+    return 1 + min(31, bisect_right(edges, theta) - 1)
+
+
+def _frame_apply(frame: FrameBasis, local: tuple[float, float, float]) -> tuple[float, float, float]:
+    return tuple(
+        frame.x[index] * local[0] + frame.y[index] * local[1] + frame.z[index] * local[2]
+        for index in range(3)
+    )
+
+
+def sample_path_pose(
+    primitive: PathPrimitive,
+    parameter: float,
+    extent_m: float,
+    *,
+    anchor: tuple[float, float, float],
+    axis_code: int,
+    roll_code: int,
+) -> PathPose:
+    if type(primitive) is not PathPrimitive:
+        raise SchemaError("PATH_INVALID", "primitive must be PathPrimitive")
+    parameter = _strict_float(parameter, code="PATH_INVALID", name="parameter")
+    extent_m = _strict_float(extent_m, code="PATH_INVALID", name="extent_m")
+    anchor = _vector3(anchor, code="PATH_INVALID", name="anchor")
+    if not 0.0 <= parameter <= 1.0 or extent_m <= 0.0:
+        raise SchemaError("PATH_INVALID", "path parameter/extent is outside range")
+    if primitive is PathPrimitive.LINE:
+        gamma = (parameter, 0.0)
+        tangent = (1.0, 0.0)
+    elif primitive in (PathPrimitive.ARC_LEFT, PathPrimitive.ARC_RIGHT):
+        theta = math.pi * parameter / 2.0
+        sign = 1.0 if primitive is PathPrimitive.ARC_LEFT else -1.0
+        gamma = (math.sin(theta), sign * (1.0 - math.cos(theta)))
+        tangent = (math.cos(theta), sign * math.sin(theta))
+    else:
+        cumulative = (0.0, 1.0, 1.5, 2.5, 3.0, 4.0)
+        distance = 4.0 * parameter
+        segment = 4 if parameter == 1.0 else bisect_right(cumulative, distance) - 1
+        start, end = RASTER_VERTICES[segment], RASTER_VERTICES[segment + 1]
+        segment_length = cumulative[segment + 1] - cumulative[segment]
+        local = (distance - cumulative[segment]) / segment_length
+        gamma = (start[0] + local * (end[0] - start[0]), start[1] + local * (end[1] - start[1]))
+        tangent = ((end[0] - start[0]) / segment_length, (end[1] - start[1]) / segment_length)
+    anchor_frame = decode_frame(axis_code, roll_code)
+    displacement = _frame_apply(anchor_frame, (extent_m * gamma[0], extent_m * gamma[1], 0.0))
+    position = tuple(anchor[index] + displacement[index] for index in range(3))
+    x_axis = _normalize(
+        _frame_apply(anchor_frame, (tangent[0], tangent[1], 0.0)),
+        code="PATH_INVALID",
+        name="path tangent",
+    )
+    y_axis = _cross(anchor_frame.z, x_axis)
+    frame = FrameBasis(x_axis, y_axis, anchor_frame.z)
+    validate_frame_basis(frame)
+    return PathPose(parameter, position, frame)
+
+
+def verify_frozen_geometry_golden_surfaces() -> dict[str, str]:
+    """Recompute independent literal digests for axis, frame, and path surfaces."""
+
+    axes = generated_axis_centers()
+    axis_bytes = struct.pack("<1536d", *(value for axis in axes for value in axis))
+    frame_values: list[float] = []
+    for axis_code in range(1, 513):
+        for roll_code in range(1, 33):
+            frame = decode_frame(axis_code, roll_code)
+            frame_values.extend((*frame.x, *frame.y, *frame.z))
+    frame_bytes = struct.pack(f"<{len(frame_values)}d", *frame_values)
+    path_values: list[float] = []
+    for primitive in PathPrimitive:
+        for index in range(65):
+            pose = sample_path_pose(
+                primitive,
+                index / 64.0,
+                0.25,
+                anchor=(0.0, 0.0, 0.0),
+                axis_code=257,
+                roll_code=1,
+            )
+            path_values.extend(
+                (pose.parameter, *pose.position, *pose.frame.x, *pose.frame.y, *pose.frame.z)
+            )
+    path_bytes = struct.pack(f"<{len(path_values)}d", *path_values)
+    actual = {
+        "axis_centers_le_f64_sha256": hashlib.sha256(axis_bytes).hexdigest(),
+        "frame_surface_le_f64_sha256": hashlib.sha256(frame_bytes).hexdigest(),
+        "path_surface_le_f64_sha256": hashlib.sha256(path_bytes).hexdigest(),
+    }
+    expected = {
+        "axis_centers_le_f64_sha256": AXIS_CENTERS_LE_F64_SHA256,
+        "frame_surface_le_f64_sha256": FRAME_SURFACE_LE_F64_SHA256,
+        "path_surface_le_f64_sha256": PATH_SURFACE_LE_F64_SHA256,
+    }
+    if actual != expected:
+        raise SchemaError("GOLDEN_SURFACE", f"geometry golden digest mismatch: {actual!r}")
+    boundary = (
+        quantize_normalized_uv(0.0, 0.0),
+        quantize_normalized_uv(1.0 / 64.0, 0.0),
+        quantize_normalized_uv(1.0, 1.0),
+        quantize_axis((0.0, 0.0, -1.0)),
+        quantize_axis((0.0, 0.0, 1.0)),
+    )
+    if boundary != (1, 2, 4096, 1, 481):
+        raise SchemaError("GOLDEN_SURFACE", f"quantizer boundary mismatch: {boundary!r}")
+    return actual
+
+
+def project_transform(kind: LocatorKind, transform: RigidTransform) -> GoalProjection:
+    if type(kind) is not LocatorKind or kind is LocatorKind.PATH:
+        raise SchemaError("GOAL_MANIFOLD", "projection kind must be POINT/AXIS/FRAME")
+    if type(transform) is not RigidTransform:
+        raise SchemaError("GOAL_MANIFOLD", "transform must be RigidTransform")
+    position = _vector3(transform.translation, code="GOAL_MANIFOLD", name="translation")
+    validate_frame_basis(transform.rotation)
+    if kind is LocatorKind.POINT:
+        return GoalProjection(kind, position)
+    if kind is LocatorKind.AXIS:
+        return GoalProjection(kind, position, axis=transform.rotation.z)
+    return GoalProjection(kind, position, axis=transform.rotation.z, frame=transform.rotation)
+
+
+def validate_verify_hold_existing(
+    goal: GoalProjection,
+    current_effector: RigidTransform,
+    *,
+    validation_policy: PublicStateValidationPolicy,
+    profile_receipt: object,
+) -> None:
+    """Generic VERIFY HOLD_EXISTING oracle over POINT/AXIS/FRAME manifolds."""
+
+    policy = _resolve_bound_validation_policy(validation_policy, profile_receipt)
+    if type(goal) is not GoalProjection or type(current_effector) is not RigidTransform:
+        raise SchemaError("VERIFY_HOLD_NOT_SATISFIED", "goal/current types are invalid")
+    if type(goal.kind) is not LocatorKind or goal.kind is LocatorKind.PATH:
+        raise SchemaError("GOAL_MANIFOLD", "VERIFY goal kind must be POINT/AXIS/FRAME")
+    if goal.kind is LocatorKind.POINT and (goal.axis is not None or goal.frame is not None):
+        raise SchemaError("GOAL_MANIFOLD", "POINT goal must leave orientation free")
+    if goal.kind is LocatorKind.AXIS and (goal.axis is None or goal.frame is not None):
+        raise SchemaError("GOAL_MANIFOLD", "AXIS goal must specify axis and leave roll free")
+    if goal.kind is LocatorKind.FRAME:
+        if type(goal.frame) is not FrameBasis or goal.axis != goal.frame.z:
+            raise SchemaError("GOAL_MANIFOLD", "FRAME goal must specify one consistent full frame")
+    current = project_transform(goal.kind, current_effector)
+    target_position = _vector3(goal.position, code="GOAL_MANIFOLD", name="goal.position")
+    position_error = _norm(tuple(current.position[index] - target_position[index] for index in range(3)))
+    if position_error > policy.verify_position_tolerance_m:
+        raise SchemaError("VERIFY_HOLD_NOT_SATISFIED", "effector origin is outside tolerance")
+    if goal.kind is LocatorKind.AXIS:
+        target_axis = _normalize(
+            _vector3(goal.axis, code="GOAL_MANIFOLD", name="goal.axis"),
+            code="GOAL_MANIFOLD",
+            name="goal.axis",
+        )
+        axis_error = math.acos(max(-1.0, min(1.0, _dot(current.axis, target_axis))))  # type: ignore[arg-type]
+        if axis_error > policy.verify_axis_tolerance_rad:
+            raise SchemaError("VERIFY_HOLD_NOT_SATISFIED", "effector axis is outside tolerance")
+    elif goal.kind is LocatorKind.FRAME:
+        if type(goal.frame) is not FrameBasis:
+            raise SchemaError("GOAL_MANIFOLD", "FRAME goal requires full frame")
+        validate_frame_basis(goal.frame)
+        trace = sum(
+            _dot(current_axis, target_axis)
+            for current_axis, target_axis in zip(
+                (current.frame.x, current.frame.y, current.frame.z),  # type: ignore[union-attr]
+                (goal.frame.x, goal.frame.y, goal.frame.z),
+                strict=True,
+            )
+        )
+        rotation_error = math.acos(max(-1.0, min(1.0, (trace - 1.0) / 2.0)))
+        if rotation_error > policy.verify_frame_tolerance_rad:
+            raise SchemaError("VERIFY_HOLD_NOT_SATISFIED", "effector frame is outside tolerance")
 
 
 _METRIC_MANIFEST_KEYS = {
@@ -1683,18 +2540,13 @@ def validate_metric_codebook(
     tables_bin: bytes,
     *,
     expected_codebook_sha256: str,
-    axis_unit_tolerance: float = 1e-12,
 ) -> str:
     """Validate a materialized metric artifact and recompute its checksum."""
 
-    manifest_bytes = validate_metric_manifest(manifest)
+    manifest_object = parse_strict_json_bytes(manifest) if type(manifest) is bytes else manifest
+    manifest_bytes = validate_metric_manifest(manifest_object)
     if type(expected_codebook_sha256) is not str or not _SHA256_RE.fullmatch(expected_codebook_sha256):
         raise SchemaError("CODEBOOK_HASH", "expected codebook hash is malformed or UNDEFINED")
-    if type(axis_unit_tolerance) not in (int, float) or isinstance(axis_unit_tolerance, bool):
-        raise SchemaError("CODEBOOK_TABLES", "axis unit tolerance must be numeric")
-    tolerance = float(axis_unit_tolerance)
-    if not math.isfinite(tolerance) or tolerance <= 0.0:
-        raise SchemaError("CODEBOOK_TABLES", "axis unit tolerance must be finite and positive")
     values = _double_values(tables_bin)
     cursor = 0
 
@@ -1707,8 +2559,8 @@ def validate_metric_codebook(
     fx, fy, cx, cy = take(4)
     if fx <= 0.0 or fy <= 0.0:
         raise SchemaError("CODEBOOK_W_H_MISSING_OR_MISMATCH", "focal lengths must be positive")
-    width = manifest["locator_width_px"]  # type: ignore[index]
-    height = manifest["locator_height_px"]  # type: ignore[index]
+    width = manifest_object["locator_width_px"]  # type: ignore[index]
+    height = manifest_object["locator_height_px"]  # type: ignore[index]
     if not (0.0 <= cx < width and 0.0 <= cy < height):
         raise SchemaError("CODEBOOK_W_H_MISSING_OR_MISMATCH", "intrinsics are outside manifest raster")
     z_edges, z_centers = take(33), take(32)
@@ -1728,7 +2580,14 @@ def validate_metric_codebook(
         (z_centers, z_edges, "depth"),
         (extent_centers, extent_edges, "extent"),
     ):
-        if any(not edges[index] <= center <= edges[index + 1] for index, center in enumerate(centers)):
+        if any(
+            not (
+                edges[index] <= center < edges[index + 1]
+                if index < len(centers) - 1
+                else edges[index] <= center <= edges[index + 1]
+            )
+            for index, center in enumerate(centers)
+        ):
             raise SchemaError("CODEBOOK_TABLES", f"{name} center lies outside its cell")
     if not _strictly_increasing(azimuth_edges) or not _strictly_increasing(elevation_edges):
         raise SchemaError("CODEBOOK_TABLES", "axis angle edges must be strictly increasing")
@@ -1742,7 +2601,11 @@ def validate_metric_codebook(
     if roll_edges != expected_roll_edges:
         raise SchemaError("CODEBOOK_TABLES", "roll edges differ from frozen generator")
     axes = tuple(tuple(axes_flat[index : index + 3]) for index in range(0, len(axes_flat), 3))
-    if any(abs(math.sqrt(sum(component * component for component in axis)) - 1.0) > tolerance for axis in axes):
+    if any(
+        abs(math.sqrt(sum(component * component for component in axis)) - 1.0)
+        > AXIS_TABLE_UNIT_TOLERANCE
+        for axis in axes
+    ):
         raise SchemaError("CODEBOOK_TABLES", "axis center is outside unit tolerance")
     if len({struct.pack("<3d", *axis) for axis in axes}) != 512:
         raise SchemaError("CODEBOOK_TABLES", "axis centers are not bytewise distinct")
@@ -1758,11 +2621,7 @@ def validate_metric_codebook(
                     math.sin(elevation),
                 )
             )
-    if any(
-        abs(actual - expected) > tolerance
-        for axis, expected_axis in zip(axes, expected_axes, strict=True)
-        for actual, expected in zip(axis, expected_axis, strict=True)
-    ):
+    if axes != tuple(expected_axes):
         raise SchemaError("CODEBOOK_TABLES", "axis centers differ from frozen generator")
     if path_pi_over_2 != math.pi / 2.0:
         raise SchemaError("CODEBOOK_TABLES", "path pi/2 constant mismatch")
@@ -1775,10 +2634,43 @@ def validate_metric_codebook(
     return digest
 
 
-def require_defined_codebook(codebook_sha256: str | None) -> str:
-    if type(codebook_sha256) is not str or not _SHA256_RE.fullmatch(codebook_sha256):
-        raise SchemaError("CODEBOOK_UNDEFINED", "no real metric artifact/hash is available")
-    return codebook_sha256
+def require_defined_codebook(
+    *,
+    receipt: object,
+    manifest: object,
+    tables_bin: bytes,
+    profile_receipt: object,
+    authorized_codebook_receipt_sha256: str,
+) -> str:
+    """Return a codebook hash only after full artifact/profile authorization."""
+
+    try:
+        authorized = _sha_field(
+            authorized_codebook_receipt_sha256,
+            name="authorized codebook receipt",
+            code="CODEBOOK_UNDEFINED",
+        )
+        receipt_hash = validate_metric_codebook_receipt(
+            receipt,
+            manifest=manifest,
+            tables_bin=tables_bin,
+        )
+        if receipt_hash != authorized:
+            raise SchemaError("CODEBOOK_UNDEFINED", "codebook receipt is not authorized")
+        codebook = _validate_self_hashing_receipt(
+            receipt,
+            keys=_CODEBOOK_RECEIPT_KEYS,
+            schema_id="metric_codebook_receipt_v1",
+            code="CODEBOOK_RECEIPT",
+        )
+        profile = _validated_profile_receipt_object(profile_receipt)
+        if codebook["codebook_sha256"] != profile["metric_codebook_sha256"]:
+            raise SchemaError("CODEBOOK_UNDEFINED", "profile is bound to a different codebook")
+        return codebook["codebook_sha256"]
+    except SchemaError as exc:
+        if exc.code == "CODEBOOK_UNDEFINED":
+            raise
+        raise SchemaError("CODEBOOK_UNDEFINED", "no verified authorized metric artifact") from exc
 
 
 _PROFILE_RECEIPT_KEYS = {
@@ -1789,6 +2681,8 @@ _PROFILE_RECEIPT_KEYS = {
     "hardware_manifest_sha256",
     "metric_codebook_sha256",
     "profile_payload_sha256",
+    "public_state_validation_policy_sha256",
+    "resource_validation_context_sha256",
     "receipt_sha256",
 }
 
@@ -1816,7 +2710,7 @@ def _validate_self_hashing_receipt(
     return obj
 
 
-def validate_static_capability_profile_receipt(receipt: object) -> str:
+def _validated_profile_receipt_object(receipt: object) -> dict[str, Any]:
     obj = _validate_self_hashing_receipt(
         receipt,
         keys=_PROFILE_RECEIPT_KEYS,
@@ -1831,8 +2725,15 @@ def validate_static_capability_profile_receipt(receipt: object) -> str:
         "hardware_manifest_sha256",
         "metric_codebook_sha256",
         "profile_payload_sha256",
+        "public_state_validation_policy_sha256",
+        "resource_validation_context_sha256",
     ):
         _sha_field(obj[field], name=field, code="PROFILE_RECEIPT")
+    return obj
+
+
+def validate_static_capability_profile_receipt(receipt: object) -> str:
+    obj = _validated_profile_receipt_object(receipt)
     return obj["receipt_sha256"]
 
 
@@ -1865,12 +2766,13 @@ def validate_metric_codebook_receipt(
         "tables_sha256",
     ):
         _sha_field(obj[field], name=field, code="CODEBOOK_RECEIPT")
-    manifest_bytes = validate_metric_manifest(manifest)
+    manifest_object = parse_strict_json_bytes(manifest) if type(manifest) is bytes else manifest
+    manifest_bytes = validate_metric_manifest(manifest_object)
     if hashlib.sha256(manifest_bytes).hexdigest() != obj["manifest_sha256"]:
         raise SchemaError("CODEBOOK_RECEIPT", "manifest hash mismatch")
     if hashlib.sha256(tables_bin).hexdigest() != obj["tables_sha256"]:
         raise SchemaError("CODEBOOK_RECEIPT", "tables hash mismatch")
-    if manifest["source_calibration_sha256"] != obj["source_calibration_sha256"]:  # type: ignore[index]
+    if manifest_object["source_calibration_sha256"] != obj["source_calibration_sha256"]:  # type: ignore[index]
         raise SchemaError("CODEBOOK_RECEIPT", "calibration hash layer mismatch")
     validate_metric_codebook(manifest, tables_bin, expected_codebook_sha256=obj["codebook_sha256"])
     return obj["receipt_sha256"]
@@ -1894,6 +2796,9 @@ def validate_held_public_state_receipt(
     public_state: PublicExecutionState,
     now_ns: int,
 ) -> str:
+    _strict_int(now_ns, "STATE_STALE", "now_ns", minimum=-(1 << 63), maximum=(1 << 63) - 1)
+    if type(public_state) is not PublicExecutionState:
+        raise SchemaError("HELD_RECEIPT", "public_state must be validated PublicExecutionState")
     obj = _validate_self_hashing_receipt(
         receipt,
         keys=_HELD_RECEIPT_KEYS,
@@ -1945,6 +2850,14 @@ def validate_runtime_resource_receipt(
     anchor_timestamp_ns: int,
     now_ns: int,
 ) -> str:
+    _strict_int(
+        anchor_timestamp_ns,
+        "RUNTIME_RECEIPT",
+        "expected anchor_timestamp_ns",
+        minimum=-(1 << 63),
+        maximum=(1 << 63) - 1,
+    )
+    _strict_int(now_ns, "STATE_STALE", "now_ns", minimum=-(1 << 63), maximum=(1 << 63) - 1)
     obj = _validate_self_hashing_receipt(
         receipt,
         keys=_RUNTIME_RECEIPT_KEYS,
@@ -2002,6 +2915,9 @@ _assert_frozen_constants()
 
 
 __all__ = [
+    "AXIS_TABLE_UNIT_TOLERANCE",
+    "AXIS_VERTICAL_EPSILON_SQUARED",
+    "AXIS_CENTERS_LE_F64_SHA256",
     "Assignment",
     "B_NONVERIFY",
     "B_VERIFY",
@@ -2011,6 +2927,10 @@ __all__ = [
     "ConstraintType",
     "Effect",
     "EventPacket",
+    "FRAME_ORTHONORMAL_TOLERANCE",
+    "FRAME_SURFACE_LE_F64_SHA256",
+    "FrameBasis",
+    "GoalProjection",
     "HeldPublicState",
     "Locator",
     "LocatorEvidence",
@@ -2018,11 +2938,17 @@ __all__ = [
     "MAX_GLOBAL_RANK",
     "N",
     "Part",
+    "PathPose",
     "PathPrimitive",
+    "PATH_SURFACE_LE_F64_SHA256",
     "Phase",
     "PublicExecutionState",
+    "PublicStateValidationPolicy",
+    "RASTER_VERTICES",
     "Relation",
     "ResourceClaim",
+    "ResourceValidationContext",
+    "RigidTransform",
     "Role",
     "STRUCTURAL_STATES",
     "SchemaError",
@@ -2035,20 +2961,36 @@ __all__ = [
     "capacity_metadata",
     "combination_rank",
     "compact_to_field_wire",
+    "decode_axis_center",
+    "decode_frame",
+    "decode_translation_center",
     "equal_bit_inverse",
     "equal_bit_permute",
     "field_wire_to_compact",
+    "generated_axis_centers",
     "locator_rank",
     "pack_compact",
     "pack_wire",
+    "parse_strict_json_bytes",
     "payload_rank",
     "profile_bundle_capacity",
+    "project_transform",
+    "quantize_axis",
+    "quantize_depth",
+    "quantize_extent",
+    "quantize_metric_cell",
+    "quantize_normalized_uv",
+    "quantize_pixel_center",
+    "quantize_roll",
     "rank_packet",
     "rank_topology",
     "rank_wire",
     "require_defined_codebook",
+    "sample_path_pose",
     "shared_semantic_key_hash",
+    "shared_semantic_key_hash_json",
     "text_goal_hash",
+    "text_goal_hash_json",
     "topology_capacity",
     "unpack_compact",
     "unpack_wire",
@@ -2058,6 +3000,7 @@ __all__ = [
     "unrank_payload",
     "unrank_topology",
     "unrank_wire",
+    "validate_frame_basis",
     "validate_held_public_state_receipt",
     "validate_locator_evidence",
     "validate_metric_codebook",
@@ -2066,10 +3009,17 @@ __all__ = [
     "validate_packet",
     "validate_physical_resource_claims",
     "validate_public_execution_state",
+    "validate_public_state_validation_policy",
     "validate_resource_claim",
     "validate_resource_compatibility",
+    "validate_resource_validation_context",
     "validate_runtime_resource_receipt",
     "validate_shared_semantic_key",
+    "validate_shared_semantic_key_json",
     "validate_static_capability_profile_receipt",
     "validate_text_goal",
+    "validate_text_goal_json",
+    "validate_verify_hold_existing",
+    "verify_frozen_geometry_golden_surfaces",
+    "zero_roll_basis",
 ]
