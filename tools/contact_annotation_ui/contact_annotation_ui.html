@@ -1,0 +1,1138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; media-src blob:; img-src data:; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>CONTACT//20 · 离线双标工作台</title>
+  <style>
+    :root {
+      --ink: #e7e2d5;
+      --muted: #9c998f;
+      --faint: #696860;
+      --base: #111310;
+      --surface: #191c18;
+      --raised: #21251f;
+      --line: #3b4037;
+      --line-hot: #6a7360;
+      --amber: #f0b95b;
+      --amber-dim: #8a682f;
+      --ice: #9fd8d2;
+      --danger: #ef806b;
+      --ok: #9ac77d;
+      --radius: 3px;
+      --s1: .25rem;
+      --s2: .5rem;
+      --s3: .75rem;
+      --s4: 1rem;
+      --s5: 1.25rem;
+      --s6: 1.5rem;
+      --mono: "IBM Plex Mono", "Cascadia Mono", "Liberation Mono", monospace;
+      --display: "DIN Condensed", "Aptos Narrow", "Liberation Sans Narrow", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--base); color: var(--ink); }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--mono);
+      font-size: 14px;
+      line-height: 1.45;
+      background:
+        linear-gradient(90deg, transparent 0 49.8%, rgba(159, 216, 210, .025) 50%, transparent 50.2%),
+        repeating-linear-gradient(0deg, rgba(255,255,255,.015) 0 1px, transparent 1px 4px),
+        var(--base);
+    }
+
+    button, input, select { font: inherit; }
+    button, input, select, video { border-radius: var(--radius); }
+    button, select, input {
+      color: var(--ink);
+      background: var(--surface);
+      border: 1px solid var(--line);
+    }
+    button { cursor: pointer; padding: var(--s2) var(--s3); }
+    button:hover:not(:disabled) { border-color: var(--amber); color: #fff4da; }
+    button:disabled { cursor: not-allowed; opacity: .42; }
+    :focus-visible { outline: 2px solid var(--ice); outline-offset: 2px; }
+    input, select { min-height: 2.25rem; padding: var(--s2); width: 100%; }
+    input[type="range"] { min-height: 1rem; padding: 0; accent-color: var(--amber); }
+    input[type="number"] { font-variant-numeric: tabular-nums; }
+
+    .skip-link {
+      position: fixed; left: var(--s4); top: -5rem; z-index: 100;
+      background: var(--ice); color: var(--base); padding: var(--s3);
+    }
+    .skip-link:focus { top: var(--s4); }
+
+    .masthead {
+      min-height: 4.75rem;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: stretch;
+      border-bottom: 1px solid var(--line-hot);
+      background: rgba(17, 19, 16, .96);
+      position: sticky; top: 0; z-index: 20;
+    }
+    .brand {
+      display: flex; align-items: baseline; gap: var(--s2);
+      padding: var(--s4) var(--s5);
+      border-right: 1px solid var(--line);
+    }
+    .brand strong {
+      font-family: var(--display); font-stretch: condensed;
+      font-size: 1.65rem; letter-spacing: .09em;
+    }
+    .brand span { color: var(--amber); font-size: .78rem; }
+    .identity-strip {
+      display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s4);
+      overflow: auto;
+    }
+    .identity-cell { min-width: 8rem; }
+    .identity-cell small, .eyebrow {
+      display: block; color: var(--faint); text-transform: uppercase;
+      letter-spacing: .12em; font-size: .68rem;
+    }
+    .identity-cell output { color: var(--ice); white-space: nowrap; }
+    .save-status {
+      min-width: 13rem; padding: var(--s3) var(--s4);
+      border-left: 1px solid var(--line); display: grid; align-content: center;
+    }
+    .save-status output { color: var(--amber); }
+
+    main { min-height: calc(100vh - 4.75rem); }
+    .boot {
+      max-width: 62rem; margin: 0 auto; padding: clamp(2rem, 8vh, 6rem) var(--s5);
+      display: grid; grid-template-columns: 1.1fr .9fr; gap: 2.5rem;
+    }
+    .boot h1 {
+      font-family: var(--display); font-size: clamp(2.6rem, 7vw, 6rem);
+      line-height: .88; letter-spacing: -.025em; margin: var(--s3) 0 var(--s5);
+      text-transform: uppercase;
+    }
+    .boot h1 em { color: var(--amber); font-style: normal; }
+    .boot-copy { color: var(--muted); max-width: 42rem; font-size: 1rem; }
+    .boot-panel { border-top: 3px solid var(--amber); background: var(--surface); padding: var(--s5); }
+    .boot-step { display: grid; grid-template-columns: 2rem 1fr; gap: var(--s3); margin-bottom: var(--s5); }
+    .boot-step .number {
+      width: 2rem; height: 2rem; display: grid; place-items: center;
+      border: 1px solid var(--line-hot); color: var(--amber);
+    }
+    .boot-step h2 { margin: 0 0 var(--s1); font-size: .95rem; }
+    .boot-step p { color: var(--muted); margin: 0 0 var(--s3); font-size: .78rem; }
+    .boot button { width: 100%; }
+    .boot-note { border-left: 2px solid var(--ice); padding-left: var(--s3); color: var(--muted); }
+
+    .workspace { display: none; }
+    .workspace.ready {
+      display: grid;
+      grid-template-columns: minmax(13rem, 17rem) minmax(30rem, 1fr) minmax(19rem, 24rem);
+      min-height: calc(100vh - 4.75rem);
+    }
+    .task-rail, .inspector { min-width: 0; background: rgba(25, 28, 24, .93); }
+    .task-rail { border-right: 1px solid var(--line); }
+    .inspector { border-left: 1px solid var(--line); }
+    .rail-head, .inspector-head, .stage-head {
+      padding: var(--s4); border-bottom: 1px solid var(--line);
+    }
+    .rail-head h2, .inspector-head h2, .stage-head h2 { margin: var(--s1) 0 0; font-size: 1rem; }
+    .progress-track { height: 3px; margin-top: var(--s3); background: var(--line); }
+    .progress-track span { display: block; height: 100%; background: var(--amber); transition: width .2s ease; }
+    .task-list { max-width: 100%; list-style: none; margin: 0; padding: 0; }
+    .task-item button {
+      width: 100%; border: 0; border-bottom: 1px solid var(--line); border-radius: 0;
+      padding: var(--s3) var(--s4); display: grid; grid-template-columns: 2rem 1fr auto;
+      gap: var(--s2); text-align: left; background: transparent;
+    }
+    .task-item button[aria-current="true"] {
+      background: var(--raised); box-shadow: inset 3px 0 var(--amber);
+    }
+    .task-index { color: var(--faint); }
+    .task-episode { color: var(--ink); }
+    .task-meta { color: var(--muted); font-size: .72rem; }
+    .task-state { align-self: center; color: var(--faint); font-size: .72rem; }
+    .task-state.complete { color: var(--ok); }
+    .task-state.error { color: var(--danger); }
+
+    .stage { min-width: 0; }
+    .stage-head { display: flex; justify-content: space-between; align-items: end; gap: var(--s4); }
+    .frame-readout { color: var(--ice); font-variant-numeric: tabular-nums; }
+    .video-well {
+      padding: var(--s4); background: #080a08;
+      border-bottom: 1px solid var(--line);
+    }
+    video {
+      width: 100%; max-height: 54vh; display: block; background: #020302;
+      border: 1px solid #30352e;
+    }
+    .transport {
+      display: grid; grid-template-columns: auto auto auto 1fr auto; gap: var(--s2);
+      align-items: center; margin-top: var(--s3);
+    }
+    .transport .icon-button { min-width: 2.5rem; }
+    .rate-group { display: flex; gap: var(--s1); }
+    .rate-group button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
+    .timeline-shell { padding: var(--s4); border-bottom: 1px solid var(--line); }
+    .timeline-labels { display: flex; justify-content: space-between; color: var(--muted); font-size: .72rem; }
+    .segment-track { position: relative; height: 1.2rem; margin: var(--s2) 0; background: var(--surface); overflow: hidden; }
+    .segment-mark { position: absolute; top: .2rem; height: .8rem; background: var(--amber-dim); border-left: 1px solid var(--amber); }
+    .shortcut-row { display: flex; flex-wrap: wrap; gap: var(--s2); color: var(--muted); font-size: .72rem; margin-top: var(--s3); }
+    kbd { color: var(--ink); background: var(--raised); border: 1px solid var(--line); padding: 0 .35rem; }
+
+    .segment-ledger { padding: var(--s4); }
+    .ledger-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); }
+    .ledger-head h3 { margin: 0; font-size: .9rem; }
+    .segment-table-wrap { overflow-x: auto; margin-top: var(--s3); }
+    table { width: 100%; border-collapse: collapse; font-size: .76rem; }
+    th, td { text-align: left; padding: var(--s2); border-bottom: 1px solid var(--line); white-space: nowrap; }
+    th { color: var(--faint); text-transform: uppercase; font-size: .65rem; letter-spacing: .08em; }
+    tr.selected { background: rgba(240, 185, 91, .08); }
+    td button { padding: var(--s1) var(--s2); }
+    .empty-ledger { color: var(--muted); padding: var(--s5) 0; }
+
+    .inspector-form { padding: var(--s4); }
+    fieldset { border: 0; border-bottom: 1px solid var(--line); margin: 0; padding: 0 0 var(--s5); }
+    fieldset + fieldset { padding-top: var(--s5); }
+    legend { color: var(--amber); font-size: .76rem; letter-spacing: .08em; text-transform: uppercase; margin-bottom: var(--s3); }
+    .field { margin-bottom: var(--s3); }
+    .field label { display: block; color: var(--muted); font-size: .72rem; margin-bottom: var(--s1); }
+    .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
+    .mark-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s2); }
+    .validation-list { margin: 0; padding-left: 1.25rem; color: var(--danger); font-size: .75rem; }
+    .validation-list:empty::before { content: "当前 episode 字段完整"; color: var(--ok); }
+    .commit-zone { padding: var(--s4); border-top: 1px solid var(--line-hot); position: sticky; bottom: 0; background: var(--surface); }
+    .commit-zone button { width: 100%; background: var(--amber); color: #1c160b; border-color: var(--amber); font-weight: 700; }
+    .commit-zone p { margin: var(--s2) 0 0; color: var(--muted); font-size: .7rem; }
+
+    .toast-stack { position: fixed; right: var(--s4); bottom: var(--s4); z-index: 80; display: grid; gap: var(--s2); }
+    .toast { max-width: 28rem; background: #242820; border-left: 3px solid var(--ice); padding: var(--s3) var(--s4); box-shadow: 0 .5rem 2rem rgba(0,0,0,.35); }
+    .toast.error { border-left-color: var(--danger); }
+    .fatal { color: var(--danger); white-space: pre-wrap; margin-top: var(--s3); }
+    .hidden { display: none !important; }
+
+    @media (max-width: 1120px) {
+      .workspace.ready { grid-template-columns: 14rem minmax(30rem, 1fr); }
+      .inspector { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); }
+      .inspector-form { display: grid; grid-template-columns: .8fr 1.2fr; gap: var(--s5); }
+      .inspector-form fieldset + fieldset { padding-top: 0; border-left: 1px solid var(--line); padding-left: var(--s5); }
+    }
+    @media (max-width: 760px) {
+      .masthead { position: static; grid-template-columns: 1fr; }
+      .brand, .save-status { border: 0; border-bottom: 1px solid var(--line); }
+      .boot { grid-template-columns: 1fr; padding-top: var(--s6); }
+      .workspace.ready { grid-template-columns: 1fr; }
+      .task-rail, .inspector { border: 0; border-bottom: 1px solid var(--line); }
+      .task-list { display: flex; overflow-x: auto; }
+      .task-item { min-width: 11rem; }
+      .task-item button { border-right: 1px solid var(--line); }
+      .inspector-form { grid-template-columns: 1fr; }
+      .inspector-form fieldset + fieldset { border-left: 0; padding-left: 0; padding-top: var(--s5); }
+      .transport { grid-template-columns: repeat(4, auto); }
+      .transport input[type="range"] { grid-column: 1 / -1; grid-row: 1; }
+    }
+    @media (max-width: 420px) {
+      .identity-strip { display: grid; grid-template-columns: 1fr 1fr; }
+      .boot h1 { font-size: 3rem; }
+      .field-grid { grid-template-columns: 1fr; }
+      .stage-head { align-items: start; flex-direction: column; }
+      .rate-group { grid-column: 1 / -1; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#workspace-main">跳到标注区</a>
+  <header class="masthead">
+    <div class="brand"><strong>CONTACT//20</strong><span>OFFLINE</span></div>
+    <div class="identity-strip" aria-label="锁定身份">
+      <div class="identity-cell"><small>角色</small><output id="identity-role">未载入</output></div>
+      <div class="identity-cell"><small>标注员</small><output id="identity-annotator">未载入</output></div>
+      <div class="identity-cell"><small>会话</small><output id="identity-session">未载入</output></div>
+      <div class="identity-cell"><small>Packet</small><output id="identity-packet">未载入</output></div>
+    </div>
+    <div class="save-status" aria-live="polite"><small class="eyebrow">草稿状态</small><output id="save-status">等待初始化</output></div>
+  </header>
+
+  <main>
+    <section class="boot" id="boot" aria-labelledby="boot-title">
+      <div>
+        <span class="eyebrow">CONTACT SEGMENT V1.1 / ISOLATED DESK</span>
+        <h1 id="boot-title">看见接触，<br><em>只记证据。</em></h1>
+        <p class="boot-copy">这是单人、单 packet 的离线标注工作台。它只接受预检绑定的状态目录、自己的 7 个 packet 文件和 12 段白名单视频；不会联网，也不会把媒体或标注发送到外部服务。</p>
+        <p class="boot-note">先由协调员运行严格预检并初始化状态目录。载入后身份与 session 锁定；本工具不做裁决、不改协议、不生成任何自动标签。</p>
+      </div>
+      <div class="boot-panel">
+        <div class="boot-step">
+          <span class="number" aria-hidden="true">01</span>
+          <div>
+            <h2>选择外部状态目录</h2>
+            <p>目录必须含预检生成的 identity-locked session receipt；autosave 只写这里。</p>
+            <button id="pick-state" type="button">选择状态目录</button>
+          </div>
+        </div>
+        <div class="boot-step">
+          <span class="number" aria-hidden="true">02</span>
+          <div>
+            <h2>选择自己的 packet</h2>
+            <p>只读取精确白名单；发现额外文件、媒体 hash 或身份不符时立即停止。</p>
+            <button id="pick-packet" type="button" disabled>选择单人 packet</button>
+          </div>
+        </div>
+        <div class="boot-step">
+          <span class="number" aria-hidden="true">03</span>
+          <div>
+            <h2>选择独立媒体目录</h2>
+            <p>媒体不在 packet 内；目录只能含 receipt 绑定的 12 个只读 MP4。</p>
+            <button id="pick-media" type="button" disabled>选择媒体目录</button>
+          </div>
+        </div>
+        <div id="boot-progress" role="status" aria-live="polite"></div>
+        <pre class="fatal hidden" id="boot-error"></pre>
+      </div>
+    </section>
+
+    <section class="workspace" id="workspace-main" aria-label="接触标注工作区">
+      <nav class="task-rail" aria-label="12 个 episode">
+        <div class="rail-head">
+          <span class="eyebrow">Minimum set</span>
+          <h2><span id="complete-count">0</span> / 12 可提交</h2>
+          <div class="progress-track" aria-hidden="true"><span id="progress-fill" style="width:0%"></span></div>
+        </div>
+        <ol class="task-list" id="task-list"></ol>
+      </nav>
+
+      <section class="stage" aria-labelledby="stage-title">
+        <div class="stage-head">
+          <div><span class="eyebrow" id="stage-task">TASK --</span><h2 id="stage-title">Episode --</h2></div>
+          <output class="frame-readout" id="frame-readout">P 0000 / V 0000 / 0.000 s</output>
+        </div>
+        <div class="video-well">
+          <video id="video" preload="metadata" aria-label="当前白名单 episode 视频"></video>
+          <div class="transport" aria-label="播放控制">
+            <button class="icon-button" id="frame-prev" type="button" aria-label="前一 processed 帧">←1</button>
+            <button class="icon-button" id="play-toggle" type="button" aria-label="播放或暂停">播放</button>
+            <button class="icon-button" id="frame-next" type="button" aria-label="后一 processed 帧">+1→</button>
+            <input id="frame-slider" type="range" min="0" max="1" value="0" aria-label="processed 帧时间轴">
+            <div class="rate-group" aria-label="播放速度">
+              <button type="button" data-rate="0.25" aria-pressed="false">¼×</button>
+              <button type="button" data-rate="0.5" aria-pressed="false">½×</button>
+              <button type="button" data-rate="1" aria-pressed="true">1×</button>
+            </div>
+          </div>
+        </div>
+        <div class="timeline-shell">
+          <div class="timeline-labels"><span>coverage start · 0</span><span id="timeline-end">end · --</span></div>
+          <div class="segment-track" id="segment-track" aria-label="已标接触区间"></div>
+          <div class="shortcut-row" aria-label="快捷键说明">
+            <span><kbd>Space</kbd> 播放/暂停</span><span><kbd>←</kbd><kbd>→</kbd> ±1 帧</span>
+            <span><kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd> ±10 帧</span>
+            <span><kbd>N</kbd> 新区间</span><span><kbd>I</kbd> 第一接触帧</span><span><kbd>O</kbd> 第一非接触帧</span>
+          </div>
+        </div>
+        <section class="segment-ledger" aria-labelledby="ledger-title">
+          <div class="ledger-head"><h3 id="ledger-title">本 episode 接触区间</h3><button id="add-segment" type="button">+ 新建区间</button></div>
+          <div class="segment-table-wrap" id="segment-table-wrap"></div>
+        </section>
+      </section>
+
+      <aside class="inspector" aria-labelledby="inspector-title">
+        <div class="inspector-head"><span class="eyebrow">Evidence only</span><h2 id="inspector-title">标注面板</h2></div>
+        <form class="inspector-form" id="annotation-form" novalidate>
+          <fieldset>
+            <legend>Episode coverage</legend>
+            <div class="field">
+              <label for="coverage-mode">覆盖结论</label>
+              <select id="coverage-mode">
+                <option value="">请选择…</option>
+                <option value="unknown">unknown · 整体不可用</option>
+                <option value="positive_only">positive_only · 只确认正例</option>
+                <option value="exhaustive">exhaustive · 完整排查</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="coverage-evidence">Coverage 证据范围</label>
+              <select id="coverage-evidence">
+                <option value="">请选择…</option>
+                <option value="rgb_direct">rgb_direct</option>
+                <option value="rgb_temporal">rgb_temporal</option>
+                <option value="unknown">unknown</option>
+              </select>
+            </div>
+          </fieldset>
+
+          <fieldset id="segment-fields" disabled>
+            <legend>选中接触区间</legend>
+            <div class="field-grid">
+              <div class="field"><label for="segment-start">start_frame · 第一接触</label><input id="segment-start" type="number" min="0" step="1"></div>
+              <div class="field"><label for="segment-end">end_frame · 第一非接触</label><input id="segment-end" type="number" min="1" step="1"></div>
+            </div>
+            <div class="mark-grid">
+              <button id="mark-start" type="button">I · 当前为 start</button>
+              <button id="mark-end" type="button">O · 当前为 end</button>
+            </div>
+            <div class="field-grid" style="margin-top:var(--s3)">
+              <div class="field"><label for="start-boundary">起点边界</label><select id="start-boundary"><option value="">请选择…</option><option value="observed">observed</option><option value="left_censored">left_censored</option><option value="unknown">unknown</option></select></div>
+              <div class="field"><label for="end-boundary">终点边界</label><select id="end-boundary"><option value="">请选择…</option><option value="observed">observed</option><option value="right_censored">right_censored</option><option value="unknown">unknown</option></select></div>
+            </div>
+            <div class="field-grid">
+              <div class="field"><label for="segment-side">side</label><select id="segment-side"><option value="">未知 / 留空</option><option value="left">left</option><option value="right">right</option><option value="object_object">object_object</option></select></div>
+              <div class="field"><label for="segment-site">site</label><select id="segment-site"><option value="">未知 / 留空</option><option value="opposition">opposition</option><option value="primary">primary</option><option value="support">support</option><option value="palm_or_jaw">palm_or_jaw</option><option value="tool_tip">tool_tip</option><option value="other_surface">other_surface</option></select></div>
+            </div>
+            <div class="field-grid">
+              <div class="field"><label for="object-role">object_role</label><select id="object-role"><option value="">未知 / 留空</option><option value="manipulated">manipulated</option><option value="tool">tool</option><option value="receptacle">receptacle</option><option value="fixture">fixture</option></select></div>
+              <div class="field"><label for="contact-mode">contact_mode</label><select id="contact-mode"><option value="">未知 / 留空</option><option value="stick">stick</option><option value="slide">slide</option><option value="roll">roll</option><option value="impact">impact</option></select></div>
+            </div>
+            <div class="field-grid">
+              <div class="field"><label for="segment-confidence">confidence (0,1]</label><input id="segment-confidence" type="number" min="0.01" max="1" step="0.01" placeholder="不预填"></div>
+              <div class="field"><label for="segment-evidence">segment 证据</label><select id="segment-evidence"><option value="">请选择…</option><option value="rgb_direct">rgb_direct</option><option value="rgb_temporal">rgb_temporal</option><option value="unknown">unknown</option></select></div>
+            </div>
+            <button id="delete-segment" type="button">删除选中区间</button>
+          </fieldset>
+
+          <fieldset>
+            <legend>本 episode 自检</legend>
+            <ul class="validation-list" id="validation-list" aria-live="polite"></ul>
+          </fieldset>
+        </form>
+        <div class="commit-zone">
+          <button id="commit-csv" type="button" disabled>生成外部 staged CSV</button>
+          <p>两份 CSV 与 submission receipt 只写外部状态目录；随后由预检 CLI 原子替换 packet 中已有的两个 CSV。</p>
+        </div>
+      </aside>
+    </section>
+  </main>
+  <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
+  <script>
+    "use strict";
+
+    const UI_BUILD_ID = "contact-annotation-ui-op34-v1";
+    const SESSION_SCHEMA = "offline_contact_annotation_ui_session_v1";
+    const PACKET_SCHEMA = "contact_dual_assignment_packet_v1_1";
+    const ANNOTATION_SCHEMA = "contact_segment_annotation_v1_1";
+    const DATASET_ID = "ego_pour_liquid_between_beakers";
+    const FRAME_CLOCK = "processed_action_20hz";
+    const EXPECTED_EPISODES = [43, 50, 51, 58, 34, 38, 9, 54, 36, 53, 12, 0];
+    const PACKET_FILES = ["ANNOTATION_GUIDE.md", "assignment_receipt.json", "coverage.csv", "identity.json", "segments.csv", "tasks.csv", "timeline_evidence_index.csv"];
+    const TASK_FIELDS = ["task_id", "episode_id", "coverage_start_frame", "coverage_end_frame", "frame_clock", "target_fps", "context_frames_each_side", "required_coverage_review"];
+    const EVIDENCE_FIELDS = ["task_id", "episode_id", "processed_frame", "processed_time_s", "video_frame", "video_time_s", "sync_error_ms", "media_id", "media_relpath", "video_sha256"];
+    const COVERAGE_FIELDS = ["schema_version", "dataset_id", "episode_id", "coverage_id", "annotation_role", "annotator_id", "review_status", "coverage_mode", "start_frame", "end_frame", "frame_clock", "evidence_scope", "label_origin", "review_timestamp_utc", "parent_coverage_ids", "notes"];
+    const SEGMENT_FIELDS = ["schema_version", "dataset_id", "episode_id", "coverage_id", "segment_id", "onset_event_id", "release_event_id", "annotation_role", "annotator_id", "review_status", "start_frame", "end_frame", "start_boundary", "end_boundary", "side", "site", "object_role", "contact_mode", "confidence", "evidence_scope", "label_origin", "source_proposal_id", "parent_segment_ids", "notes"];
+    const ALLOWED = {
+      coverage: new Set(["unknown", "positive_only", "exhaustive"]),
+      evidence: new Set(["rgb_direct", "rgb_temporal", "unknown"]),
+      startBoundary: new Set(["observed", "left_censored", "unknown"]),
+      endBoundary: new Set(["observed", "right_censored", "unknown"]),
+      side: new Set(["", "left", "right", "object_object"]),
+      site: new Set(["", "opposition", "primary", "support", "palm_or_jaw", "tool_tip", "other_surface"]),
+      objectRole: new Set(["", "manipulated", "tool", "receptacle", "fixture"]),
+      contactMode: new Set(["", "stick", "slide", "roll", "impact"])
+    };
+
+    const app = {
+      stateHandle: null,
+      packetHandle: null,
+      mediaRootHandle: null,
+      receipt: null,
+      identity: null,
+      tasks: [],
+      taskIndex: 0,
+      timelineByTask: new Map(),
+      mediaHandles: new Map(),
+      videoUrl: null,
+      currentFrame: 0,
+      selectedSegmentId: null,
+      idCounter: 0,
+      idTag: "",
+      autosaveTimer: null,
+      writing: false,
+      testMode: false
+    };
+
+    const $ = (selector) => document.querySelector(selector);
+    const $$ = (selector) => [...document.querySelectorAll(selector)];
+
+    function fail(message) { throw new Error(message); }
+    function setBootProgress(message) { $("#boot-progress").textContent = message; }
+    function toast(message, kind = "info") {
+      const item = document.createElement("div");
+      item.className = `toast ${kind === "error" ? "error" : ""}`;
+      item.textContent = message;
+      $("#toast-stack").append(item);
+      window.setTimeout(() => item.remove(), 5000);
+    }
+    function showFatal(error) {
+      const node = $("#boot-error");
+      node.textContent = error instanceof Error ? error.message : String(error);
+      node.classList.remove("hidden");
+      setBootProgress("预检失败；未载入任何工作区。请交给协调员处理。");
+    }
+    function assert(condition, message) { if (!condition) fail(message); }
+    function safeInteger(value, field) {
+      const number = Number(value);
+      assert(Number.isInteger(number), `${field} 必须是整数`);
+      return number;
+    }
+
+    function parseCSV(text, expectedFields) {
+      const rows = [];
+      let row = [], field = "", quoted = false;
+      const normalized = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      for (let i = 0; i < normalized.length; i += 1) {
+        const char = normalized[i];
+        if (quoted) {
+          if (char === '"' && normalized[i + 1] === '"') { field += '"'; i += 1; }
+          else if (char === '"') quoted = false;
+          else field += char;
+        } else if (char === '"') {
+          assert(field === "", "CSV 引号位置非法");
+          quoted = true;
+        } else if (char === ",") {
+          row.push(field); field = "";
+        } else if (char === "\n") {
+          row.push(field); field = "";
+          if (!(row.length === 1 && row[0] === "")) rows.push(row);
+          row = [];
+        } else field += char;
+      }
+      assert(!quoted, "CSV 存在未闭合引号");
+      if (field !== "" || row.length) { row.push(field); rows.push(row); }
+      assert(rows.length >= 1, "CSV 缺少 header");
+      assert(JSON.stringify(rows[0]) === JSON.stringify(expectedFields), "CSV header 与协议不一致");
+      return rows.slice(1).map((values, index) => {
+        assert(values.length === expectedFields.length, `CSV 第 ${index + 2} 行列数不一致`);
+        return Object.fromEntries(expectedFields.map((key, column) => [key, values[column].trim()]));
+      });
+    }
+
+    function csvCell(value) {
+      const text = String(value ?? "");
+      return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    }
+    function encodeCSV(rows, fields) {
+      return [fields.join(","), ...rows.map(row => fields.map(field => csvCell(row[field])).join(","))].join("\n") + "\n";
+    }
+
+    async function sha256Blob(blob) {
+      const payload = await blob.arrayBuffer();
+      const digest = await crypto.subtle.digest("SHA-256", payload);
+      return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("");
+    }
+    async function sha256Text(text) { return sha256Blob(new Blob([text], {type: "text/plain"})); }
+    async function readFile(handle) { return handle.getFile(); }
+    async function readText(handle) { return (await readFile(handle)).text(); }
+    async function writeText(handle, payload) {
+      const writer = await handle.createWritable({keepExistingData: false});
+      try { await writer.write(payload); await writer.close(); }
+      catch (error) { await writer.abort(); throw error; }
+    }
+    async function directoryEntries(handle) {
+      const result = new Map();
+      for await (const [name, entry] of handle.entries()) result.set(name, entry);
+      return result;
+    }
+    function exactSet(actual, expected, label) {
+      const a = [...actual].sort(), b = [...expected].sort();
+      assert(JSON.stringify(a) === JSON.stringify(b), `${label} 白名单不一致`);
+    }
+    function containsAbsolutePath(value) {
+      if (typeof value === "string") return value.startsWith("/");
+      if (Array.isArray(value)) return value.some(containsAbsolutePath);
+      if (value && typeof value === "object") return Object.values(value).some(containsAbsolutePath);
+      return false;
+    }
+    async function requirePermission(handle, mode) {
+      if (!handle.queryPermission) return;
+      let permission = await handle.queryPermission({mode});
+      if (permission !== "granted") permission = await handle.requestPermission({mode});
+      assert(permission === "granted", `${mode} 目录权限未授予`);
+    }
+
+    async function pickStateDirectory() {
+      try {
+        assert("showDirectoryPicker" in window, "浏览器不支持 File System Access API；请使用本机 Chromium/Chrome/Edge");
+        const handle = await window.showDirectoryPicker({id: "contact-ui-state", mode: "readwrite", startIn: "documents"});
+        await requirePermission(handle, "readwrite");
+        const entries = await directoryEntries(handle);
+        const fixedStateNames = new Set(["contact_annotation_ui_session.json", "contact_annotation_ui_autosave.json", "contact_annotation_ui_submission_receipt.json", "coverage.autosave.csv", "segments.autosave.csv", "coverage.submission.csv", "segments.submission.csv"]);
+        for (const [name, entry] of entries) {
+          const backupName = /^(coverage|segments)\.precommit\.[0-9TZ-]+\.[0-9]+\.csv$/.test(name);
+          assert(entry.kind === "file" && (fixedStateNames.has(name) || backupName), "状态目录含非白名单运行文件");
+        }
+        const receiptHandle = entries.get("contact_annotation_ui_session.json");
+        assert(receiptHandle?.kind === "file", "状态目录缺少预检 session receipt");
+        const receipt = JSON.parse(await readText(receiptHandle));
+        exactSet(Object.keys(receipt), ["session_schema_version", "ui_build_id", "packet_schema_version", "annotation_schema_version", "dataset_id", "frame_clock", "packet_id", "annotation_role", "annotator_id", "annotation_session_id", "tasks_sha256", "timeline_evidence_sha256", "annotation_guide_sha256", "identity_sha256", "assignment_receipt_sha256", "ui_sha256", "tasks", "created_utc", "privacy_boundary"], "session receipt 字段");
+        assert(!Object.values(receipt).some(value => typeof value === "string" && value.startsWith("/")), "session receipt 不得含绝对路径");
+        assert(receipt.session_schema_version === SESSION_SCHEMA, "session receipt schema 不一致");
+        assert(receipt.ui_build_id === UI_BUILD_ID, "session receipt 绑定的 UI build 不一致");
+        assert(receipt.packet_schema_version === PACKET_SCHEMA, "packet schema 不一致");
+        assert(receipt.annotation_schema_version === ANNOTATION_SCHEMA, "annotation schema 不一致");
+        assert(receipt.dataset_id === DATASET_ID && receipt.frame_clock === FRAME_CLOCK, "dataset 或 frame clock 不一致");
+        assert(receipt.privacy_boundary === "three disjoint roots: exact-seven-file packet + twelve-MP4 media + identity-locked state", "session receipt 隔离边界不一致");
+        assert(Array.isArray(receipt.tasks) && receipt.tasks.length === 12, "session receipt 任务数不一致");
+        app.stateHandle = handle;
+        app.receipt = Object.freeze(receipt);
+        $("#pick-state").textContent = "状态目录已锁定";
+        $("#pick-state").disabled = true;
+        $("#pick-packet").disabled = false;
+        setBootProgress("状态 receipt 有效。请选择自己的 packet。");
+      } catch (error) { showFatal(error); }
+    }
+
+    function validateIdentity(identity) {
+      const realId = value => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$/.test(value) && !/^(UNASSIGNED_|REPLACE_|PLACEHOLDER_)/.test(value);
+      assert(identity.packet_schema_version === PACKET_SCHEMA, "identity packet schema 不一致");
+      assert(["independent_a", "independent_b"].includes(identity.annotation_role), "只接受独立 A/B 角色");
+      assert(identity.identity_status === "assigned_by_coordinator", "identity 尚未由协调员分配");
+      ["packet_id", "annotator_id", "annotation_session_id"].forEach(field => assert(realId(identity[field]), `${field} 非法或仍是占位值`));
+      assert(identity.proposal_material_included === false && identity.other_annotator_material_included === false, "隔离声明不成立");
+      ["packet_id", "annotation_role", "annotator_id", "annotation_session_id"].forEach(field => assert(identity[field] === app.receipt[field], `${field} 与 session receipt 不一致`));
+    }
+
+    function validateTasks(rows) {
+      assert(rows.length === 12, "任务数必须为 12");
+      assert(JSON.stringify(rows.map(row => Number(row.episode_id))) === JSON.stringify(EXPECTED_EPISODES), "episode 集合或顺序不一致");
+      rows.forEach((row, index) => {
+        assert(row.task_id === `contact-min12-${String(index).padStart(2, "0")}`, "task_id 不一致");
+        assert(Number(row.coverage_start_frame) === 0 && safeInteger(row.coverage_end_frame, "coverage_end_frame") > 0, "coverage 边界不一致");
+        assert(row.frame_clock === FRAME_CLOCK && Number(row.target_fps) === 20, "20 Hz frame clock 不一致");
+        assert(Number(row.context_frames_each_side) === 10 && row.required_coverage_review === "full_episode", "复核任务定义不一致");
+        const bound = app.receipt.tasks[index];
+        assert(bound.task_id === row.task_id && bound.episode_id === Number(row.episode_id) && bound.coverage_end_frame === Number(row.coverage_end_frame), "任务与 session receipt 不一致");
+      });
+    }
+
+    function validateTimeline(rows, taskRows) {
+      const grouped = new Map(taskRows.map(row => [row.task_id, []]));
+      rows.forEach(row => {
+        assert(grouped.has(row.task_id), "timeline 含非分配任务");
+        grouped.get(row.task_id).push(row);
+      });
+      taskRows.forEach((task, index) => {
+        const taskRowsTimeline = grouped.get(task.task_id);
+        assert(taskRowsTimeline.length === Number(task.coverage_end_frame), "timeline processed 帧不完整");
+        taskRowsTimeline.forEach((row, frame) => {
+          assert(Number(row.episode_id) === Number(task.episode_id), "timeline episode 不一致");
+          assert(Number(row.processed_frame) === frame, "timeline processed 帧顺序不一致");
+          assert(Math.abs(Number(row.processed_time_s) - frame / 20) <= 1e-6, "timeline 20 Hz 时间不一致");
+          assert(row.media_relpath === `media/${task.task_id}.mp4`, "timeline media 路径不在白名单");
+          assert(row.video_sha256 === app.receipt.tasks[index].media_sha256, "timeline media hash 不一致");
+        });
+      });
+      app.timelineByTask = grouped;
+    }
+
+    function blankSegmentFromRow(row) {
+      return {
+        id: row.segment_id,
+        onsetId: row.onset_event_id,
+        releaseId: row.release_event_id,
+        start: row.start_frame === "" ? "" : Number(row.start_frame),
+        end: row.end_frame === "" ? "" : Number(row.end_frame),
+        startBoundary: row.start_boundary,
+        endBoundary: row.end_boundary,
+        side: row.side,
+        site: row.site,
+        objectRole: row.object_role,
+        contactMode: row.contact_mode,
+        confidence: row.confidence,
+        evidence: row.evidence_scope
+      };
+    }
+
+    function buildTaskState(taskRows, coverageRows, segmentRows) {
+      assert(coverageRows.length === 12, "coverage 必须每任务一行");
+      const coverageByEpisode = new Map(coverageRows.map(row => [Number(row.episode_id), row]));
+      const segmentByCoverage = new Map(coverageRows.map(row => [row.coverage_id, []]));
+      segmentRows.forEach(row => {
+        assert(segmentByCoverage.has(row.coverage_id), "segment coverage_id 不属于本 packet");
+        segmentByCoverage.get(row.coverage_id).push(blankSegmentFromRow(row));
+      });
+      return taskRows.map(task => {
+        const row = coverageByEpisode.get(Number(task.episode_id));
+        assert(row, "coverage episode 集合不一致");
+        assert(row.schema_version === ANNOTATION_SCHEMA && row.dataset_id === DATASET_ID, "coverage schema/dataset 不一致");
+        assert(row.annotation_role === app.identity.annotation_role && row.annotator_id === app.identity.annotator_id, "coverage identity 不一致");
+        assert(Number(row.start_frame) === 0 && Number(row.end_frame) === Number(task.coverage_end_frame), "coverage 固定边界漂移");
+        assert(row.frame_clock === FRAME_CLOCK && row.label_origin === "human_independent" && row.parent_coverage_ids === "", "coverage 固定 provenance 漂移");
+        assert(["in_progress", "submitted"].includes(row.review_status), "coverage review_status 非法");
+        if (row.review_status === "in_progress") assert(row.coverage_mode === "" && row.evidence_scope === "" && row.review_timestamp_utc === "", "未提交模板已含预填标签");
+        if (row.review_status === "submitted") assert(ALLOWED.coverage.has(row.coverage_mode) && ALLOWED.evidence.has(row.evidence_scope), "已提交 coverage 字段非法");
+        return {
+          ...task,
+          episode_id: Number(task.episode_id),
+          coverage_start_frame: 0,
+          coverage_end_frame: Number(task.coverage_end_frame),
+          coverage: {id: row.coverage_id, mode: row.coverage_mode, evidence: row.evidence_scope},
+          segments: segmentByCoverage.get(row.coverage_id)
+        };
+      });
+    }
+
+    async function pickPacketDirectory() {
+      try {
+        $("#boot-error").classList.add("hidden");
+        setBootProgress("校验 packet 的精确 7 文件、身份与时间轴…");
+        const handle = await window.showDirectoryPicker({id: "contact-ui-packet", mode: "read"});
+        await requirePermission(handle, "read");
+        if (app.stateHandle.isSameEntry) assert(!(await app.stateHandle.isSameEntry(handle)), "状态目录不能与 packet 相同");
+        const entries = await directoryEntries(handle);
+        exactSet(entries.keys(), PACKET_FILES, "packet 根目录");
+        PACKET_FILES.forEach(name => assert(entries.get(name)?.kind === "file", `${name} 不是普通文件`));
+
+        const identityText = await readText(entries.get("identity.json"));
+        const receiptText = await readText(entries.get("assignment_receipt.json"));
+        const tasksText = await readText(entries.get("tasks.csv"));
+        const timelineText = await readText(entries.get("timeline_evidence_index.csv"));
+        const guideFile = await readFile(entries.get("ANNOTATION_GUIDE.md"));
+        const coverageText = await readText(entries.get("coverage.csv"));
+        const segmentsText = await readText(entries.get("segments.csv"));
+        app.identity = Object.freeze(JSON.parse(identityText));
+        validateIdentity(app.identity);
+        const immutableChecks = [
+          ["identity_sha256", await sha256Text(identityText)],
+          ["assignment_receipt_sha256", await sha256Text(receiptText)],
+          ["tasks_sha256", await sha256Text(tasksText)],
+          ["timeline_evidence_sha256", await sha256Text(timelineText)],
+          ["annotation_guide_sha256", await sha256Blob(guideFile)]
+        ];
+        immutableChecks.forEach(([field, actual]) => assert(app.receipt[field] === actual, `${field} 与预检 receipt 不一致`));
+
+        const assignmentReceipt = JSON.parse(receiptText);
+        assert(assignmentReceipt.packet_id === app.identity.packet_id, "assignment receipt packet_id 不一致");
+        exactSet(assignmentReceipt.packet_file_allowlist, PACKET_FILES, "assignment 文件");
+        const taskRows = parseCSV(tasksText, TASK_FIELDS);
+        validateTasks(taskRows);
+        const timelineRows = parseCSV(timelineText, EVIDENCE_FIELDS);
+        validateTimeline(timelineRows, taskRows);
+        app.packetHandle = handle;
+        const coverageRows = parseCSV(coverageText, COVERAGE_FIELDS);
+        const segmentRows = parseCSV(segmentsText, SEGMENT_FIELDS);
+        app.tasks = buildTaskState(taskRows, coverageRows, segmentRows);
+        app.idTag = (await sha256Text(app.identity.annotation_session_id)).slice(0, 8);
+        app.idCounter = Math.max(0, ...app.tasks.flatMap(task => task.segments.map(segment => {
+          const match = segment.id.match(/-(\d{4})-/); return match ? Number(match[1]) : 0;
+        })));
+        $("#pick-packet").textContent = "7 文件 packet 已锁定";
+        $("#pick-packet").disabled = true;
+        $("#pick-media").disabled = false;
+        setBootProgress("packet、身份与 processed 时间轴有效。请选择独立媒体目录。");
+      } catch (error) { showFatal(error); }
+    }
+
+    async function pickMediaDirectory() {
+      try {
+        setBootProgress("校验独立媒体目录的精确 12 个 MP4 与 SHA-256…");
+        const handle = await window.showDirectoryPicker({id: "contact-ui-media", mode: "read"});
+        await requirePermission(handle, "read");
+        if (app.stateHandle.isSameEntry) assert(!(await app.stateHandle.isSameEntry(handle)), "媒体目录不能与状态目录相同");
+        if (app.packetHandle.isSameEntry) assert(!(await app.packetHandle.isSameEntry(handle)), "媒体目录不能与 packet 相同");
+        const mediaEntries = await directoryEntries(handle);
+        const expectedMedia = app.tasks.map(row => `${row.task_id}.mp4`);
+        exactSet(mediaEntries.keys(), expectedMedia, "独立媒体目录");
+        for (let index = 0; index < app.tasks.length; index += 1) {
+          const filename = expectedMedia[index];
+          const mediaHandle = mediaEntries.get(filename);
+          assert(mediaHandle?.kind === "file", `${filename} 不是普通文件`);
+          setBootProgress(`校验媒体 ${index + 1} / 12 · ${app.tasks[index].task_id}`);
+          assert(await sha256Blob(await readFile(mediaHandle)) === app.receipt.tasks[index].media_sha256, `${filename} hash 不一致`);
+          app.mediaHandles.set(app.tasks[index].task_id, mediaHandle);
+        }
+        app.mediaRootHandle = handle;
+        await restoreAutosave();
+        lockIdentityHeader();
+        $("#boot").classList.add("hidden");
+        $("#workspace-main").classList.add("ready");
+        await selectTask(0);
+        renderAll();
+        toast("三目录隔离校验通过；身份与 session 已锁定。");
+      } catch (error) { showFatal(error); }
+    }
+
+    function lockIdentityHeader() {
+      $("#identity-role").textContent = app.identity.annotation_role;
+      $("#identity-annotator").textContent = app.identity.annotator_id;
+      $("#identity-session").textContent = app.identity.annotation_session_id;
+      $("#identity-packet").textContent = app.identity.packet_id;
+      $("#save-status").textContent = "草稿待写入";
+    }
+
+    function currentTask() { return app.tasks[app.taskIndex]; }
+    function currentSegment() { return currentTask()?.segments.find(item => item.id === app.selectedSegmentId) ?? null; }
+
+    function segmentErrors(segment, task) {
+      const errors = [];
+      if (!Number.isInteger(Number(segment.start)) || !Number.isInteger(Number(segment.end))) errors.push("区间起止帧必须是整数");
+      else if (!(0 <= Number(segment.start) && Number(segment.start) < Number(segment.end) && Number(segment.end) <= task.coverage_end_frame)) errors.push("区间必须满足 0 ≤ start < end ≤ coverage end");
+      if (!ALLOWED.startBoundary.has(segment.startBoundary)) errors.push("请选择起点边界");
+      if (!ALLOWED.endBoundary.has(segment.endBoundary)) errors.push("请选择终点边界");
+      if (segment.startBoundary === "left_censored" && Number(segment.start) !== 0) errors.push("left_censored 的 start 必须为 0");
+      if (segment.endBoundary === "right_censored" && Number(segment.end) !== task.coverage_end_frame) errors.push("right_censored 的 end 必须等于 coverage end");
+      if (!ALLOWED.side.has(segment.side) || !ALLOWED.site.has(segment.site) || !ALLOWED.objectRole.has(segment.objectRole) || !ALLOWED.contactMode.has(segment.contactMode)) errors.push("类别字段含非法值");
+      const confidence = Number(segment.confidence);
+      if (!(confidence > 0 && confidence <= 1)) errors.push("confidence 必须在 (0,1]");
+      if (!ALLOWED.evidence.has(segment.evidence)) errors.push("请选择 RGB segment 证据或 unknown");
+      return errors;
+    }
+
+    function taskErrors(task) {
+      const errors = [];
+      if (!ALLOWED.coverage.has(task.coverage.mode)) errors.push("请选择 coverage 结论");
+      if (!ALLOWED.evidence.has(task.coverage.evidence)) errors.push("请选择 coverage 证据范围");
+      if (task.coverage.mode === "unknown" && task.segments.length) errors.push("unknown coverage 不能含 segment");
+      if (task.coverage.mode === "positive_only" && !task.segments.length) errors.push("positive_only 至少需要一个 segment");
+      task.segments.forEach((segment, index) => segmentErrors(segment, task).forEach(error => errors.push(`区间 ${index + 1}: ${error}`)));
+      const ids = task.segments.flatMap(item => [item.id, item.onsetId, item.releaseId].filter(Boolean));
+      if (new Set(ids).size !== ids.length) errors.push("segment/event ID 发生碰撞");
+      return errors;
+    }
+
+    function renderTaskList() {
+      const list = $("#task-list"); list.replaceChildren();
+      let complete = 0;
+      app.tasks.forEach((task, index) => {
+        const errors = taskErrors(task);
+        if (!errors.length) complete += 1;
+        const item = document.createElement("li"); item.className = "task-item";
+        const button = document.createElement("button"); button.type = "button";
+        button.setAttribute("aria-current", String(index === app.taskIndex));
+        button.innerHTML = `<span class="task-index">${String(index + 1).padStart(2, "0")}</span><span><span class="task-episode">Episode ${task.episode_id}</span><small class="task-meta">${task.coverage_end_frame} frames · ${task.segments.length} segments</small></span><span class="task-state ${errors.length ? (task.coverage.mode ? "error" : "") : "complete"}">${errors.length ? (task.coverage.mode ? "需检查" : "未开始") : "READY"}</span>`;
+        button.addEventListener("click", () => selectTask(index));
+        item.append(button); list.append(item);
+      });
+      $("#complete-count").textContent = String(complete);
+      $("#progress-fill").style.width = `${complete / app.tasks.length * 100}%`;
+      $("#commit-csv").disabled = complete !== app.tasks.length || app.writing || app.testMode;
+    }
+
+    function renderStage() {
+      const task = currentTask(); if (!task) return;
+      $("#stage-task").textContent = task.task_id;
+      $("#stage-title").textContent = `Episode ${task.episode_id}`;
+      $("#timeline-end").textContent = `end · ${task.coverage_end_frame}`;
+      const slider = $("#frame-slider"); slider.max = String(task.coverage_end_frame - 1); slider.value = String(app.currentFrame);
+      renderFrameReadout();
+      const track = $("#segment-track"); track.replaceChildren();
+      task.segments.forEach(segment => {
+        if (!Number.isFinite(Number(segment.start)) || !Number.isFinite(Number(segment.end))) return;
+        const marker = document.createElement("span"); marker.className = "segment-mark";
+        marker.style.left = `${Number(segment.start) / task.coverage_end_frame * 100}%`;
+        marker.style.width = `${Math.max(.3, (Number(segment.end) - Number(segment.start)) / task.coverage_end_frame * 100)}%`;
+        marker.title = `${segment.id} [${segment.start}, ${segment.end})`;
+        track.append(marker);
+      });
+    }
+
+    function renderFrameReadout() {
+      const row = app.timelineByTask.get(currentTask().task_id)?.[app.currentFrame];
+      $("#frame-readout").textContent = row ? `P ${String(app.currentFrame).padStart(4, "0")} / V ${String(row.video_frame).padStart(4, "0")} / ${Number(row.video_time_s).toFixed(3)} s` : `P ${app.currentFrame}`;
+    }
+
+    function renderLedger() {
+      const task = currentTask(); const root = $("#segment-table-wrap"); root.replaceChildren();
+      if (!task.segments.length) { const empty = document.createElement("p"); empty.className = "empty-ledger"; empty.textContent = "尚无区间。只有看到真实物理接触后才新建。"; root.append(empty); return; }
+      const table = document.createElement("table");
+      table.innerHTML = "<thead><tr><th>ID</th><th>[start,end)</th><th>side</th><th>mode</th><th>状态</th><th></th></tr></thead>";
+      const body = document.createElement("tbody");
+      task.segments.forEach(segment => {
+        const row = document.createElement("tr"); if (segment.id === app.selectedSegmentId) row.className = "selected";
+        const errors = segmentErrors(segment, task);
+        row.innerHTML = `<td>${segment.id}</td><td>[${segment.start === "" ? "?" : segment.start}, ${segment.end === "" ? "?" : segment.end})</td><td>${segment.side || "—"}</td><td>${segment.contactMode || "—"}</td><td>${errors.length ? `${errors.length} 项待填` : "完整"}</td>`;
+        const action = document.createElement("td"); const button = document.createElement("button"); button.type = "button"; button.textContent = "编辑"; button.addEventListener("click", () => { app.selectedSegmentId = segment.id; renderAll(); $("#segment-start").focus(); }); action.append(button); row.append(action); body.append(row);
+      });
+      table.append(body); root.append(table);
+    }
+
+    function setFieldValue(id, value) { $(id).value = value ?? ""; }
+    function renderInspector() {
+      const task = currentTask(); const segment = currentSegment();
+      setFieldValue("#coverage-mode", task.coverage.mode);
+      setFieldValue("#coverage-evidence", task.coverage.evidence);
+      $("#segment-fields").disabled = !segment;
+      if (segment) {
+        setFieldValue("#segment-start", segment.start); setFieldValue("#segment-end", segment.end);
+        setFieldValue("#start-boundary", segment.startBoundary); setFieldValue("#end-boundary", segment.endBoundary);
+        setFieldValue("#segment-side", segment.side); setFieldValue("#segment-site", segment.site);
+        setFieldValue("#object-role", segment.objectRole); setFieldValue("#contact-mode", segment.contactMode);
+        setFieldValue("#segment-confidence", segment.confidence); setFieldValue("#segment-evidence", segment.evidence);
+        $("#segment-start").max = String(task.coverage_end_frame - 1); $("#segment-end").max = String(task.coverage_end_frame);
+      }
+      const list = $("#validation-list"); list.replaceChildren();
+      taskErrors(task).forEach(error => { const item = document.createElement("li"); item.textContent = error; list.append(item); });
+    }
+
+    function renderAll() { renderTaskList(); renderStage(); renderLedger(); renderInspector(); }
+
+    async function selectTask(index) {
+      app.taskIndex = index; app.currentFrame = 0; app.selectedSegmentId = app.tasks[index].segments[0]?.id ?? null;
+      if (app.videoUrl) { URL.revokeObjectURL(app.videoUrl); app.videoUrl = null; }
+      const mediaHandle = app.mediaHandles.get(currentTask().task_id);
+      if (mediaHandle) {
+        app.videoUrl = URL.createObjectURL(await readFile(mediaHandle));
+        $("#video").src = app.videoUrl;
+      } else { $("#video").removeAttribute("src"); }
+      seekFrame(0); renderAll();
+    }
+
+    function seekFrame(frame) {
+      const task = currentTask(); if (!task) return;
+      app.currentFrame = Math.max(0, Math.min(task.coverage_end_frame - 1, safeInteger(frame, "processed frame")));
+      const row = app.timelineByTask.get(task.task_id)?.[app.currentFrame];
+      if (row && Number.isFinite(Number(row.video_time_s))) $("#video").currentTime = Number(row.video_time_s);
+      $("#frame-slider").value = String(app.currentFrame); renderFrameReadout();
+    }
+
+    function syncFromVideo() {
+      const rows = app.timelineByTask.get(currentTask()?.task_id); if (!rows?.length || $("#video").seeking) return;
+      const time = $("#video").currentTime;
+      let low = 0, high = rows.length - 1;
+      while (low < high) { const mid = Math.floor((low + high) / 2); if (Number(rows[mid].video_time_s) < time) low = mid + 1; else high = mid; }
+      const candidates = [Math.max(0, low - 1), low];
+      app.currentFrame = candidates.reduce((best, index) => Math.abs(Number(rows[index].video_time_s) - time) < Math.abs(Number(rows[best].video_time_s) - time) ? index : best, candidates[0]);
+      $("#frame-slider").value = String(app.currentFrame); renderFrameReadout();
+    }
+
+    function addSegment() {
+      const task = currentTask(); app.idCounter += 1;
+      const prefix = app.identity.annotation_role.endsWith("a") ? "a" : "b";
+      const serial = String(app.idCounter).padStart(4, "0");
+      const base = `${prefix}-seg-e${String(task.episode_id).padStart(3, "0")}-${serial}-${app.idTag}`;
+      const segment = {id: base, onsetId: "", releaseId: "", start: app.currentFrame, end: "", startBoundary: "", endBoundary: "", side: "", site: "", objectRole: "", contactMode: "", confidence: "", evidence: ""};
+      task.segments.push(segment); app.selectedSegmentId = segment.id; changed(); $("#segment-end").focus();
+    }
+
+    function updateSegment(field, value) {
+      const segment = currentSegment(); if (!segment) return;
+      segment[field] = value;
+      const prefix = app.identity.annotation_role.endsWith("a") ? "a" : "b";
+      if (field === "startBoundary") segment.onsetId = value === "observed" ? segment.id.replace(`${prefix}-seg-`, `${prefix}-on-`) : "";
+      if (field === "endBoundary") segment.releaseId = value === "observed" ? segment.id.replace(`${prefix}-seg-`, `${prefix}-off-`) : "";
+      changed();
+    }
+
+    function changed() {
+      renderAll(); $("#save-status").textContent = "草稿待 autosave";
+      clearTimeout(app.autosaveTimer); app.autosaveTimer = setTimeout(saveAutosave, 450);
+    }
+
+    function draftPayload() {
+      return {
+        draft_schema_version: "offline_contact_annotation_ui_draft_v1",
+        ui_build_id: UI_BUILD_ID,
+        packet_id: app.identity.packet_id,
+        annotation_role: app.identity.annotation_role,
+        annotator_id: app.identity.annotator_id,
+        annotation_session_id: app.identity.annotation_session_id,
+        tasks_sha256: app.receipt.tasks_sha256,
+        timeline_evidence_sha256: app.receipt.timeline_evidence_sha256,
+        id_counter: app.idCounter,
+        task_states: app.tasks.map(task => ({task_id: task.task_id, episode_id: task.episode_id, coverage: task.coverage, segments: task.segments})),
+        saved_utc: new Date().toISOString().replace(/\.\d{3}Z$/, "Z")
+      };
+    }
+
+    async function saveStateFile(name, payload) {
+      assert(app.stateHandle, "状态目录尚未锁定");
+      const handle = await app.stateHandle.getFileHandle(name, {create: true});
+      await writeText(handle, JSON.stringify(payload, null, 2) + "\n");
+    }
+
+    async function saveAutosave() {
+      if (!app.stateHandle || !app.identity || app.testMode) return;
+      try {
+        const payload = draftPayload();
+        await saveStateFile("contact_annotation_ui_autosave.json", payload);
+        const coverageHandle = await app.stateHandle.getFileHandle("coverage.autosave.csv", {create: true});
+        const segmentsHandle = await app.stateHandle.getFileHandle("segments.autosave.csv", {create: true});
+        await writeText(coverageHandle, encodeCSV(coverageRows("", "in_progress"), COVERAGE_FIELDS));
+        await writeText(segmentsHandle, encodeCSV(segmentRows("in_progress"), SEGMENT_FIELDS));
+        $("#save-status").textContent = `autosave · ${payload.saved_utc.slice(11, 19)}Z`;
+      } catch (error) { $("#save-status").textContent = "autosave 失败"; toast(error.message, "error"); }
+    }
+
+    async function restoreAutosave() {
+      const entries = await directoryEntries(app.stateHandle);
+      const handle = entries.get("contact_annotation_ui_autosave.json"); if (!handle) return;
+      const draft = JSON.parse(await readText(handle));
+      exactSet(Object.keys(draft), ["draft_schema_version", "ui_build_id", "packet_id", "annotation_role", "annotator_id", "annotation_session_id", "tasks_sha256", "timeline_evidence_sha256", "id_counter", "task_states", "saved_utc"], "autosave 字段");
+      assert(!containsAbsolutePath(draft), "autosave 不得含绝对路径");
+      ["packet_id", "annotation_role", "annotator_id", "annotation_session_id", "tasks_sha256", "timeline_evidence_sha256"].forEach(field => assert(draft[field] === (field in app.identity ? app.identity[field] : app.receipt[field]), `autosave ${field} 与锁定 session 不一致`));
+      assert(draft.ui_build_id === UI_BUILD_ID && draft.draft_schema_version === "offline_contact_annotation_ui_draft_v1", "autosave schema/build 不一致");
+      assert(Array.isArray(draft.task_states) && draft.task_states.length === 12, "autosave task 数不一致");
+      draft.task_states.forEach((saved, index) => {
+        exactSet(Object.keys(saved), ["task_id", "episode_id", "coverage", "segments"], "autosave task 字段");
+        exactSet(Object.keys(saved.coverage), ["id", "mode", "evidence"], "autosave coverage 字段");
+        saved.segments.forEach(segment => exactSet(Object.keys(segment), ["id", "onsetId", "releaseId", "start", "end", "startBoundary", "endBoundary", "side", "site", "objectRole", "contactMode", "confidence", "evidence"], "autosave segment 字段"));
+        assert(saved.task_id === app.tasks[index].task_id && saved.episode_id === app.tasks[index].episode_id, "autosave episode/task 集不一致");
+        app.tasks[index].coverage = saved.coverage;
+        app.tasks[index].segments = saved.segments;
+      });
+      app.idCounter = Number(draft.id_counter) || 0;
+      toast(`已恢复 ${draft.saved_utc} 的身份锁定草稿。`);
+    }
+
+    function coverageRows(timestamp, reviewStatus = "submitted") {
+      return app.tasks.map(task => ({
+        schema_version: ANNOTATION_SCHEMA, dataset_id: DATASET_ID, episode_id: task.episode_id,
+        coverage_id: task.coverage.id, annotation_role: app.identity.annotation_role,
+        annotator_id: app.identity.annotator_id, review_status: reviewStatus,
+        coverage_mode: task.coverage.mode, start_frame: 0, end_frame: task.coverage_end_frame,
+        frame_clock: FRAME_CLOCK, evidence_scope: task.coverage.evidence,
+        label_origin: "human_independent", review_timestamp_utc: timestamp,
+        parent_coverage_ids: "", notes: ""
+      }));
+    }
+
+    function segmentRows(reviewStatus = "submitted") {
+      return app.tasks.flatMap(task => task.segments.map(segment => ({
+        schema_version: ANNOTATION_SCHEMA, dataset_id: DATASET_ID, episode_id: task.episode_id,
+        coverage_id: task.coverage.id, segment_id: segment.id,
+        onset_event_id: segment.startBoundary === "observed" ? segment.onsetId : "",
+        release_event_id: segment.endBoundary === "observed" ? segment.releaseId : "",
+        annotation_role: app.identity.annotation_role, annotator_id: app.identity.annotator_id,
+        review_status: reviewStatus,
+        start_frame: reviewStatus === "submitted" ? Number(segment.start) : segment.start,
+        end_frame: reviewStatus === "submitted" ? Number(segment.end) : segment.end,
+        start_boundary: segment.startBoundary, end_boundary: segment.endBoundary,
+        side: segment.side, site: segment.site, object_role: segment.objectRole,
+        contact_mode: segment.contactMode,
+        confidence: reviewStatus === "submitted" ? Number(segment.confidence).toString() : segment.confidence,
+        evidence_scope: segment.evidence, label_origin: "human_independent",
+        source_proposal_id: "", parent_segment_ids: "", notes: ""
+      })));
+    }
+
+    function validateAll() {
+      const errors = app.tasks.flatMap(task => taskErrors(task).map(error => `${task.task_id}: ${error}`));
+      const allIds = app.tasks.flatMap(task => task.segments.flatMap(segment => [segment.id, segment.onsetId, segment.releaseId].filter(Boolean)));
+      if (new Set(allIds).size !== allIds.length) errors.push("跨 episode 的 segment/event ID 发生碰撞");
+      return errors;
+    }
+
+    async function commitCsv() {
+      const errors = validateAll(); if (errors.length) { toast(`不能提交：${errors[0]}`, "error"); return; }
+      assert(!app.testMode, "browser test mode 禁止文件写入");
+      app.writing = true; renderTaskList(); $("#save-status").textContent = "正在写入…";
+      try {
+        const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+        const coverageText = encodeCSV(coverageRows(timestamp), COVERAGE_FIELDS);
+        const segmentsText = encodeCSV(segmentRows(), SEGMENT_FIELDS);
+        assert(JSON.stringify(parseCSV(coverageText, COVERAGE_FIELDS)) === JSON.stringify(coverageRows(timestamp).map(row => Object.fromEntries(COVERAGE_FIELDS.map(field => [field, String(row[field] ?? "").trim()])))), "coverage CSV roundtrip 不一致");
+        assert(JSON.stringify(parseCSV(segmentsText, SEGMENT_FIELDS)) === JSON.stringify(segmentRows().map(row => Object.fromEntries(SEGMENT_FIELDS.map(field => [field, String(row[field] ?? "").trim()])))), "segments CSV roundtrip 不一致");
+        const segmentsHandle = await app.stateHandle.getFileHandle("segments.submission.csv", {create: true});
+        const coverageHandle = await app.stateHandle.getFileHandle("coverage.submission.csv", {create: true});
+        await writeText(segmentsHandle, segmentsText);
+        await writeText(coverageHandle, coverageText);
+        assert(await readText(segmentsHandle) === segmentsText && await readText(coverageHandle) === coverageText, "CSV 写后回读不一致");
+        const receipt = {
+          submission_receipt_schema: "offline_contact_annotation_ui_submission_v1",
+          ui_build_id: UI_BUILD_ID,
+          packet_id: app.identity.packet_id,
+          annotation_role: app.identity.annotation_role,
+          annotator_id: app.identity.annotator_id,
+          annotation_session_id: app.identity.annotation_session_id,
+          coverage_sha256: await sha256Text(coverageText), segments_sha256: await sha256Text(segmentsText),
+          coverage_rows: 12, segment_rows: segmentRows().length, submitted_utc: timestamp,
+          checker_claim: "not evaluated here; coordinator must run the existing formal checker after isolated collection"
+        };
+        await saveStateFile("contact_annotation_ui_submission_receipt.json", receipt);
+        await saveAutosave();
+        $("#save-status").textContent = `staged CSV 已回读 · ${timestamp.slice(11, 19)}Z`;
+        toast("两份 staged CSV 已写入外部 state 并回读一致。请运行 CLI 原子提交，再由协调员运行正式 checker。", "info");
+      } catch (error) { $("#save-status").textContent = "CSV 写入失败"; toast(error.message, "error"); }
+      finally { app.writing = false; renderTaskList(); }
+    }
+
+    function bindForm() {
+      $("#coverage-mode").addEventListener("change", event => { currentTask().coverage.mode = event.target.value; changed(); });
+      $("#coverage-evidence").addEventListener("change", event => { currentTask().coverage.evidence = event.target.value; changed(); });
+      const segmentBindings = {
+        "#segment-start": ["start", value => value === "" ? "" : Number(value)],
+        "#segment-end": ["end", value => value === "" ? "" : Number(value)],
+        "#start-boundary": ["startBoundary", String], "#end-boundary": ["endBoundary", String],
+        "#segment-side": ["side", String], "#segment-site": ["site", String],
+        "#object-role": ["objectRole", String], "#contact-mode": ["contactMode", String],
+        "#segment-confidence": ["confidence", String], "#segment-evidence": ["evidence", String]
+      };
+      Object.entries(segmentBindings).forEach(([selector, [field, cast]]) => $(selector).addEventListener("change", event => updateSegment(field, cast(event.target.value))));
+      $("#mark-start").addEventListener("click", () => updateSegment("start", app.currentFrame));
+      $("#mark-end").addEventListener("click", () => updateSegment("end", app.currentFrame));
+      $("#delete-segment").addEventListener("click", () => {
+        const task = currentTask(); const index = task.segments.findIndex(item => item.id === app.selectedSegmentId);
+        if (index >= 0) task.segments.splice(index, 1);
+        app.selectedSegmentId = task.segments[0]?.id ?? null; changed();
+      });
+    }
+
+    function bindTransport() {
+      $("#frame-prev").addEventListener("click", () => seekFrame(app.currentFrame - 1));
+      $("#frame-next").addEventListener("click", () => seekFrame(app.currentFrame + 1));
+      $("#play-toggle").addEventListener("click", () => $("#video").paused ? $("#video").play() : $("#video").pause());
+      $("#video").addEventListener("play", () => $("#play-toggle").textContent = "暂停");
+      $("#video").addEventListener("pause", () => $("#play-toggle").textContent = "播放");
+      $("#video").addEventListener("timeupdate", syncFromVideo);
+      $("#frame-slider").addEventListener("input", event => seekFrame(Number(event.target.value)));
+      $$("[data-rate]").forEach(button => button.addEventListener("click", () => {
+        $("#video").playbackRate = Number(button.dataset.rate);
+        $$("[data-rate]").forEach(item => item.setAttribute("aria-pressed", String(item === button)));
+      }));
+    }
+
+    function bindHotkeys() {
+      document.addEventListener("keydown", event => {
+        if (!$("#workspace-main").classList.contains("ready")) return;
+        if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(event.target.tagName)) return;
+        if (event.code === "Space") { event.preventDefault(); $("#play-toggle").click(); }
+        else if (event.key === "ArrowLeft") { event.preventDefault(); seekFrame(app.currentFrame - (event.shiftKey ? 10 : 1)); }
+        else if (event.key === "ArrowRight") { event.preventDefault(); seekFrame(app.currentFrame + (event.shiftKey ? 10 : 1)); }
+        else if (event.key.toLowerCase() === "n") { event.preventDefault(); addSegment(); }
+        else if (event.key.toLowerCase() === "i" && currentSegment()) { event.preventDefault(); updateSegment("start", app.currentFrame); }
+        else if (event.key.toLowerCase() === "o" && currentSegment()) { event.preventDefault(); updateSegment("end", app.currentFrame); }
+      });
+    }
+
+    function mountBrowserTestFixture() {
+      assert(new URL(location.href).searchParams.get("test") === "1", "test fixture 仅允许 ?test=1");
+      app.testMode = true;
+      app.identity = Object.freeze({packet_id: "contact-v1.1-a-browser-test", annotation_role: "independent_a", annotator_id: "browser-test-a", annotation_session_id: "browser-session-a"});
+      app.receipt = Object.freeze({tasks_sha256: "0".repeat(64), timeline_evidence_sha256: "1".repeat(64)});
+      app.idTag = "deadbeef";
+      app.tasks = EXPECTED_EPISODES.map((episode, index) => ({task_id: `contact-min12-${String(index).padStart(2, "0")}`, episode_id: episode, coverage_start_frame: 0, coverage_end_frame: 40 + index, coverage: {id: `a-cov-e${String(episode).padStart(3, "0")}-full`, mode: "", evidence: ""}, segments: []}));
+      app.timelineByTask = new Map(app.tasks.map(task => [task.task_id, Array.from({length: task.coverage_end_frame}, (_, frame) => ({processed_frame: String(frame), video_frame: String(frame * 2), video_time_s: String(frame / 20)}))]));
+      lockIdentityHeader(); $("#boot").classList.add("hidden"); $("#workspace-main").classList.add("ready");
+      selectTask(0); renderAll();
+    }
+
+    $("#pick-state").addEventListener("click", pickStateDirectory);
+    $("#pick-packet").addEventListener("click", pickPacketDirectory);
+    $("#pick-media").addEventListener("click", pickMediaDirectory);
+    $("#add-segment").addEventListener("click", addSegment);
+    $("#commit-csv").addEventListener("click", commitCsv);
+    bindForm(); bindTransport(); bindHotkeys();
+
+    window.__CONTACT_UI_TEST__ = Object.freeze({
+      parseCSV, encodeCSV, segmentErrors, taskErrors,
+      mountFixture: mountBrowserTestFixture,
+      snapshot: () => ({taskIndex: app.taskIndex, currentFrame: app.currentFrame, task: currentTask(), allErrors: validateAll()}),
+      submissionArtifacts: timestamp => {
+        const errors = validateAll(); assert(errors.length === 0, errors[0] || "submission invalid");
+        return {
+          coverage: encodeCSV(coverageRows(timestamp), COVERAGE_FIELDS),
+          segments: encodeCSV(segmentRows(), SEGMENT_FIELDS)
+        };
+      },
+      autosaveArtifacts: () => {
+        return {
+          coverage: encodeCSV(coverageRows("", "in_progress"), COVERAGE_FIELDS),
+          segments: encodeCSV(segmentRows("in_progress"), SEGMENT_FIELDS)
+        };
+      }
+    });
+  </script>
+</body>
+</html>
