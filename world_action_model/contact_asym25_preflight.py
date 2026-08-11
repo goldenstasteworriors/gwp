@@ -44,6 +44,13 @@ from world_action_model.contact_transition_schema import (
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
 )
+from world_action_model.contact_asym25_train_norm_contract import (
+    ProductionTrainNormError,
+    build_expected_train_norm_source_receipt,
+    build_norm_source_tree_receipt,
+    build_production_split_receipt,
+    validate_production_train_norm_metadata,
+)
 
 
 TRAINING_GATE_VERSION = "contact-asym25-training-gate/v1"
@@ -841,36 +848,6 @@ def validate_contact_asym25_training_preflight(
     ) != total_frames:
         raise ContactAsym25PreflightError("dataset info totals differ from episode metadata")
 
-    norm_payload = _load_json(norm_stats_path, "normalization stats")
-    validate_asymmetric_norm_payload(
-        norm_payload,
-        model_dim=MODEL_ACTION_DIM,
-        expected_hardware_contract_sha256=contract_digest,
-        expected_calibration_capture_sha256=capture_digest,
-    )
-    norm_metadata = norm_payload.get("metadata", {})
-    norm_roots = norm_metadata.get("data_roots")
-    if not isinstance(norm_roots, list) or {
-        str(Path(value).resolve()) for value in norm_roots
-    } != {str(data_root)}:
-        raise ContactAsym25PreflightError("normalization stats were not computed from this data root")
-    if norm_metadata.get("model_dim") != MODEL_ACTION_DIM:
-        raise ContactAsym25PreflightError("normalization stats model_dim must be 32")
-    if norm_metadata.get("delta_mask") != [False] * MODEL_ACTION_DIM:
-        raise ContactAsym25PreflightError("asymmetric25 norm stats must use no second delta conversion")
-    if norm_metadata.get("dataset_info_sha256") != dataset_info_digest:
-        raise ContactAsym25PreflightError("norm stats dataset-info fingerprint differs")
-    if norm_metadata.get("episode_metadata_sha256") != episode_metadata_digest:
-        raise ContactAsym25PreflightError("norm stats episode-metadata fingerprint differs")
-    if (
-        int(norm_metadata.get("num_episodes", -1)) != len(dataset_episode_lengths)
-        or int(norm_metadata.get("num_state_samples", -1)) != total_frames
-        or int(norm_metadata.get("num_action_samples", -1))
-        != total_frames * int(norm_metadata.get("action_horizon", -1))
-        or int(norm_metadata.get("action_horizon", -1)) != 48
-    ):
-        raise ContactAsym25PreflightError("norm sample counts/horizon differ from dataset")
-
     sidecar = validate_reviewed_sidecar_bundle(
         sidecar_dir=sidecar_dir,
         coverage_csv=coverage_csv,
@@ -958,6 +935,46 @@ def validate_contact_asym25_training_preflight(
         raise ContactAsym25PreflightError(
             "selected production split is overlapping or incomplete"
         )
+    try:
+        production_split_receipt, production_split_receipt_sha256 = (
+            build_production_split_receipt(
+                dataset_id=dataset_id,
+                action_schema_id=ASYMMETRIC_SCHEMA_ID,
+                split_seed=split_seed,
+                train_episode_ids=selected_split["train"],
+                validation_episode_ids=selected_split["val"],
+                heldout_episode_ids=selected_split["test"],
+                dataset_info_sha256=dataset_info_digest,
+                episode_metadata_sha256=episode_metadata_digest,
+                split_manifest_sha256=sidecar["split_manifest_sha256"],
+            )
+        )
+        norm_source_tree_receipt = build_norm_source_tree_receipt(data_root)
+        train_norm_source_receipt, train_norm_source_receipt_sha256 = (
+            build_expected_train_norm_source_receipt(
+                production_split_receipt=production_split_receipt,
+                production_split_receipt_sha256=production_split_receipt_sha256,
+                episode_lengths=dataset_episode_lengths,
+                source_dataset_tree_receipt=norm_source_tree_receipt,
+            )
+        )
+        norm_payload = _load_json(norm_stats_path, "normalization stats")
+        validate_asymmetric_norm_payload(
+            norm_payload,
+            model_dim=MODEL_ACTION_DIM,
+            expected_hardware_contract_sha256=contract_digest,
+            expected_calibration_capture_sha256=capture_digest,
+        )
+        validate_production_train_norm_metadata(
+            norm_payload.get("metadata"),
+            expected_source_receipt=train_norm_source_receipt,
+            expected_source_receipt_sha256=train_norm_source_receipt_sha256,
+            data_root=data_root,
+        )
+    except (ProductionTrainNormError, ValueError) as exc:
+        raise ContactAsym25PreflightError(
+            "normalization stats are not bound to the selected train-only split"
+        ) from exc
     training_data_receipt = {
         "receipt_version": TRAINING_DATA_RECEIPT_VERSION,
         "dataset_id": dataset_id,
@@ -1011,6 +1028,11 @@ def validate_contact_asym25_training_preflight(
         "heldout_episode_ids": list(selected_split["test"]),
         "training_data_receipt": training_data_receipt,
         "training_data_receipt_sha256": training_data_receipt_sha256,
+        "production_split_receipt": production_split_receipt,
+        "production_split_receipt_sha256": production_split_receipt_sha256,
+        "train_norm_source_receipt": train_norm_source_receipt,
+        "train_norm_source_receipt_sha256": train_norm_source_receipt_sha256,
+        "norm_source_tree_receipt": norm_source_tree_receipt,
         "dataset_id": dataset_id,
         "dataset_fps": dataset_fps,
         "horizon_frames": 48,
@@ -1025,6 +1047,9 @@ def validate_contact_asym25_training_preflight(
         "training_gate_path": str(gate_path),
         "training_gate_sha256": sha256_file(gate_path),
         "preflight_code_sha256": sha256_file(Path(__file__).resolve()),
+        "train_norm_contract_code_sha256": sha256_file(
+            Path(__file__).with_name("contact_asym25_train_norm_contract.py")
+        ),
         "artifact_paths": artifact_paths,
         "episode_npz_sha256": sidecar["episode_npz_sha256"],
         "evidence_report_sha256": evidence_digests,

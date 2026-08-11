@@ -1,6 +1,6 @@
 {
   "benchmark_id": "g1-asym25-bimanual-pour-oracle-v0",
-  "benchmark_spec_sha256": "bd27d92af129bcbc9dd745f5a866462aaa1cedc6171d7326cd6b12f094b36b51",
+  "benchmark_spec_sha256": "204d9054991a267079c1e8357d473eccc75a10178e2890ee40dc73604afaa21c",
   "execution_binding": null,
   "generation": {
     "generator": "generate_scenarios.py",

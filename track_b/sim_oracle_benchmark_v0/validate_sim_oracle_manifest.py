@@ -17,6 +17,39 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_SPEC = HERE / "benchmark_spec.json"
 DEFAULT_READINESS = HERE / "local_readiness_20260811.json"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SCENARIO_ID_RE = re.compile(
+    r"^simb-(sanity|id-test|ood-test)-c[0-9]{3}-r[0-9]{2}$"
+)
+CONDITION_ID_RE = re.compile(r"^simb-(sanity|id-test|ood-test)-c[0-9]{3}$")
+
+MANIFEST_REQUIRED_KEYS = {
+    "schema_version",
+    "benchmark_id",
+    "benchmark_spec_sha256",
+    "generation",
+    "status",
+    "variant_ids",
+    "scenarios",
+}
+MANIFEST_ALLOWED_KEYS = MANIFEST_REQUIRED_KEYS | {"execution_binding"}
+GENERATION_KEYS = {
+    "generator",
+    "generator_sha256",
+    "generator_seed",
+    "method",
+}
+SCENARIO_KEYS = {
+    "scenario_id",
+    "condition_id",
+    "split",
+    "replicate_index",
+    "seeds",
+    "factors",
+    "ood_axis",
+    "embodiment",
+    "ground_truth_contract_id",
+}
+SEED_KEYS = {"physics", "render", "policy"}
 
 
 class ManifestError(ValueError):
@@ -31,9 +64,30 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ManifestError(f"non-finite JSON constant is forbidden: {value}")
+
+
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ManifestError(f"duplicate JSON object key is forbidden: {key!r}")
+        result[key] = value
+    return result
+
+
+def load_json_value(payload: str) -> Any:
+    return json.loads(
+        payload,
+        object_pairs_hook=_strict_json_object,
+        parse_constant=_reject_nonfinite_json_constant,
+    )
+
+
 def load_object(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as stream:
-        value = json.load(stream)
+        value = load_json_value(stream.read())
     if not isinstance(value, dict):
         raise ManifestError(f"{path} must contain a JSON object")
     return value
@@ -42,6 +96,24 @@ def load_object(path: Path) -> dict[str, Any]:
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ManifestError(message)
+
+
+def require_keys(
+    value: dict[str, Any],
+    *,
+    required: set[str],
+    allowed: set[str],
+    path: str,
+) -> None:
+    keys = set(value)
+    missing = sorted(required - keys)
+    extra = sorted(keys - allowed)
+    require(not missing, f"{path} is missing required keys: {missing}")
+    require(not extra, f"{path} contains additional properties: {extra}")
+
+
+def _is_json_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _json_signature(value: Any) -> str:
@@ -59,6 +131,12 @@ def _flatten_ood_values(spec: dict[str, Any]) -> dict[str, set[str]]:
 def _validate_scenario_design(
     manifest: dict[str, Any], spec: dict[str, Any]
 ) -> dict[str, Any]:
+    require_keys(
+        manifest,
+        required=MANIFEST_REQUIRED_KEYS,
+        allowed=MANIFEST_ALLOWED_KEYS,
+        path="manifest",
+    )
     require(
         manifest.get("schema_version") == "wam-sim-oracle-scenario-manifest/v1",
         "unsupported scenario manifest version",
@@ -74,9 +152,20 @@ def _validate_scenario_design(
 
     generation = manifest.get("generation")
     require(isinstance(generation, dict), "generation must be an object")
+    require_keys(
+        generation,
+        required=GENERATION_KEYS,
+        allowed=GENERATION_KEYS,
+        path="generation",
+    )
     require(
-        generation.get("generator_seed") == spec["design"]["generator_seed"],
+        _is_json_integer(generation.get("generator_seed"))
+        and generation["generator_seed"] == spec["design"]["generator_seed"],
         "generator_seed mismatch",
+    )
+    require(
+        generation.get("method") == spec["design"]["method"],
+        "generation.method mismatch",
     )
     generator_hash = generation.get("generator_sha256")
     require(isinstance(generator_hash, str) and SHA256_RE.fullmatch(generator_hash) is not None, "invalid generator_sha256")
@@ -110,22 +199,56 @@ def _validate_scenario_design(
     for index, scenario in enumerate(scenarios):
         path = f"scenarios[{index}]"
         require(isinstance(scenario, dict), f"{path} must be an object")
+        require_keys(
+            scenario,
+            required=SCENARIO_KEYS,
+            allowed=SCENARIO_KEYS,
+            path=path,
+        )
         scenario_id = scenario.get("scenario_id")
-        require(isinstance(scenario_id, str) and scenario_id not in ids, f"{path}.scenario_id invalid or duplicate")
+        require(
+            isinstance(scenario_id, str)
+            and SCENARIO_ID_RE.fullmatch(scenario_id) is not None
+            and scenario_id not in ids,
+            f"{path}.scenario_id invalid or duplicate",
+        )
         ids.add(scenario_id)
         split = scenario.get("split")
         require(split in spec["design"]["splits"], f"{path}.split invalid")
         counts[split] += 1
         condition_id = scenario.get("condition_id")
-        require(isinstance(condition_id, str) and scenario_id.startswith(condition_id + "-r"), f"{path}.condition_id mismatch")
+        expected_split_slug = split.replace("_", "-")
+        require(
+            isinstance(condition_id, str)
+            and CONDITION_ID_RE.fullmatch(condition_id) is not None
+            and condition_id.startswith(f"simb-{expected_split_slug}-")
+            and scenario_id.startswith(condition_id + "-r"),
+            f"{path}.condition_id mismatch",
+        )
         replicate = scenario.get("replicate_index")
-        require(isinstance(replicate, int) and replicate >= 0, f"{path}.replicate_index invalid")
+        require(
+            _is_json_integer(replicate) and replicate >= 0,
+            f"{path}.replicate_index invalid",
+        )
+        require(
+            scenario_id == f"{condition_id}-r{replicate:02d}",
+            f"{path}.scenario_id does not match replicate_index",
+        )
         groups[(split, condition_id)].append(scenario)
 
         seeds = scenario.get("seeds")
-        require(isinstance(seeds, dict) and set(seeds) == {"physics", "render", "policy"}, f"{path}.seeds invalid")
+        require(isinstance(seeds, dict), f"{path}.seeds invalid")
+        require_keys(
+            seeds,
+            required=SEED_KEYS,
+            allowed=SEED_KEYS,
+            path=f"{path}.seeds",
+        )
         seed_tuple = tuple(seeds[name] for name in ("physics", "render", "policy"))
-        require(all(isinstance(value, int) and value >= 0 for value in seed_tuple), f"{path}.seeds must be non-negative integers")
+        require(
+            all(_is_json_integer(value) and value >= 0 for value in seed_tuple),
+            f"{path}.seeds must be non-negative integers",
+        )
         require(seed_tuple not in seed_tuples, f"{path}.seeds duplicate another scenario")
         seed_tuples.add(seed_tuple)
 
@@ -135,13 +258,19 @@ def _validate_scenario_design(
         if split != "ood_test":
             require(ood_axis is None, f"{path}.ood_axis must be null outside ood_test")
             for field, value in factors.items():
-                require(value in in_domain[field], f"{path}.factors.{field} is not in-domain")
+                require(
+                    _json_signature(value)
+                    in {_json_signature(item) for item in in_domain[field]},
+                    f"{path}.factors.{field} is not in-domain",
+                )
                 require(_json_signature(value) not in all_ood_values.get(field, set()), f"{path}.factors.{field} leaks an OOD value")
         else:
             require(ood_axis in ood_overrides, f"{path}.ood_axis invalid")
             primary_fields = ood_overrides[ood_axis]
             has_primary_ood = any(
-                factors[field] in values for field, values in primary_fields.items()
+                _json_signature(factors[field])
+                in {_json_signature(item) for item in values}
+                for field, values in primary_fields.items()
             )
             require(has_primary_ood, f"{path} has no value from its primary OOD axis")
             for field, value in factors.items():
@@ -151,14 +280,22 @@ def _validate_scenario_design(
                     for fields in ood_overrides.values()
                     for candidate in fields.get(field, [])
                 )
-                require(value in allowed, f"{path}.factors.{field} is outside declared factor space")
+                require(
+                    _json_signature(value)
+                    in {_json_signature(item) for item in allowed},
+                    f"{path}.factors.{field} is outside declared factor space",
+                )
 
         require(scenario.get("ground_truth_contract_id") == "native-state-no-edit/v1", f"{path}.ground_truth_contract_id invalid")
         embodiment = scenario.get("embodiment")
         require(isinstance(embodiment, dict), f"{path}.embodiment missing")
         require(embodiment.get("action_schema_id") == spec["embodiment_contract"]["action_schema_id"], f"{path}.embodiment action schema mismatch")
-        require(embodiment.get("left", {}).get("device") == "Inspire Robots RH56DFTP", f"{path}.left device mismatch")
-        require(embodiment.get("right", {}).get("device") == "AGIBOT OmniPicker", f"{path}.right device mismatch")
+        left = embodiment.get("left")
+        right = embodiment.get("right")
+        require(isinstance(left, dict), f"{path}.left must be an object")
+        require(isinstance(right, dict), f"{path}.right must be an object")
+        require(left.get("device") == "Inspire Robots RH56DFTP", f"{path}.left device mismatch")
+        require(right.get("device") == "AGIBOT OmniPicker", f"{path}.right device mismatch")
 
     for split, split_design in spec["design"]["splits"].items():
         conditions = int(split_design["conditions"])

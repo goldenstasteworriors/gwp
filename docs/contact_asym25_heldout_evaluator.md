@@ -34,19 +34,37 @@ conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.
 
 Production config import additionally requires these two paths. The config
 replays both artifacts, passes only the exact train IDs to `FastLeRobotDataset`
-before it opens any samples, and embeds the current training-data receipt in
-the transformer config and adjacent checkpoint binding file.
+before it opens any samples. Production normalization is separately bound to
+that seed's train IDs; the old all-66 statistics are audit/legacy evidence only.
+The run identity is explicit and cannot be inferred from an output directory.
 
 ```bash
 export GWP_CONTACT_ASYM25_PREFLIGHT_RECEIPT="$PWD/evidence/contact_asym25/preflight_seed6666.json"
 export GWP_CONTACT_HELDOUT_WINDOW_MANIFEST="$PWD/evidence/contact_asym25/windows_seed6666.json"
+export GWP_CONTACT_TRAINING_RUN_NONCE="REVIEWED_UNIQUE_RUN_NONCE"
+export GWP_CONTACT_EXPERIMENT_FAMILY_ID="CONTACT_ASYM25_FAMILY_2026"
+export GWP_CONTACT_VARIANT_ID="contact_asym25_hard_st"
 ```
 
 Step 0 is saved before optimization. Periodic saving is fixed at 100 steps, so
 step 100 and step 200 are present. The evaluator's `checkpoint_path` is the
 saved transformer subdirectory (for example
-`checkpoint_epoch_1_step_100/transformer`); the adjacent binding path is the
-checkpoint-root `current_training_data_receipt.json`.
+`checkpoint_epoch_1_step_100/transformer`). The trainer writes a non-circular
+bundle manifest (model/config bytes only) and a training claim receipt there.
+Step 0 binds the initial-weights tree; step 100 binds step 0, and step 200 binds
+step 100. The trainer never writes reviewer acceptance.
+
+In a separate reviewer process/output directory, rehash each checkpoint and
+create one external acceptance. The identity and nonce are reviewer-authored;
+do not reuse a nonce between checkpoints.
+
+```bash
+conda run -n gigaworld-policy python -B scripts/review_contact_asym25_checkpoint.py \
+  --checkpoint-dir /ABS/CHECKPOINT_ROOT/transformer \
+  --output evidence/contact_asym25/reviewer/seed6666_step0.json \
+  --reviewer-identity "INDEPENDENT_REVIEWER_ID" \
+  --reviewer-attestation-nonce "UNIQUE_REVIEW_NONCE_STEP0"
+```
 
 Use the same receipt algorithm to fingerprint a base model or transformer
 checkpoint tree:
@@ -62,7 +80,7 @@ three checkpoint entries:
 
 ```json
 {
-  "manifest_version": "contact-asym25-heldout-checkpoints/v1",
+  "manifest_version": "contact-asym25-heldout-checkpoints/v2",
   "dataset_id": "DATASET_ID",
   "production_preflight_receipt_sha256": "64_HEX",
   "split_manifest_sha256": "64_HEX",
@@ -74,14 +92,21 @@ three checkpoint entries:
       "step": 0,
       "checkpoint_path": "/ABS/CHECKPOINT_ROOT/transformer",
       "checkpoint_bundle_sha256": "64_HEX",
-      "current_training_data_receipt_path": "/ABS/CHECKPOINT_ROOT/current_training_data_receipt.json",
-      "current_training_data_receipt_sha256": "64_HEX"
+      "checkpoint_bundle_manifest_path": "/ABS/CHECKPOINT_ROOT/transformer/checkpoint_bundle_manifest.json",
+      "checkpoint_bundle_manifest_sha256": "64_HEX",
+      "checkpoint_training_receipt_path": "/ABS/CHECKPOINT_ROOT/transformer/checkpoint_training_receipt.json",
+      "checkpoint_training_receipt_sha256": "64_HEX",
+      "independent_acceptance_path": "/ABS/EXTERNAL_REVIEW/seed6666_step0.json",
+      "independent_acceptance_sha256": "64_HEX"
     }
   ]
 }
 ```
 
-Run the model evaluator only after the manifest contains step 0, 100, and 200.
+Run the model evaluator only after the manifest contains accepted step 0, 100,
+and 200. Production inference precision is fixed to bfloat16; Q12/D22/B16 and
+the robot25 action-group schema are receipt-bound. Ego grip metrics use the
+separate Ego20 schema and only dimensions 18/19 under the future-active mask.
 It emits strict metrics JSON, a metrics SHA-256 sidecar, and hashed additive
 per-window CSV evidence. Raw planner probabilities are used only for Brier,
 NLL, and soft timing MAE; all F1/accuracy/exact metrics use the action-visible
@@ -99,7 +124,9 @@ conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.
 Repeat independently for seeds 7777 and 8888. The offline aggregator loads no
 model; it replays all three receipts and window manifests, verifies each hashed
 per-window CSV, recomputes each per-seed metric block, and then reduces the
-three sets of additive rows.
+three sets of additive rows. It additionally requires three distinct training
+run nonces, nine distinct reviewer acceptances, one experiment family/variant,
+and the same window/evaluator contract.
 
 ```bash
 conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.py \

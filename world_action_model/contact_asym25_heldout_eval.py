@@ -39,6 +39,13 @@ from world_action_model.contact_asym25_preflight import (
     validate_contact_asym25_training_preflight,
     validate_contact_sidecar_arrays,
 )
+from world_action_model.contact_asym25_checkpoint_acceptance import (
+    CheckpointAcceptanceError,
+    strict_json_file as strict_checkpoint_json_file,
+    validate_acceptance,
+    validate_bundle_manifest,
+    validate_training_receipt,
+)
 from world_action_model.contact_transition_schema import (
     SEGMENT_BINARY_FIELDS,
     SEGMENT_CATEGORICAL_FIELDS,
@@ -57,10 +64,10 @@ from world_action_model.verified_io import (
 
 EVALUATOR_VERSION = "contact-asym25-heldout-evaluator/v1"
 WINDOW_MANIFEST_VERSION = "contact-asym25-heldout-windows/v1"
-CHECKPOINT_MANIFEST_VERSION = "contact-asym25-heldout-checkpoints/v1"
+CHECKPOINT_MANIFEST_VERSION = "contact-asym25-heldout-checkpoints/v2"
 CURRENT_TRAINING_DATA_RECEIPT_VERSION = "contact-asym25-current-training-data-receipt/v1"
-RESULT_VERSION = "contact-asym25-heldout-result/v1"
-AGGREGATE_RESULT_VERSION = "contact-asym25-heldout-aggregate/v1"
+RESULT_VERSION = "contact-asym25-heldout-result/v2"
+AGGREGATE_RESULT_VERSION = "contact-asym25-heldout-aggregate/v2"
 ARTIFACT_RECEIPT_VERSION = "contact-asym25-heldout-artifacts/v1"
 
 EVALUATION_SEEDS = (6666, 7777, 8888)
@@ -89,12 +96,59 @@ SPLIT_HEADER = [
     "metadata_status",
 ]
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+ACTION_GROUP_NAMES = (
+    "overall",
+    "wrist",
+    "grip",
+    "left_overall",
+    "left_wrist",
+    "left_grip",
+    "right_overall",
+    "right_wrist",
+    "right_grip",
+)
+ASYMMETRIC25_ACTION_SCHEMA_CONTRACT = {
+    "schema_id": ASYMMETRIC_SCHEMA_ID,
+    "model_action_dim": MODEL_ACTION_DIM,
+    "physical_action_dim": ASYMMETRIC_ACTION_DIM,
+    "groups": {
+        "overall": list(range(25)),
+        "wrist": list(range(18)),
+        "grip": list(range(18, 25)),
+        "left_overall": list(range(9)) + list(range(18, 24)),
+        "left_wrist": list(range(9)),
+        "left_grip": list(range(18, 24)),
+        "right_overall": list(range(9, 18)) + [24],
+        "right_wrist": list(range(9, 18)),
+        "right_grip": [24],
+    },
+    "grip_active_mask_source": "all_physical_grip_dimensions",
+}
+EGO20_ACTION_SCHEMA_CONTRACT = {
+    "schema_id": "ego_dual_eef20_canonical_open_v1",
+    "model_action_dim": MODEL_ACTION_DIM,
+    "physical_action_dim": 20,
+    "groups": {
+        "overall": list(range(20)),
+        "wrist": list(range(18)),
+        "grip": [18, 19],
+        "left_overall": list(range(9)) + [18],
+        "left_wrist": list(range(9)),
+        "left_grip": [18],
+        "right_overall": list(range(9, 18)) + [19],
+        "right_wrist": list(range(9, 18)),
+        "right_grip": [19],
+    },
+    "grip_active_mask_source": "ego_hand_active_future",
+}
 TRAINING_CODE_LOGICAL_PATHS = (
     "configs/giga_world_policy_0_5_sonic_g1_asymmetric25_contact_finetune.py",
     "configs/giga_world_policy_0_5_sonic_g1_asymmetric25_finetune.py",
     "configs/giga_world_policy_0_5_sonic_g1_finetune.py",
     "scripts/contact_labels/contact_label_io_v1_1.py",
     "world_action_model/contact_asym25_preflight.py",
+    "world_action_model/contact_asym25_checkpoint_acceptance.py",
+    "world_action_model/contact_asym25_train_norm_contract.py",
     "world_action_model/contact_asym25_heldout_eval.py",
     "world_action_model/production_split_contract.py",
     "world_action_model/asymmetric_action_schema.py",
@@ -108,6 +162,9 @@ TRAINING_CODE_LOGICAL_PATHS = (
     "world_action_model/models/transformer_wa_casual_mot.py",
     "world_action_model/matched_control_config.py",
     "world_action_model/matched_control_hashes.py",
+    "scripts/review_contact_asym25_checkpoint.py",
+    "third_party/giga-datasets/giga_datasets/datasets/lerobot_dataset.py",
+    "third_party/giga-train/giga_train/trainers/trainer.py",
 )
 
 
@@ -670,6 +727,7 @@ def validate_checkpoint_manifest(
         )
     snapshots: dict[str, dict[str, Any]] = {str(Path(base_model["path"]).absolute()): base_snapshot}
     seen = set()
+    accepted: dict[int, dict[str, Any]] = {}
     for index, raw_entry in enumerate(entries):
         entry = _require_exact_keys(
             raw_entry,
@@ -678,8 +736,12 @@ def validate_checkpoint_manifest(
                 "step",
                 "checkpoint_path",
                 "checkpoint_bundle_sha256",
-                "current_training_data_receipt_path",
-                "current_training_data_receipt_sha256",
+                "checkpoint_bundle_manifest_path",
+                "checkpoint_bundle_manifest_sha256",
+                "checkpoint_training_receipt_path",
+                "checkpoint_training_receipt_sha256",
+                "independent_acceptance_path",
+                "independent_acceptance_sha256",
             },
             f"checkpoint entry {index}",
         )
@@ -691,61 +753,85 @@ def validate_checkpoint_manifest(
         ):
             raise HeldoutEvaluationError(f"invalid/duplicate checkpoint seed-step {key}")
         seen.add(key)
-        if (
-            not isinstance(entry["checkpoint_path"], str)
-            or not Path(entry["checkpoint_path"]).is_absolute()
-            or not isinstance(entry["current_training_data_receipt_path"], str)
-            or not Path(entry["current_training_data_receipt_path"]).is_absolute()
+        path_fields = (
+            "checkpoint_path",
+            "checkpoint_bundle_manifest_path",
+            "checkpoint_training_receipt_path",
+            "independent_acceptance_path",
+        )
+        if any(
+            not isinstance(entry[name], str) or not Path(entry[name]).is_absolute()
+            for name in path_fields
         ):
             raise HeldoutEvaluationError(
-                f"checkpoint/binding paths must be absolute for {key}"
+                f"checkpoint evidence paths must be absolute for {key}"
             )
         checkpoint_path = str(Path(entry["checkpoint_path"]).expanduser().absolute())
-        expected_binding_path = (
-            Path(checkpoint_path).parent / "current_training_data_receipt.json"
-        )
-        if Path(entry["current_training_data_receipt_path"]) != expected_binding_path:
+        checkpoint_root = Path(checkpoint_path)
+        if (
+            Path(entry["checkpoint_bundle_manifest_path"])
+            != checkpoint_root / "checkpoint_bundle_manifest.json"
+            or Path(entry["checkpoint_training_receipt_path"])
+            != checkpoint_root / "checkpoint_training_receipt.json"
+            or checkpoint_root == Path(entry["independent_acceptance_path"]).parent
+            or checkpoint_root in Path(entry["independent_acceptance_path"]).parents
+        ):
             raise HeldoutEvaluationError(
-                f"checkpoint training-data binding is not adjacent for {key}"
+                f"checkpoint producer/reviewer evidence separation differs for {key}"
             )
         snapshot = snapshots.get(checkpoint_path)
         if snapshot is None:
             snapshot = snapshot_artifact_tree(checkpoint_path)
             snapshots[checkpoint_path] = snapshot
-        if snapshot["tree_sha256"] != _require_sha256(
-            entry["checkpoint_bundle_sha256"], "checkpoint bundle digest"
-        ):
-            raise HeldoutEvaluationError(f"checkpoint bundle fingerprint differs for {key}")
-        binding, binding_digest = _strict_json(
-            entry["current_training_data_receipt_path"],
-            f"checkpoint training-data binding {key}",
-        )
-        if binding_digest != _require_sha256(
-            entry["current_training_data_receipt_sha256"],
-            "checkpoint training-data binding digest",
-        ):
-            raise HeldoutEvaluationError(
-                f"checkpoint training-data binding fingerprint differs for {key}"
+        try:
+            bundle, bundle_manifest_digest = strict_checkpoint_json_file(
+                entry["checkpoint_bundle_manifest_path"],
+                f"checkpoint bundle manifest {key}",
             )
-        binding = _require_exact_keys(
-            binding,
-            {
-                "receipt_version",
-                "checkpoint_step",
-                "current_training_data_receipt",
-                "current_training_data_receipt_sha256",
-            },
-            f"checkpoint training-data binding {key}",
-        )
-        current = binding["current_training_data_receipt"]
-        current_digest = hashlib.sha256(_canonical_json_bytes(current)).hexdigest()
+            validate_bundle_manifest(bundle, checkpoint_path)
+            receipt, receipt_digest = strict_checkpoint_json_file(
+                entry["checkpoint_training_receipt_path"],
+                f"checkpoint training receipt {key}",
+            )
+            validate_training_receipt(receipt)
+            acceptance, acceptance_digest = strict_checkpoint_json_file(
+                entry["independent_acceptance_path"],
+                f"independent checkpoint acceptance {key}",
+            )
+            validate_acceptance(
+                acceptance,
+                checkpoint_dir=checkpoint_path,
+                bundle_manifest=bundle,
+                bundle_manifest_sha256=bundle_manifest_digest,
+                training_receipt=receipt,
+                training_receipt_sha256=receipt_digest,
+            )
+        except CheckpointAcceptanceError as exc:
+            raise HeldoutEvaluationError(str(exc)) from exc
         if (
-            binding["receipt_version"]
-            != "contact-asym25-checkpoint-data-binding/v1"
-            or binding["checkpoint_step"] != entry["step"]
-            or binding["current_training_data_receipt_sha256"] != current_digest
+            bundle_manifest_digest
+            != _require_sha256(
+                entry["checkpoint_bundle_manifest_sha256"],
+                "checkpoint bundle manifest digest",
+            )
+            or receipt_digest
+            != _require_sha256(
+                entry["checkpoint_training_receipt_sha256"],
+                "checkpoint training receipt digest",
+            )
+            or acceptance_digest
+            != _require_sha256(
+                entry["independent_acceptance_sha256"],
+                "independent acceptance digest",
+            )
+            or bundle["bundle_sha256"]
+            != _require_sha256(
+                entry["checkpoint_bundle_sha256"], "checkpoint bundle digest"
+            )
         ):
-            raise HeldoutEvaluationError(f"checkpoint binding content differs for {key}")
+            raise HeldoutEvaluationError(f"checkpoint evidence fingerprint differs for {key}")
+        current = receipt["current_training_data_receipt"]
+        current_digest = receipt["current_training_data_receipt_sha256"]
         current = _require_exact_keys(
             current,
             {
@@ -810,22 +896,48 @@ def validate_checkpoint_manifest(
         ):
             raise HeldoutEvaluationError(f"checkpoint training code receipt {key} is invalid")
         _validate_historical_training_code_receipt(code_receipt)
-        config_path = Path(checkpoint_path) / "config.json"
-        checkpoint_config, _ = _strict_json(
-            config_path, f"checkpoint transformer config {key}"
-        )
         if (
-            checkpoint_config.get("current_training_data_receipt") != current
-            or checkpoint_config.get("current_training_data_receipt_sha256")
-            != current_digest
-            or checkpoint_config.get("production_checkpoint_steps")
-            != list(CHECKPOINT_STEPS)
+            receipt["checkpoint_step"] != entry["step"]
+            or receipt["split_seed"] != entry["split_seed"]
+            or receipt["production_preflight_receipt_sha256"]
+            != preflight_receipt_sha256
+            or receipt["heldout_window_manifest_sha256"]
+            != heldout_window_manifest_sha256
+            or receipt["training_gate_sha256"]
+            != preflight_receipt["training_gate_sha256"]
+            or receipt["training_code_receipt_sha256"]
+            != current["training_code_receipt_sha256"]
+            or receipt["dataset_source_tree_sha256"] != dataset_tree_sha256
+            or receipt["initial_weights_bundle_sha256"]
+            != base_model["bundle_sha256"]
+            or receipt["action_schema_contract"]
+            != ASYMMETRIC25_ACTION_SCHEMA_CONTRACT
         ):
             raise HeldoutEvaluationError(
-                f"checkpoint transformer metadata is not bound to current receipt {key}"
+                f"checkpoint accepted training contract differs for {key}"
             )
+        accepted[entry["step"]] = {
+            "receipt": receipt,
+            "acceptance": acceptance,
+            "bundle_sha256": bundle["bundle_sha256"],
+        }
     if seen != {(selected_seed, step) for step in CHECKPOINT_STEPS}:
         raise HeldoutEvaluationError("checkpoint manifest seed/step matrix is incomplete")
+    run_nonces = {row["receipt"]["training_run_nonce"] for row in accepted.values()}
+    acceptance_nonces = {
+        row["acceptance"]["reviewer_attestation_nonce"] for row in accepted.values()
+    }
+    if len(run_nonces) != 1 or len(acceptance_nonces) != len(CHECKPOINT_STEPS):
+        raise HeldoutEvaluationError(
+            "one training run must have one nonce and three independent acceptances"
+        )
+    for step, expected_parent in (
+        (0, base_model["bundle_sha256"]),
+        (100, accepted[0]["bundle_sha256"]),
+        (200, accepted[100]["bundle_sha256"]),
+    ):
+        if accepted[step]["receipt"]["parent_checkpoint_bundle_sha256"] != expected_parent:
+            raise HeldoutEvaluationError("checkpoint parent hash chain differs")
     return manifest, snapshots
 
 
@@ -840,18 +952,45 @@ def load_checkpoint_manifest(
 
 
 ACTION_GROUPS = {
-    "overall": tuple(range(ASYMMETRIC_ACTION_DIM)),
-    "wrist": tuple(range(LEFT_WRIST_SLICE.start, RIGHT_WRIST_SLICE.stop)),
-    "grip": tuple(range(RH56_SLICE.start, OMNIPICKER_APERTURE_INDEX + 1)),
-    "left_overall": tuple(range(LEFT_WRIST_SLICE.start, LEFT_WRIST_SLICE.stop))
-    + tuple(range(RH56_SLICE.start, RH56_SLICE.stop)),
-    "left_wrist": tuple(range(LEFT_WRIST_SLICE.start, LEFT_WRIST_SLICE.stop)),
-    "left_grip": tuple(range(RH56_SLICE.start, RH56_SLICE.stop)),
-    "right_overall": tuple(range(RIGHT_WRIST_SLICE.start, RIGHT_WRIST_SLICE.stop))
-    + (OMNIPICKER_APERTURE_INDEX,),
-    "right_wrist": tuple(range(RIGHT_WRIST_SLICE.start, RIGHT_WRIST_SLICE.stop)),
-    "right_grip": (OMNIPICKER_APERTURE_INDEX,),
+    name: tuple(ASYMMETRIC25_ACTION_SCHEMA_CONTRACT["groups"][name])
+    for name in ACTION_GROUP_NAMES
 }
+
+
+def _validated_action_schema_contract(value: object) -> dict[str, Any]:
+    contract = _require_exact_keys(
+        value,
+        {
+            "schema_id",
+            "model_action_dim",
+            "physical_action_dim",
+            "groups",
+            "grip_active_mask_source",
+        },
+        "action schema contract",
+    )
+    if contract != ASYMMETRIC25_ACTION_SCHEMA_CONTRACT and contract != EGO20_ACTION_SCHEMA_CONTRACT:
+        raise HeldoutEvaluationError("unsupported action schema contract")
+    groups = _require_exact_keys(
+        contract["groups"], set(ACTION_GROUP_NAMES), "action schema groups"
+    )
+    physical_dim = contract["physical_action_dim"]
+    for name in ACTION_GROUP_NAMES:
+        dimensions = groups[name]
+        if (
+            not isinstance(dimensions, list)
+            or not dimensions
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, int)
+                or item < 0
+                or item >= physical_dim
+                for item in dimensions
+            )
+            or len(dimensions) != len(set(dimensions))
+        ):
+            raise HeldoutEvaluationError(f"invalid action dimensions for group {name}")
+    return contract
 
 
 def _sigmoid(value: np.ndarray) -> np.ndarray:
@@ -956,6 +1095,8 @@ def score_heldout_window(
     action_dim_mask: object,
     action_time_mask: object,
     action_denorm_scale: object,
+    action_schema_contract: object,
+    grip_active_future: object | None,
     contact_logits: object,
     contact_hard_semantic: object,
     contact_target: object,
@@ -971,19 +1112,34 @@ def score_heldout_window(
     target = _as_finite_array(action_target, (HORIZON_FRAMES, MODEL_ACTION_DIM), "action target")
     dim_mask = np.asarray(action_dim_mask, dtype=bool)
     time_mask = np.asarray(action_time_mask, dtype=bool)
+    schema = _validated_action_schema_contract(action_schema_contract)
+    physical_dim = schema["physical_action_dim"]
     expected_dim_mask = np.zeros(MODEL_ACTION_DIM, dtype=bool)
-    expected_dim_mask[:ASYMMETRIC_ACTION_DIM] = True
+    expected_dim_mask[:physical_dim] = True
     if not np.array_equal(dim_mask, expected_dim_mask):
-        raise HeldoutEvaluationError("action_dim_mask is not canonical asymmetric25 active-only")
+        raise HeldoutEvaluationError("action_dim_mask differs from action schema receipt")
     if time_mask.shape != (HORIZON_FRAMES,) or not bool(time_mask.all()):
         raise HeldoutEvaluationError("fixed held-out windows must have 48 active action frames")
     scale = _as_finite_array(action_denorm_scale, (MODEL_ACTION_DIM,), "action denorm scale")
-    if np.any(scale[:ASYMMETRIC_ACTION_DIM] <= 0.0):
+    if np.any(scale[:physical_dim] <= 0.0):
         raise HeldoutEvaluationError("active action denormalization scales must be positive")
-    if np.any(scale[ASYMMETRIC_ACTION_DIM:] != 1.0):
+    if np.any(scale[physical_dim:] != 1.0):
         raise HeldoutEvaluationError("inactive action padding scales must be canonical one")
     sq_norm = (pred - target) ** 2
     sq_physical = ((pred - target) * scale[None, :]) ** 2
+    active = np.broadcast_to(time_mask[:, None], (HORIZON_FRAMES, MODEL_ACTION_DIM)).copy()
+    if schema["grip_active_mask_source"] == "ego_hand_active_future":
+        grip_active = np.asarray(grip_active_future)
+        if grip_active.dtype != np.bool_ or grip_active.shape != (HORIZON_FRAMES, 2):
+            raise HeldoutEvaluationError(
+                "Ego action schema requires bool ego_hand_active_future [48,2]"
+            )
+        active[:, 18:20] &= grip_active
+    elif grip_active_future is not None:
+        raise HeldoutEvaluationError(
+            "robot asymmetric25 schema forbids an Ego grip-active mask"
+        )
+    active[:, physical_dim:] = False
 
     row: dict[str, Any] = {
         "window_id": window["window_id"],
@@ -999,10 +1155,14 @@ def score_heldout_window(
         "action_noise_seed": window["action_noise_seed"],
     }
     for space, values in (("normalized", sq_norm), ("physical", sq_physical)):
-        for group, dimensions in ACTION_GROUPS.items():
+        for group in ACTION_GROUP_NAMES:
+            dimensions = tuple(schema["groups"][group])
             group_values = values[:, dimensions]
-            count = int(group_values.size)
-            sse = float(group_values.sum(dtype=np.float64))
+            group_active = active[:, dimensions]
+            count = int(group_active.sum())
+            if count <= 0:
+                raise HeldoutEvaluationError(f"empty active action group: {group}")
+            sse = float(group_values[group_active].sum(dtype=np.float64))
             row[f"action_{space}_{group}_sse"] = sse
             row[f"action_{space}_{group}_count"] = count
             row[f"action_{space}_{group}_mse"] = sse / count
@@ -1577,6 +1737,14 @@ def load_evaluation_result_bundle(path: str | Path) -> dict[str, Any]:
         checkpoint_entry["sha256"], "result checkpoint-manifest digest"
     ):
         raise HeldoutEvaluationError("result checkpoint-manifest digest differs")
+    checkpoint_manifest, _ = validate_checkpoint_manifest(
+        checkpoint_manifest,
+        preflight_receipt=preflight,
+        preflight_receipt_sha256=preflight_sha256,
+        split_assignments=assignments,
+        dataset_tree_sha256=dataset_tree["tree_sha256"],
+        heldout_window_manifest_sha256=window_manifest_sha256,
+    )
     if not isinstance(checkpoint_receipt["verified_artifact_trees"], list):
         raise HeldoutEvaluationError("result checkpoint artifact receipts must be a list")
     checkpoint_manifest = _require_exact_keys(
@@ -1617,8 +1785,12 @@ def load_evaluation_result_bundle(path: str | Path) -> dict[str, Any]:
                 "step",
                 "checkpoint_path",
                 "checkpoint_bundle_sha256",
-                "current_training_data_receipt_path",
-                "current_training_data_receipt_sha256",
+                "checkpoint_bundle_manifest_path",
+                "checkpoint_bundle_manifest_sha256",
+                "checkpoint_training_receipt_path",
+                "checkpoint_training_receipt_sha256",
+                "independent_acceptance_path",
+                "independent_acceptance_sha256",
             },
             f"result checkpoint entry {index}",
         )
@@ -1627,10 +1799,10 @@ def load_evaluation_result_bundle(path: str | Path) -> dict[str, Any]:
         if (
             not isinstance(entry["checkpoint_path"], str)
             or not Path(entry["checkpoint_path"]).is_absolute()
-            or not isinstance(entry["current_training_data_receipt_path"], str)
-            or Path(entry["current_training_data_receipt_path"])
-            != Path(entry["checkpoint_path"]).parent
-            / "current_training_data_receipt.json"
+            or not isinstance(entry["checkpoint_training_receipt_path"], str)
+            or Path(entry["checkpoint_training_receipt_path"])
+            != Path(entry["checkpoint_path"])
+            / "checkpoint_training_receipt.json"
         ):
             raise HeldoutEvaluationError(
                 "result checkpoint binding path is not absolute/adjacent"
@@ -1640,8 +1812,8 @@ def load_evaluation_result_bundle(path: str | Path) -> dict[str, Any]:
             entry["checkpoint_bundle_sha256"], "result checkpoint bundle digest"
         )
         _require_sha256(
-            entry["current_training_data_receipt_sha256"],
-            "result checkpoint data-binding digest",
+            entry["checkpoint_training_receipt_sha256"],
+            "result checkpoint training-receipt digest",
         )
     if observed_checkpoint_keys != {
         (preflight["split_seed"], step) for step in CHECKPOINT_STEPS
@@ -1691,30 +1863,19 @@ def load_evaluation_result_bundle(path: str | Path) -> dict[str, Any]:
         )
     episode_sets = _episode_sets(assignments[preflight["split_seed"]])
     for entry in checkpoint_rows:
-        binding, binding_sha256 = _strict_json(
-            entry["current_training_data_receipt_path"],
-            "result checkpoint training-data binding",
+        binding, binding_sha256 = strict_checkpoint_json_file(
+            entry["checkpoint_training_receipt_path"],
+            "result checkpoint training receipt",
         )
-        if binding_sha256 != entry["current_training_data_receipt_sha256"]:
+        if binding_sha256 != entry["checkpoint_training_receipt_sha256"]:
             raise HeldoutEvaluationError(
-                "result checkpoint training-data binding fingerprint differs"
+                "result checkpoint training receipt fingerprint differs"
             )
-        binding = _require_exact_keys(
-            binding,
-            {
-                "receipt_version",
-                "checkpoint_step",
-                "current_training_data_receipt",
-                "current_training_data_receipt_sha256",
-            },
-            "result checkpoint training-data binding",
-        )
+        validate_training_receipt(binding)
         current = binding["current_training_data_receipt"]
         current_sha256 = hashlib.sha256(_canonical_json_bytes(current)).hexdigest()
         if (
-            binding["receipt_version"]
-            != "contact-asym25-checkpoint-data-binding/v1"
-            or binding["checkpoint_step"] != entry["step"]
+            binding["checkpoint_step"] != entry["step"]
             or binding["current_training_data_receipt_sha256"] != current_sha256
         ):
             raise HeldoutEvaluationError(
@@ -1772,25 +1933,24 @@ def load_evaluation_result_bundle(path: str | Path) -> dict[str, Any]:
                 "result checkpoint training code receipt digest differs"
             )
         _validate_historical_training_code_receipt(code_receipt)
-        transformer_config, _ = _strict_json(
-            Path(entry["checkpoint_path"]) / "config.json",
-            "result checkpoint transformer config",
-        )
         if (
-            transformer_config.get("current_training_data_receipt") != current
-            or transformer_config.get("current_training_data_receipt_sha256")
-            != current_sha256
-            or transformer_config.get("production_checkpoint_steps")
-            != list(CHECKPOINT_STEPS)
+            binding["training_precision"] != "bfloat16"
+            or binding["contact_query_count"] != NUM_CONTACT_QUERIES
+            or binding["contact_target_dim"] != SEGMENT_TARGET_DIM
+            or binding["contact_time_bins"] != TIME_BINS
+            or binding["action_schema_contract"]
+            != ASYMMETRIC25_ACTION_SCHEMA_CONTRACT
         ):
             raise HeldoutEvaluationError(
-                "result checkpoint transformer metadata differs from its receipt"
+                "result checkpoint production shape/schema contract differs"
             )
     _require_exact_keys(
         result["code_receipt"],
         {"git_commit", "evaluator_version", "verified_head_files"},
         "result code receipt",
     )
+    if result["code_receipt"] != build_code_receipt(Path(__file__).resolve().parents[1]):
+        raise HeldoutEvaluationError("result evaluator code differs from current HEAD bytes")
     environment = _require_exact_keys(
         result["environment_receipt"],
         {
@@ -1813,7 +1973,7 @@ def load_evaluation_result_bundle(path: str | Path) -> dict[str, Any]:
         or not re.fullmatch(r"[0-9a-f]{40}", str(result["code_receipt"]["git_commit"]))
         or not isinstance(result["code_receipt"]["verified_head_files"], list)
         or not result["code_receipt"]["verified_head_files"]
-        or environment["model_dtype"] not in {"float32", "float16", "bfloat16"}
+        or environment["model_dtype"] != "bfloat16"
         or isinstance(environment["inference_steps"], bool)
         or not isinstance(environment["inference_steps"], int)
         or environment["inference_steps"] <= 0
@@ -1835,6 +1995,10 @@ def load_evaluation_result_bundle(path: str | Path) -> dict[str, Any]:
             "split_seed",
             "action_target_access",
             "oracle_contact_condition",
+            "contact_query_count",
+            "contact_target_dim",
+            "contact_time_bins",
+            "action_schema_contract",
         },
         "result evaluation contract",
     )
@@ -1848,6 +2012,10 @@ def load_evaluation_result_bundle(path: str | Path) -> dict[str, Any]:
         "split_seed": seed,
         "action_target_access": "metrics_only_after_prediction",
         "oracle_contact_condition": False,
+        "contact_query_count": NUM_CONTACT_QUERIES,
+        "contact_target_dim": SEGMENT_TARGET_DIM,
+        "contact_time_bins": TIME_BINS,
+        "action_schema_contract": ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
     }:
         raise HeldoutEvaluationError("result evaluation contract differs")
     csv_entry = _require_exact_keys(
@@ -1929,6 +2097,7 @@ def build_code_receipt(repository_root: str | Path) -> dict:
         "world_action_model/contact_asym25_heldout_eval.py",
         "world_action_model/contact_asym25_eval_runtime.py",
         "world_action_model/contact_asym25_preflight.py",
+        "world_action_model/contact_asym25_checkpoint_acceptance.py",
         "world_action_model/production_split_contract.py",
         "world_action_model/contact_transition_schema.py",
         "world_action_model/asymmetric_action_schema.py",
@@ -1989,6 +2158,55 @@ def checkpoint_entries_by_key(manifest: Mapping[str, Any]) -> dict[tuple[int, in
     return {
         (int(entry["split_seed"]), int(entry["step"])): dict(entry)
         for entry in manifest["checkpoints"]
+    }
+
+
+def validate_three_seed_run_contracts(
+    evidence_by_seed: Mapping[int, Sequence[tuple[Mapping[str, Any], str]]],
+) -> dict[str, Any]:
+    """Require three genuinely distinct runs under one variant contract."""
+
+    if set(evidence_by_seed) != set(EVALUATION_SEEDS):
+        raise HeldoutEvaluationError("three-seed evidence matrix is incomplete")
+    run_contracts: dict[int, tuple[str, str, str, str]] = {}
+    acceptance_hashes: set[str] = set()
+    for seed in EVALUATION_SEEDS:
+        rows = evidence_by_seed[seed]
+        if len(rows) != len(CHECKPOINT_STEPS):
+            raise HeldoutEvaluationError("three-seed checkpoint matrix is incomplete")
+        steps = {receipt.get("checkpoint_step") for receipt, _ in rows}
+        identities = {
+            (
+                receipt.get("training_run_nonce"),
+                receipt.get("experiment_family_id"),
+                receipt.get("variant_id"),
+                receipt.get("heldout_window_manifest_sha256"),
+            )
+            for receipt, _ in rows
+        }
+        if steps != set(CHECKPOINT_STEPS) or len(identities) != 1:
+            raise HeldoutEvaluationError(
+                "each seed must contain one run with step 0/100/200"
+            )
+        for _, digest in rows:
+            acceptance_hashes.add(_require_sha256(digest, "checkpoint acceptance digest"))
+        run_contracts[seed] = next(iter(identities))
+    if (
+        len({value[0] for value in run_contracts.values()}) != len(EVALUATION_SEEDS)
+        or len({value[1] for value in run_contracts.values()}) != 1
+        or len({value[2] for value in run_contracts.values()}) != 1
+        or len(acceptance_hashes) != len(EVALUATION_SEEDS) * len(CHECKPOINT_STEPS)
+    ):
+        raise HeldoutEvaluationError(
+            "three seeds require distinct run/acceptance identities and one family/variant"
+        )
+    return {
+        "experiment_family_id": next(iter(run_contracts.values()))[1],
+        "variant_id": next(iter(run_contracts.values()))[2],
+        "training_run_nonces_by_seed": {
+            str(seed): run_contracts[seed][0] for seed in EVALUATION_SEEDS
+        },
+        "independent_acceptance_sha256": sorted(acceptance_hashes),
     }
 
 

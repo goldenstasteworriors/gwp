@@ -31,7 +31,7 @@
 - 透明/不透明 source 和 target vessel、液体透明度/着色、黏度、fill、rim offset、倾角、双手延迟、光照、背景、相机与 role swap；
 - 左 RH56DFTP 6 通道、右 OmniPicker aperture 1 通道，统一到已有 25-D action schema；
 - native rim/boundary/liquid surface/stream/contact/transition/volume/impulse/RGB/depth/instance GT；
-- `rgb_only`、`rgb_depth`、`no_contact_aux`、`direct_action`、`oracle_contact`、`predicted_contact`、`oracle_all_fields` 七个严格对照，总完整矩阵为 1,904 个 rollout slots；
+- `rgb_only`、`rgb_depth`、`no_contact_aux`、`direct_action`、`oracle_contact`、`predicted_contact`、`oracle_all_fields` 七个严格对照，总完整矩阵为 1,904 个 planned rollout slots；这些只是待执行配对，不是已有 rollout；
 - primary gate 是 OOD task success 与 correct-first-contact；另有 mass conservation、相同 condition 的四 seed repeatability、predicted recovery 和 oracle-field value gate。
 
 场景分配是 deterministic balanced cyclic assignment。它会报告 marginal coverage，但不声称自己是最优 covering array。
@@ -46,7 +46,7 @@
 - RGB、depth 和 instance segmentation 来自同状态的 native render pass；
 - camera/state 最大偏差为 5 ms。
 
-validator 会递归拒绝任何含以下来源词的 record：`inpaint`、`composite`、`diffusion`、`image_edit`、`manual_paint`、`pseudo_label`、`reconstruction_as_gt`。透明/折射只允许影响 native RGB；标签不能从修补过的 observation 产生。Simulator native depth 只能叫 oracle sensor baseline，不能声称真实透明深度有效。
+verifier 会递归拒绝任何含以下来源词的 record：`inpaint`、`composite`、`diffusion`、`image_edit`、`manual_paint`、`pseudo_label`、`reconstruction_as_gt`。透明/折射只允许影响 native RGB；标签不能从修补过的 observation 产生。Simulator native depth 只能叫 oracle sensor baseline，不能声称真实透明深度有效。
 
 ## 执行门槛
 
@@ -75,6 +75,8 @@ cd /home/ykj/project/WM/giga-world-policy
 ```
 
 `verify_sim_oracle_results.py` 只接受 execution-ready manifest；它会重新哈希 manifest、adapter、assets、calibration receipts、variant config/checkpoint bundle manifest、field prediction/evaluator 和每个 native GT artifact（相同 immutable path/size/mtime 在单次核验中只读一次），检查全矩阵 paired coverage 与相同 scenario 的 control/GT receipts，再重算 volume/mass/success/contact timing/risk 指标、汇总带 provenance 的 field metrics并计算 gate。当前不要运行它来制造结果。
+
+审计 verifier 逻辑时，可以在 CPU 内存中构造完整的 1,904 条 synthetic paired records，并显式关闭 artifact 读取来做正反例测试；这种测试只证明 pairing、schema 和 gate 代码行为，不是 simulator rollout、物理证据或 benchmark 结果，不能写入 execution report。
 
 ## 代码与数据位置
 

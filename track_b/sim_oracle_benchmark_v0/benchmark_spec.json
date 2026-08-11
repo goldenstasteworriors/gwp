@@ -403,7 +403,8 @@
     ],
     "field": [
       "boundary_F1_at_2px",
-      "rim_chamfer_px",
+      "source_rim_chamfer_px",
+      "target_rim_chamfer_px",
       "liquid_surface_F1_at_2px",
       "stream_AUPRC",
       "contact_AUPRC",

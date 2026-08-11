@@ -20,6 +20,7 @@ from world_action_model.contact_transition_schema import (
 )
 from world_action_model.ego_action_schema import EGO_HAND_STATUS_SEMANTICS
 from world_action_model.contact_asym25_heldout_eval import (
+    ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
     build_current_training_data_receipt,
     build_training_code_receipt,
     load_and_replay_preflight_receipt,
@@ -28,6 +29,15 @@ from world_action_model.contact_asym25_heldout_eval import (
     public_tree_receipt,
     snapshot_artifact_tree,
 )
+
+
+def _required_run_identity(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if len(value) < 16:
+        raise ContactAsym25PreflightError(
+            f"production training requires {name} with at least 16 characters"
+        )
+    return value
 
 
 _FIXED_ENV = {
@@ -144,6 +154,21 @@ if (
     raise ContactAsym25PreflightError(
         "base transform norm path differs from the preflighted normalization stats"
     )
+_train_norm_receipt = preflight_receipt.get("train_norm_source_receipt")
+if (
+    not isinstance(_train_norm_receipt, dict)
+    or _train_norm_receipt.get("split_seed") != preflight_receipt["split_seed"]
+    or _train_norm_receipt.get("train_episode_ids")
+    != preflight_receipt["train_episode_ids"]
+    or _train_norm_receipt.get("production_split_receipt_sha256")
+    != preflight_receipt.get("production_split_receipt_sha256")
+):
+    raise ContactAsym25PreflightError(
+        "production transform norm receipt differs from its split seed/train episodes"
+    )
+# Re-hash the exact preflighted train-only norm bytes when each worker constructs
+# its transform.  Legacy configs omit this opt-in SHA and retain their old path.
+norm_paths[0]["sha256"] = preflight_receipt["norm_stats_sha256"]
 
 config["models"]["transformer"].update(
     num_contact_tokens=12,
@@ -164,6 +189,15 @@ config["models"].update(
     current_training_data_receipt_sha256=current_training_data_receipt_sha256,
     current_training_source_snapshot=_dataset_source_tree,
     production_checkpoint_steps=[0, 100, 200],
+    production_training_run_nonce=_required_run_identity(
+        "GWP_CONTACT_TRAINING_RUN_NONCE"
+    ),
+    production_experiment_family_id=_required_run_identity(
+        "GWP_CONTACT_EXPERIMENT_FAMILY_ID"
+    ),
+    production_variant_id=_required_run_identity("GWP_CONTACT_VARIANT_ID"),
+    production_training_precision="bfloat16",
+    production_action_schema_contract=ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
 )
 
 if int(config["train"].get("max_steps", 0)) < 200:
@@ -174,6 +208,8 @@ config["train"].update(
     checkpoint_interval=100,
     checkpoint_total_limit=-1,
 )
+if config["train"].get("mixed_precision") != "bf16":
+    raise ContactAsym25PreflightError("production training requires bf16 precision")
 
 config["contact_asym25_integration"] = {
     "preflight_receipt": preflight_receipt,
@@ -187,6 +223,13 @@ config["contact_asym25_integration"] = {
     "heldout_window_manifest": str(Path(_heldout_window_path).resolve()),
     "heldout_window_manifest_sha256": _heldout_window_sha256,
     "current_training_data_receipt_sha256": current_training_data_receipt_sha256,
+    "production_split_receipt_sha256": preflight_receipt[
+        "production_split_receipt_sha256"
+    ],
+    "train_norm_source_receipt_sha256": preflight_receipt[
+        "train_norm_source_receipt_sha256"
+    ],
+    "norm_source_tree_receipt": preflight_receipt["norm_source_tree_receipt"],
     "action_visible_route": (
         "state/ref/text planner -> canonical hard 22D -> 22-to-1024 encoder -> "
         "action; action has no direct reference or raw-planner-hidden route"

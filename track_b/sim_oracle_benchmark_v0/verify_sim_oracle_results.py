@@ -22,6 +22,7 @@ from validate_sim_oracle_manifest import (
     DEFAULT_READINESS,
     DEFAULT_SPEC,
     ManifestError,
+    load_json_value,
     load_object,
     sha256_file,
     validate_manifest,
@@ -138,8 +139,8 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             try:
-                value = json.loads(line)
-            except json.JSONDecodeError as exc:
+                value = load_json_value(line)
+            except (json.JSONDecodeError, ManifestError) as exc:
                 raise ResultError(f"{path}:{line_number}: {exc}") from exc
             _require(isinstance(value, dict), f"{path}:{line_number} must be a JSON object")
             records.append(value)
@@ -486,15 +487,15 @@ def _aggregate(items: list[dict[str, Any]]) -> dict[str, Any]:
         "n": len(items),
         "success_rate": _mean(float(item["outcomes"]["success"]) for item in items),
         "correct_first_contact_rate": _mean(float(item["outcomes"]["correct_first_contact"]) for item in items),
-        "transfer_fraction_mean": _mean(item["outcomes"]["transfer_fraction"] for item in items),
-        "spill_fraction_mean": _mean(item["outcomes"]["spill_fraction"] for item in items),
-        "overflow_fraction_mean": _mean(item["outcomes"]["overflow_fraction"] for item in items),
+        "transfer_fraction": _mean(item["outcomes"]["transfer_fraction"] for item in items),
+        "spill_fraction": _mean(item["outcomes"]["spill_fraction"] for item in items),
+        "overflow_fraction": _mean(item["outcomes"]["overflow_fraction"] for item in items),
         "collision_rate": _mean(float(item["outcomes"]["collision_positive"]) for item in items),
-        "mass_residual_mean": _mean(item["outcomes"]["mass_residual_fraction"] for item in items),
+        "mass_conservation_error": _mean(item["outcomes"]["mass_residual_fraction"] for item in items),
         "spill_AUPRC": _average_precision(spill_labels, spill_scores),
         "spill_AUROC": _roc_auc(spill_labels, spill_scores),
         "collision_AUPRC": _average_precision(collision_labels, collision_scores),
-        "risk_Brier": _mean(
+        "Brier_score": _mean(
             (spill_score - float(spill_label)) ** 2
             for spill_score, spill_label in zip(spill_scores, spill_labels)
         ),

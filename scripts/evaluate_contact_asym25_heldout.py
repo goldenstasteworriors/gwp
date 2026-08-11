@@ -16,8 +16,12 @@ if str(REPO_ROOT) not in sys.path:
 from world_action_model.contact_asym25_eval_runtime import (  # noqa: E402
     ProductionHeldoutRuntime,
 )
+from world_action_model.contact_asym25_checkpoint_acceptance import (  # noqa: E402
+    strict_json_file as strict_checkpoint_json_file,
+)
 from world_action_model.contact_asym25_heldout_eval import (  # noqa: E402
     ARTIFACT_RECEIPT_VERSION,
+    ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
     CHECKPOINT_STEPS,
     EVALUATION_SEEDS,
     RESULT_VERSION,
@@ -34,6 +38,7 @@ from world_action_model.contact_asym25_heldout_eval import (  # noqa: E402
     reduce_metric_rows,
     score_heldout_window,
     snapshot_artifact_tree,
+    validate_three_seed_run_contracts,
     verify_artifact_tree_unchanged,
     write_per_window_csv,
     write_strict_json,
@@ -63,9 +68,7 @@ def _base_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--checkpoint-manifest", type=Path, required=True)
     evaluate.add_argument("--output-dir", type=Path, required=True)
     evaluate.add_argument("--device", default="cuda:0")
-    evaluate.add_argument(
-        "--dtype", choices=("float32", "float16", "bfloat16"), default="bfloat16"
-    )
+    evaluate.add_argument("--dtype", choices=("bfloat16",), default="bfloat16")
     evaluate.add_argument("--inference-steps", type=int, default=10)
     evaluate.add_argument("--overwrite", action="store_true")
 
@@ -205,6 +208,8 @@ def evaluate(args: argparse.Namespace) -> None:
                         action_denorm_scale=transformed[
                             "action_denorm_scale"
                         ].cpu().numpy(),
+                        action_schema_contract=ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
+                        grip_active_future=None,
                         contact_logits=prediction["contact_logits"],
                         contact_hard_semantic=prediction["contact_hard_semantic"],
                         contact_target=transformed["contact_target"].cpu().numpy(),
@@ -257,10 +262,28 @@ def evaluate(args: argparse.Namespace) -> None:
     per_window_sha256 = write_per_window_csv(
         csv_path, rows, overwrite=args.overwrite
     )
-    checkpoint_artifacts = [
-        public_tree_receipt(snapshot)
-        for _, snapshot in sorted(artifact_snapshots.items())
-    ]
+    checkpoint_artifacts = []
+    for path, snapshot in sorted(artifact_snapshots.items()):
+        if path == str(Path(checkpoint_manifest["base_model"]["path"]).absolute()):
+            checkpoint_artifacts.append(public_tree_receipt(snapshot))
+            continue
+        entry = next(
+            row
+            for row in checkpoint_manifest["checkpoints"]
+            if str(Path(row["checkpoint_path"]).absolute()) == path
+        )
+        bundle_manifest, _ = strict_checkpoint_json_file(
+            entry["checkpoint_bundle_manifest_path"],
+            "checkpoint bundle manifest for result receipt",
+        )
+        checkpoint_artifacts.append(
+            {
+                "path_record_only": path,
+                "tree_sha256": bundle_manifest["bundle_sha256"],
+                "file_count": bundle_manifest["file_count"],
+                "total_size_bytes": bundle_manifest["total_size_bytes"],
+            }
+        )
     result = {
         "result_version": RESULT_VERSION,
         "status": "passed",
@@ -300,6 +323,10 @@ def evaluate(args: argparse.Namespace) -> None:
             "split_seed": selected_seed,
             "action_target_access": "metrics_only_after_prediction",
             "oracle_contact_condition": False,
+            "contact_query_count": 12,
+            "contact_target_dim": 22,
+            "contact_time_bins": 16,
+            "action_schema_contract": ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
         },
         "results_by_seed_step_split": results,
         "per_window_csv": {
@@ -330,6 +357,9 @@ def evaluate(args: argparse.Namespace) -> None:
 
 
 def aggregate(args: argparse.Namespace) -> None:
+    from world_action_model.contact_asym25_checkpoint_acceptance import (
+        strict_json_file,
+    )
     from world_action_model.contact_asym25_heldout_eval import (
         AGGREGATE_RESULT_VERSION,
         load_evaluation_result_bundle,
@@ -385,6 +415,28 @@ def aggregate(args: argparse.Namespace) -> None:
         )
         for bundle in bundles
     }
+    run_evidence = {}
+    for bundle in bundles:
+        seed = bundle["preflight_receipt"]["split_seed"]
+        rows = []
+        for entry in bundle["checkpoint_manifest"]["checkpoints"]:
+            receipt, _ = strict_json_file(
+                entry["checkpoint_training_receipt_path"],
+                "aggregate checkpoint training receipt",
+            )
+            rows.append((receipt, entry["independent_acceptance_sha256"]))
+        run_evidence[seed] = rows
+    run_identity = validate_three_seed_run_contracts(run_evidence)
+    evaluation_window_contracts = {
+        tuple(
+            sorted(
+                (key, json.dumps(value, sort_keys=True))
+                for key, value in bundle["result"]["evaluation_contract"].items()
+                if key != "split_seed"
+            )
+        )
+        for bundle in bundles
+    }
     if (
         len(dataset_ids) != 1
         or len(split_hashes) != 1
@@ -392,6 +444,7 @@ def aggregate(args: argparse.Namespace) -> None:
         or len(code_commits) != 1
         or len(base_model_hashes) != 1
         or len(runtime_contracts) != 1
+        or len(evaluation_window_contracts) != 1
     ):
         raise HeldoutEvaluationError(
             "aggregate reports differ in dataset/split/source/code/base/runtime identity"
@@ -428,6 +481,7 @@ def aggregate(args: argparse.Namespace) -> None:
         "base_model_bundle_sha256": next(iter(base_model_hashes)),
         "split_seeds": list(EVALUATION_SEEDS),
         "checkpoint_steps": list(CHECKPOINT_STEPS),
+        **run_identity,
         "source_reports": [
             {
                 "split_seed": seed,

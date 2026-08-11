@@ -288,6 +288,21 @@ class CasualWATrainerMoT(Trainer):
         self.production_checkpoint_steps = tuple(
             int(value) for value in model_config.get("production_checkpoint_steps", [])
         )
+        self.production_training_run_nonce = model_config.get(
+            "production_training_run_nonce"
+        )
+        self.production_experiment_family_id = model_config.get(
+            "production_experiment_family_id"
+        )
+        self.production_variant_id = model_config.get("production_variant_id")
+        self.production_training_precision = model_config.get(
+            "production_training_precision"
+        )
+        self.production_action_schema_contract = model_config.get(
+            "production_action_schema_contract"
+        )
+        self._production_checkpoint_bundle_sha256 = {}
+        self._production_initial_weights_snapshot = None
         if (self.current_training_data_receipt is None) != (
             self.current_training_data_receipt_sha256 is None
         ):
@@ -314,6 +329,20 @@ class CasualWATrainerMoT(Trainer):
                 raise ValueError(
                     "production checkpoint steps must be exactly (0, 100, 200)"
                 )
+            for name, value in (
+                ("production_training_run_nonce", self.production_training_run_nonce),
+                (
+                    "production_experiment_family_id",
+                    self.production_experiment_family_id,
+                ),
+                ("production_variant_id", self.production_variant_id),
+            ):
+                if not isinstance(value, str) or len(value) < 16:
+                    raise ValueError(f"{name} must contain at least 16 characters")
+            if self.production_training_precision != "bfloat16":
+                raise ValueError("production training precision must be bfloat16")
+            if not isinstance(self.production_action_schema_contract, dict):
+                raise ValueError("production action schema contract is required")
             source_receipt = self.current_training_data_receipt.get(
                 "dataset_source_tree_receipt"
             )
@@ -384,6 +413,14 @@ class CasualWATrainerMoT(Trainer):
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
         transformer_pretrained = model_config.get("transformer_pretrained", os.path.join(pretrained, "transformer"))
+        if self.current_training_data_receipt is not None:
+            from world_action_model.contact_asym25_heldout_eval import (
+                snapshot_artifact_tree,
+            )
+
+            self._production_initial_weights_snapshot = snapshot_artifact_tree(
+                transformer_pretrained
+            )
         transformer_cfg = dict(model_config.get("transformer"))
         if self.current_training_data_receipt is not None:
             transformer_cfg.update(
@@ -400,6 +437,14 @@ class CasualWATrainerMoT(Trainer):
             skip_action_expert=model_config.get("skip_action_expert", False),
             strict_load=model_config.get("strict_load", False),
         )
+        if self._production_initial_weights_snapshot is not None:
+            from world_action_model.contact_asym25_heldout_eval import (
+                verify_artifact_tree_unchanged,
+            )
+
+            verify_artifact_tree_unchanged(
+                self._production_initial_weights_snapshot
+            )
         transformer.to(self.device)
         if model_config.get("enable_gradient_checkpointing", True):
             transformer.enable_gradient_checkpointing()
@@ -423,31 +468,85 @@ class CasualWATrainerMoT(Trainer):
             raise FileNotFoundError(
                 f"production checkpoint directory was not written: {output_dir}"
             )
-        receipt_path = output_dir / "current_training_data_receipt.json"
-        if receipt_path.exists():
-            raise FileExistsError(
-                f"refusing to overwrite checkpoint training-data receipt: {receipt_path}"
-            )
+        from world_action_model.contact_asym25_checkpoint_acceptance import (
+            build_bundle_manifest,
+            write_json_exclusive,
+        )
+
+        if self._production_initial_weights_snapshot is None:
+            raise ValueError("production initial-weights snapshot is unavailable")
+        artifact_dir = output_dir / "transformer"
+        if not artifact_dir.is_dir():
+            raise FileNotFoundError("production transformer checkpoint was not written")
+        bundle_manifest = build_bundle_manifest(artifact_dir)
+        bundle_manifest_file_sha256 = write_json_exclusive(
+            artifact_dir / "checkpoint_bundle_manifest.json", bundle_manifest
+        )
+        initial_sha256 = self._production_initial_weights_snapshot["tree_sha256"]
+        if step == 0:
+            parent_sha256 = initial_sha256
+        else:
+            previous_step = self.production_checkpoint_steps[
+                self.production_checkpoint_steps.index(step) - 1
+            ]
+            try:
+                parent_sha256 = self._production_checkpoint_bundle_sha256[
+                    previous_step
+                ]
+            except KeyError as exc:
+                raise ValueError(
+                    "production checkpoint parent was not emitted in this run"
+                ) from exc
+        current = self.current_training_data_receipt
         payload = {
-            "receipt_version": "contact-asym25-checkpoint-data-binding/v1",
+            "receipt_version": "contact-asym25-checkpoint-training-receipt/v2",
             "checkpoint_step": int(step),
-            "current_training_data_receipt": self.current_training_data_receipt,
+            "checkpoint_bundle_manifest_sha256": bundle_manifest_file_sha256,
+            "checkpoint_bundle_sha256": bundle_manifest["bundle_sha256"],
+            "parent_checkpoint_bundle_sha256": parent_sha256,
+            "initial_weights_bundle_sha256": initial_sha256,
+            "training_run_nonce": self.production_training_run_nonce,
+            "experiment_family_id": self.production_experiment_family_id,
+            "variant_id": self.production_variant_id,
+            "split_seed": current["split_seed"],
+            "training_precision": self.production_training_precision,
+            "contact_query_count": 12,
+            "contact_target_dim": SEGMENT_TARGET_DIM,
+            "contact_time_bins": 16,
+            "action_schema_contract": self.production_action_schema_contract,
+            "production_preflight_receipt_sha256": current[
+                "production_preflight_receipt_sha256"
+            ],
+            "heldout_window_manifest_sha256": current[
+                "heldout_window_manifest_sha256"
+            ],
+            "training_gate_sha256": current["training_gate_sha256"],
+            "current_training_data_receipt": current,
             "current_training_data_receipt_sha256": (
                 self.current_training_data_receipt_sha256
             ),
-        }
-        with receipt_path.open("x", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    payload,
-                    indent=2,
-                    sort_keys=True,
-                    allow_nan=False,
+            "training_code_receipt_sha256": current[
+                "training_code_receipt_sha256"
+            ],
+            "dataset_source_tree_sha256": current[
+                "dataset_source_tree_receipt"
+            ]["tree_sha256"],
+            "initial_weights_tree_receipt": {
+                key: self._production_initial_weights_snapshot[key]
+                for key in (
+                    "path_record_only",
+                    "tree_sha256",
+                    "file_count",
+                    "total_size_bytes",
                 )
-                + "\n"
-            )
-            handle.flush()
-            os.fsync(handle.fileno())
+            },
+        }
+        write_json_exclusive(
+            artifact_dir / "checkpoint_training_receipt.json", payload
+        )
+        self._production_checkpoint_bundle_sha256[step] = bundle_manifest[
+            "bundle_sha256"
+        ]
 
     def _save_production_initial_checkpoint(self) -> None:
         if self.current_training_data_receipt is None:
