@@ -14,7 +14,7 @@
   "evidence": null,
   "topology": null,
   "parameter_topology": null,
-  "measured_route_costs": null,
+  "diagnostic_not_admission": null,
   "gradient_reachability_receipt": null,
   "checkpoint_artifact_hashes": null,
   "checkpoint_file": null,

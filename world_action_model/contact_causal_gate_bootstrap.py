@@ -29,6 +29,7 @@ EGO_GATE_VERSION = "ego-discrete-contact-stage1-training-gate/v7"
 EGO_REVIEW_VERSION = "ego-contact-planner-gate-independent-acceptance/v1"
 ROBOT_GATE_VERSION = "contact-asym25-training-gate/v3"
 ROBOT_REVIEW_VERSION = "contact-asym25-gate-reviewer-acceptance/v2"
+ROBOT_ROUTE_ACCEPTANCE_VERSION = "contact-causal-route-training-acceptance/v1"
 MATRIX_ID = "contact-asym25-causal-main-q12-b16-stage2/v1"
 MATRIX_SCHEMA_VERSION = "contact-causal-production-matrix/v1"
 PRECURSOR_ID = "ego-contact-planner-precursor-q12/v1"
@@ -52,6 +53,21 @@ ROBOT_REQUIRED_FLAGS = (
     "precursor_byte_identity_passed", "matched_control_hash_collector_passed",
     "current_head_source_binding_passed", "allow_server_training",
     "allow_5b_training",
+)
+ROBOT_FINGERPRINT_KEYS = (
+    "matrix_manifest_sha256", "current_head_source_tree_sha256",
+    "precursor_receipt_bytes_sha256", "precursor_bundle_sha256",
+    "hardware_contract_sha256", "calibration_capture_sha256",
+    "dataset_tree_sha256", "dataset_info_sha256",
+    "episode_metadata_sha256", "train_only_norm_sha256",
+    "sidecar_meta_sha256", "sidecar_bundle_sha256",
+    "split_manifest_sha256", "coverage_csv_sha256",
+    "segments_csv_sha256", "inventory_csv_sha256", "build_config_sha256",
+    "dataset_contact_coverage_receipt_sha256",
+    "oracle_sufficiency_receipt_sha256", "matched_control_report_sha256",
+    "matched_control_trace_manifest_sha256", "route_contract_bundle_sha256",
+    "runtime_environment_sha256", "dataset_runtime_source_receipt_sha256",
+    "t5_runtime_source_receipt_sha256", "hardened_preflight_receipt_sha256",
 )
 
 EGO_BOOTSTRAP_CODE_PATHS = (
@@ -186,9 +202,120 @@ def _gate_contract_sha(gate: Mapping[str, Any], *, review_report_name: str) -> s
     return _canonical_sha(normalized)
 
 
+def _route_acceptance_gate_contract_sha(gate: Mapping[str, Any]) -> str:
+    """Preregistered gate identity without either circular acceptance digest."""
+
+    normalized = dict(gate)
+    reports = dict(normalized["evidence_reports"])
+    reports["gate_reviewer_acceptance"] = {"path": None, "sha256": None}
+    normalized["evidence_reports"] = reports
+    normalized["external_acceptance_path_by_route"] = {
+        route: None for route in CAUSAL_ROUTES
+    }
+    normalized["external_acceptance_sha256_by_route"] = {
+        route: None for route in CAUSAL_ROUTES
+    }
+    return _canonical_sha(normalized)
+
+
+def validate_robot_route_acceptance_v1(
+    value: object,
+    *,
+    gate: Mapping[str, Any],
+    route: str,
+    repository_root: str | Path,
+) -> dict[str, Any]:
+    acceptance = _exact(
+        value,
+        {
+            "acceptance_version", "status", "accepted",
+            "matrix_schema_version", "matrix_id", "causal_route_id",
+            "training_run_id", "training_run_nonce", "reviewer_identity",
+            "reviewer_attestation_nonce", "acceptance_run_id",
+            "acceptance_run_nonce", "evidence_valid_until_utc",
+            "reviewed_at_utc", "reviewed_gate_preregistered_contract_sha256",
+            "reviewed_git_commit", "reviewed_code_blob_sha256",
+            "runtime_environment_sha256", "reviewed_artifact_fingerprints",
+            "reviewed_evidence_report_sha256", "oracle_used",
+            "trainer_self_signed", "production_data_admission",
+            "allow_5b_training", "allow_server_training", "benefit_claimed",
+        },
+        f"Robot route acceptance {route}",
+    )
+    if (
+        route not in CAUSAL_ROUTES
+        or acceptance["acceptance_version"] != ROBOT_ROUTE_ACCEPTANCE_VERSION
+        or acceptance["status"] != "accepted"
+        or acceptance["accepted"] is not True
+        or acceptance["matrix_schema_version"] != MATRIX_SCHEMA_VERSION
+        or acceptance["matrix_id"] != MATRIX_ID
+        or acceptance["causal_route_id"] != route
+        or acceptance["training_run_id"] != gate["training_run_id_by_route"][route]
+        or acceptance["training_run_nonce"]
+        != gate["training_run_nonce_by_route"][route]
+        or acceptance["evidence_valid_until_utc"]
+        != gate["evidence_valid_until_utc"]
+        or acceptance["reviewed_gate_preregistered_contract_sha256"]
+        != _route_acceptance_gate_contract_sha(gate)
+        or acceptance["reviewed_git_commit"] != gate["expected_git_commit"]
+        or acceptance["runtime_environment_sha256"]
+        != gate["artifact_fingerprints"]["runtime_environment_sha256"]
+        or acceptance["reviewed_artifact_fingerprints"]
+        != gate["artifact_fingerprints"]
+        or acceptance["oracle_used"] is not False
+        or acceptance["trainer_self_signed"] is not False
+        or acceptance["production_data_admission"] is not True
+        or acceptance["allow_5b_training"] is not True
+        or acceptance["allow_server_training"] is not True
+        or acceptance["benefit_claimed"] is not False
+    ):
+        raise CausalGateBootstrapError("Robot route acceptance binding differs")
+    expected_reports = {
+        name: entry["sha256"]
+        for name, entry in gate["evidence_reports"].items()
+        if name != "gate_reviewer_acceptance"
+    }
+    if acceptance["reviewed_evidence_report_sha256"] != expected_reports:
+        raise CausalGateBootstrapError("Robot route acceptance evidence map differs")
+    identities = [
+        acceptance[name]
+        for name in (
+            "reviewer_identity", "reviewer_attestation_nonce",
+            "acceptance_run_id", "acceptance_run_nonce",
+        )
+    ]
+    for index, identity in enumerate(identities):
+        _identity(identity, f"Robot route reviewer identity {index}")
+    if len(set(identities)) != 4:
+        raise CausalGateBootstrapError("Robot route reviewer identities overlap")
+    expiry = _utc_value(
+        acceptance["evidence_valid_until_utc"],
+        "Robot route acceptance expiry", require_future=True,
+    )
+    reviewed_at = _utc_value(
+        acceptance["reviewed_at_utc"],
+        "Robot route acceptance timestamp", require_future=False,
+    )
+    if reviewed_at > datetime.now(timezone.utc) or reviewed_at >= expiry:
+        raise CausalGateBootstrapError("Robot route acceptance timestamp differs")
+    if acceptance["runtime_environment_sha256"] != runtime_environment_sha256_stdlib():
+        raise CausalGateBootstrapError("Robot route acceptance runtime differs")
+    _verify_head_code(
+        repository_root=repository_root,
+        expected_commit=acceptance["reviewed_git_commit"],
+        expected_code_sha256=acceptance["reviewed_code_blob_sha256"],
+        logical_paths=ROBOT_BOOTSTRAP_CODE_PATHS,
+    )
+    return acceptance
+
+
 def runtime_environment_sha256_stdlib() -> str:
     packages = {}
-    for name in ("accelerate", "diffusers", "numpy", "torch"):
+    for name in (
+        "accelerate", "av", "datasets", "decord", "diffusers", "h5py",
+        "huggingface-hub", "lerobot", "numpy", "pandas", "pyarrow",
+        "safetensors", "torch", "torchvision", "transformers",
+    ):
         try:
             packages[name] = importlib_metadata.version(name)
         except importlib_metadata.PackageNotFoundError:
@@ -395,6 +522,7 @@ def bootstrap_robot_v3_stdlib(
             "expected_git_commit", "evidence_valid_until_utc", *ROBOT_REQUIRED_FLAGS,
             "artifact_fingerprints", "evidence_reports",
             "training_run_id_by_route", "training_run_nonce_by_route",
+            "external_acceptance_path_by_route",
             "external_acceptance_sha256_by_route", "reviewed_by",
             "reviewed_at_utc", "note",
         },
@@ -418,12 +546,16 @@ def bootstrap_robot_v3_stdlib(
     failed = [name for name in ROBOT_REQUIRED_FLAGS if gate.get(name) is not True]
     if failed:
         raise CausalGateBootstrapError(f"Robot v3 gate flags are not true: {failed}")
-    if not isinstance(gate["artifact_fingerprints"], dict):
-        raise CausalGateBootstrapError("Robot v3 fingerprints are missing")
+    if (
+        not isinstance(gate["artifact_fingerprints"], dict)
+        or set(gate["artifact_fingerprints"]) != set(ROBOT_FINGERPRINT_KEYS)
+    ):
+        raise CausalGateBootstrapError("Robot v3 fingerprints are missing/differ")
     for name, digest in gate["artifact_fingerprints"].items():
         _sha(digest, f"Robot v3 fingerprint {name}")
     route_maps = (
         gate["training_run_id_by_route"], gate["training_run_nonce_by_route"],
+        gate["external_acceptance_path_by_route"],
         gate["external_acceptance_sha256_by_route"],
     )
     if any(
@@ -436,9 +568,14 @@ def bootstrap_robot_v3_stdlib(
         _identity(identity, f"Robot v3 route identity {index}")
     if len(set(all_run_identities)) != len(all_run_identities):
         raise CausalGateBootstrapError("Robot v3 route identities/nonces overlap")
-    for route_name, digest in route_maps[2].items():
+    for route_name, path_text in route_maps[2].items():
+        if not isinstance(path_text, str) or not path_text:
+            raise CausalGateBootstrapError(
+                f"Robot v3 route acceptance path is missing: {route_name}"
+            )
+    for route_name, digest in route_maps[3].items():
         _sha(digest, f"Robot v3 external acceptance {route_name}")
-    if len(set(route_maps[2].values())) != len(CAUSAL_ROUTES):
+    if len(set(route_maps[3].values())) != len(CAUSAL_ROUTES):
         raise CausalGateBootstrapError("Robot v3 external acceptance SHAs overlap")
     _identity(run_id, "Robot training run ID")
     _identity(nonce, "Robot training run nonce")
@@ -473,6 +610,10 @@ def bootstrap_robot_v3_stdlib(
             "dataset_tree_sha256", "train_only_norm_sha256",
             "sidecar_bundle_sha256", "precursor_receipt_bytes_sha256",
             "matched_control_report_sha256", "oracle_sufficiency_receipt_sha256",
+            "runtime_environment_sha256",
+            "dataset_runtime_source_receipt_sha256",
+            "t5_runtime_source_receipt_sha256",
+            "hardened_preflight_receipt_sha256",
             "oracle_is_main_matrix_route",
         },
         "Robot v3 external review",
@@ -521,11 +662,17 @@ def bootstrap_robot_v3_stdlib(
         "precursor_receipt_bytes_sha256": "precursor_receipt_bytes_sha256",
         "matched_control_report_sha256": "matched_control_report_sha256",
         "oracle_sufficiency_receipt_sha256": "oracle_sufficiency_receipt_sha256",
+        "runtime_environment_sha256": "runtime_environment_sha256",
+        "dataset_runtime_source_receipt_sha256": "dataset_runtime_source_receipt_sha256",
+        "t5_runtime_source_receipt_sha256": "t5_runtime_source_receipt_sha256",
+        "hardened_preflight_receipt_sha256": "hardened_preflight_receipt_sha256",
     }
     for review_name, gate_name in fingerprint_mirrors.items():
         digest = _sha(review[review_name], f"Robot reviewed {review_name}")
         if digest != gate["artifact_fingerprints"].get(gate_name):
             raise CausalGateBootstrapError(f"Robot reviewed fingerprint differs: {review_name}")
+    if review["runtime_environment_sha256"] != runtime_environment_sha256_stdlib():
+        raise CausalGateBootstrapError("Robot reviewed runtime environment differs")
     root = Path(repository_root or Path(__file__).resolve().parents[1]).absolute()
     expected_blobs = review.get("reviewed_code_blob_sha256")
     _verify_head_code(
@@ -533,12 +680,48 @@ def bootstrap_robot_v3_stdlib(
         expected_code_sha256=expected_blobs,
         logical_paths=ROBOT_BOOTSTRAP_CODE_PATHS,
     )
+    route_acceptances: dict[str, Any] = {}
+    route_acceptance_bytes: dict[str, bytes] = {}
+    route_acceptance_paths: dict[str, str] = {}
+    external_reviewer_identities: set[str] = set(review_identities) | gate_identities
+    for route_name in CAUSAL_ROUTES:
+        path = Path(gate["external_acceptance_path_by_route"][route_name])
+        if not path.is_absolute():
+            path = gate_path.parent / path
+        value, digest, payload, selected_path = _load(
+            path, f"Robot route acceptance {route_name}"
+        )
+        if digest != gate["external_acceptance_sha256_by_route"][route_name]:
+            raise CausalGateBootstrapError(
+                f"Robot route acceptance bytes changed: {route_name}"
+            )
+        validated = validate_robot_route_acceptance_v1(
+            value, gate=gate, route=route_name, repository_root=root
+        )
+        route_ids = {
+            validated[name]
+            for name in (
+                "reviewer_identity", "reviewer_attestation_nonce",
+                "acceptance_run_id", "acceptance_run_nonce",
+            )
+        }
+        if route_ids & external_reviewer_identities:
+            raise CausalGateBootstrapError(
+                "Robot route acceptance identities are not globally unique"
+            )
+        external_reviewer_identities.update(route_ids)
+        route_acceptances[route_name] = validated
+        route_acceptance_bytes[route_name] = payload
+        route_acceptance_paths[route_name] = str(selected_path)
     return {
         "bootstrap_version": "contact-asym25-causal-stdlib-bootstrap/v1",
         "gate": gate, "gate_sha256": gate_sha, "gate_bytes": gate_bytes,
         "gate_path": str(gate_path), "review": review,
         "review_sha256": review_sha, "review_bytes": review_bytes,
         "review_path": str(review_path), "route": route,
+        "route_acceptances": route_acceptances,
+        "route_acceptance_bytes": route_acceptance_bytes,
+        "route_acceptance_paths": route_acceptance_paths,
     }
 
 

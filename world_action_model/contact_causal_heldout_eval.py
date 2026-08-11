@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import hashlib
+import io
+import json
 import math
+import os
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from world_action_model.asymmetric_action_schema import (
     ASYMMETRIC_ACTION_DIM,
@@ -29,6 +35,7 @@ from world_action_model.contact_causal_production import (
     MATRIX_SCHEMA_VERSION,
     RESULT_VERSION,
     SEEDS,
+    ensure_exact_causal_route,
     route_packet_kind,
     current_head_source_tree_receipt,
     sha256_json,
@@ -73,6 +80,58 @@ CAUSAL_EVALUATION_CONTRACT = {
     "contact_target_access": "additive_metrics_only_after_prediction",
     "oracle_contact_condition": False,
 }
+
+ROUTE_OUTPUT_EVIDENCE_VERSION = "contact-causal-route-output-evidence/v1"
+ROUTE_OUTPUT_EVIDENCE_FORMAT = "numpy-npz-typed-no-pickle/v1"
+ROUTE_OUTPUT_EVIDENCE_KEYS = frozenset(
+    {
+        "evidence_version",
+        "causal_route_id",
+        "checkpoint_steps",
+        "window_ids",
+        "action_predictions",
+        "action_targets",
+        "action_dim_masks",
+        "action_time_masks",
+        "action_denorm_scales",
+        "semantic_aux_logits",
+        "contact_hard_semantics",
+        "contact_targets",
+        "contact_loss_masks",
+        "contact_confidences",
+        "contact_condition_masks",
+        "route_packets",
+    }
+)
+INFERENCE_PACKET_KEYS = frozenset(
+    {
+        "window_id", "ref_images", "prompt_embeds", "state",
+        "embodiment_id", "action_dim_mask",
+    }
+)
+FORBIDDEN_INFERENCE_TARGET_KEYS = frozenset(
+    {
+        "action", "action_target", "action_time_mask", "action_loss_mask",
+        "action_loss_weight", "action_denorm_scale", "contact_target",
+        "contact_loss_mask", "contact_confidence", "contact_condition",
+        "contact_condition_mask",
+    }
+)
+
+
+def validate_target_free_inference_packet(value: object) -> Mapping[str, Any]:
+    """Accept only exact model inputs; every target-bearing superset fails."""
+
+    if not isinstance(value, Mapping) or set(value) != INFERENCE_PACKET_KEYS:
+        observed = set(value) if isinstance(value, Mapping) else set()
+        leaked = sorted(observed & FORBIDDEN_INFERENCE_TARGET_KEYS)
+        detail = f"; target keys={leaked}" if leaked else ""
+        raise CausalProductionError(
+            f"causal inference packet schema differs{detail}"
+        )
+    if not isinstance(value["window_id"], str) or not value["window_id"]:
+        raise CausalProductionError("causal inference packet window_id is invalid")
+    return value
 
 
 def _exact(value: object, keys: set[str], name: str) -> dict[str, Any]:
@@ -133,6 +192,272 @@ def _validate_finite_metric_tree(value: object, *, path: str = "metrics") -> Non
     number = _finite(value, path, unit_interval=unit)
     if any(token in lower for token in ("count", "sum", "mse", "mae", "nll", "brier", "entropy")) and number < 0:
         raise CausalProductionError(f"{path} must be non-negative")
+
+
+def _array_stream_sha256(window_ids: Sequence[str], values: np.ndarray) -> str:
+    if len(window_ids) != int(values.shape[0]):
+        raise CausalProductionError("route-output digest row count differs")
+    digest = hashlib.sha256()
+    for window_id, value in zip(window_ids, values, strict=True):
+        array = np.ascontiguousarray(value)
+        for payload in (
+            window_id.encode("utf-8"),
+            str(array.dtype).encode("ascii"),
+            json.dumps(
+                list(array.shape), separators=(",", ":")
+            ).encode("ascii"),
+            array.tobytes(order="C"),
+        ):
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+    return digest.hexdigest()
+
+
+def write_route_output_evidence(
+    path: str | Path,
+    *,
+    route: str,
+    checkpoint_steps: Sequence[int],
+    window_ids: Sequence[str],
+    action_predictions: np.ndarray,
+    action_targets: np.ndarray,
+    action_dim_masks: np.ndarray,
+    action_time_masks: np.ndarray,
+    action_denorm_scales: np.ndarray,
+    semantic_aux_logits: np.ndarray,
+    contact_hard_semantics: np.ndarray,
+    contact_targets: np.ndarray,
+    contact_loss_masks: np.ndarray,
+    contact_confidences: np.ndarray,
+    contact_condition_masks: np.ndarray,
+    route_packets: np.ndarray,
+    overwrite: bool = False,
+) -> str:
+    """Write the raw, typed evaluator outputs needed to replay every claim."""
+
+    route = ensure_exact_causal_route(route)
+    path = Path(path).expanduser().absolute()
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"refusing to overwrite route-output evidence: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    arrays = {
+        "evidence_version": np.asarray(ROUTE_OUTPUT_EVIDENCE_VERSION),
+        "causal_route_id": np.asarray(route),
+        "checkpoint_steps": np.asarray(checkpoint_steps, dtype=np.int64),
+        "window_ids": np.asarray(window_ids, dtype=np.str_),
+        "action_predictions": np.asarray(action_predictions, dtype=np.float32),
+        "action_targets": np.asarray(action_targets, dtype=np.float32),
+        "action_dim_masks": np.asarray(action_dim_masks, dtype=np.bool_),
+        "action_time_masks": np.asarray(action_time_masks, dtype=np.bool_),
+        "action_denorm_scales": np.asarray(action_denorm_scales, dtype=np.float32),
+        "semantic_aux_logits": np.asarray(semantic_aux_logits, dtype=np.float32),
+        "contact_hard_semantics": np.asarray(
+            contact_hard_semantics, dtype=np.float32
+        ),
+        "contact_targets": np.asarray(contact_targets, dtype=np.float32),
+        "contact_loss_masks": np.asarray(contact_loss_masks, dtype=np.float32),
+        "contact_confidences": np.asarray(contact_confidences, dtype=np.float32),
+        "contact_condition_masks": np.asarray(
+            contact_condition_masks, dtype=np.float32
+        ),
+        "route_packets": np.asarray(route_packets, dtype=np.float32),
+    }
+    payload = io.BytesIO()
+    np.savez(payload, **arrays)
+    partial = path.with_name(path.name + ".partial")
+    if partial.exists():
+        raise FileExistsError(f"stale route-output partial exists: {partial}")
+    try:
+        partial.write_bytes(payload.getvalue())
+        os.replace(partial, path)
+    finally:
+        if partial.exists():
+            partial.unlink()
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _load_route_output_evidence(
+    entry: Mapping[str, Any], *, route: str
+) -> dict[str, np.ndarray]:
+    entry = _exact(
+        entry,
+        {"path_record_only", "sha256", "row_count", "format"},
+        "causal route-output evidence",
+    )
+    path = Path(entry["path_record_only"])
+    if (
+        not path.is_absolute()
+        or path.is_symlink()
+        or not path.is_file()
+        or entry["format"] != ROUTE_OUTPUT_EVIDENCE_FORMAT
+        or isinstance(entry["row_count"], bool)
+        or entry["row_count"] != 3 * 2 * 256
+    ):
+        raise CausalProductionError("causal route-output evidence identity differs")
+    expected_sha = _sha(entry["sha256"], "causal route-output evidence")
+    payload = path.read_bytes()
+    if len(payload) > 256 * 1024 * 1024:
+        raise CausalProductionError("causal route-output evidence is unexpectedly large")
+    if hashlib.sha256(payload).hexdigest() != expected_sha:
+        raise CausalProductionError("causal route-output evidence bytes changed")
+    try:
+        with np.load(io.BytesIO(payload), allow_pickle=False) as archive:
+            if (
+                len(archive.files) != len(set(archive.files))
+                or set(archive.files) != ROUTE_OUTPUT_EVIDENCE_KEYS
+            ):
+                raise CausalProductionError("route-output NPZ schema differs")
+            arrays = {key: archive[key] for key in archive.files}
+    except (OSError, ValueError, TypeError) as exc:
+        raise CausalProductionError("route-output NPZ cannot be safely loaded") from exc
+    row_count = entry["row_count"]
+    scalar_version = arrays["evidence_version"]
+    scalar_route = arrays["causal_route_id"]
+    steps = arrays["checkpoint_steps"]
+    window_ids = arrays["window_ids"]
+    action = arrays["action_predictions"]
+    action_targets = arrays["action_targets"]
+    action_dim_masks = arrays["action_dim_masks"]
+    action_time_masks = arrays["action_time_masks"]
+    action_denorm_scales = arrays["action_denorm_scales"]
+    logits = arrays["semantic_aux_logits"]
+    hard_semantics = arrays["contact_hard_semantics"]
+    contact_targets = arrays["contact_targets"]
+    contact_loss_masks = arrays["contact_loss_masks"]
+    contact_confidences = arrays["contact_confidences"]
+    contact_condition_masks = arrays["contact_condition_masks"]
+    packets = arrays["route_packets"]
+    expected_packet_shape = (
+        (row_count, 0, 22)
+        if route == "aux_only_direct_q12"
+        else (row_count, 12, 22)
+    )
+    if (
+        scalar_version.shape != ()
+        or scalar_version.dtype.kind != "U"
+        or scalar_version.item() != ROUTE_OUTPUT_EVIDENCE_VERSION
+        or scalar_route.shape != ()
+        or scalar_route.dtype.kind != "U"
+        or scalar_route.item() != route
+        or steps.dtype != np.dtype("int64")
+        or steps.shape != (row_count,)
+        or window_ids.dtype.kind != "U"
+        or window_ids.shape != (row_count,)
+        or any(not value for value in window_ids.tolist())
+        or action.dtype != np.dtype("float32")
+        or action.shape != (row_count, 48, MODEL_ACTION_DIM)
+        or action_targets.dtype != np.dtype("float32")
+        or action_targets.shape != (row_count, 48, MODEL_ACTION_DIM)
+        or action_dim_masks.dtype != np.dtype("bool")
+        or action_dim_masks.shape != (row_count, MODEL_ACTION_DIM)
+        or action_time_masks.dtype != np.dtype("bool")
+        or action_time_masks.shape != (row_count, 48)
+        or action_denorm_scales.dtype != np.dtype("float32")
+        or action_denorm_scales.shape != (row_count, MODEL_ACTION_DIM)
+        or logits.dtype != np.dtype("float32")
+        or logits.shape != (row_count, 12, 22)
+        or hard_semantics.dtype != np.dtype("float32")
+        or hard_semantics.shape != (row_count, 12, 22)
+        or contact_targets.dtype != np.dtype("float32")
+        or contact_targets.shape != (row_count, 12, 22)
+        or contact_loss_masks.dtype != np.dtype("float32")
+        or contact_loss_masks.shape != (row_count, 12, 22)
+        or contact_confidences.dtype != np.dtype("float32")
+        or contact_confidences.shape != (row_count, 12, 22)
+        or contact_condition_masks.dtype != np.dtype("float32")
+        or contact_condition_masks.shape != (row_count, 12, 22)
+        or packets.dtype != np.dtype("float32")
+        or packets.shape != expected_packet_shape
+        or not np.isfinite(action).all()
+        or not np.isfinite(action_targets).all()
+        or not np.isfinite(action_denorm_scales).all()
+        or not np.isfinite(logits).all()
+        or not np.isfinite(hard_semantics).all()
+        or not np.isfinite(contact_targets).all()
+        or not np.isfinite(contact_loss_masks).all()
+        or not np.isfinite(contact_confidences).all()
+        or not np.isfinite(contact_condition_masks).all()
+        or not np.isfinite(packets).all()
+    ):
+        raise CausalProductionError("route-output typed arrays differ")
+    expected_steps = np.repeat(
+        np.asarray(CHECKPOINT_STEPS, dtype=np.int64), 2 * 256
+    )
+    if not np.array_equal(steps, expected_steps):
+        raise CausalProductionError("route-output evidence checkpoint steps differ")
+    return arrays
+
+
+def _recompute_route_packet_metrics(
+    *,
+    route: str,
+    logits: np.ndarray,
+    packets: np.ndarray,
+    reduced_contact_by_split: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    if route == "aux_only_direct_q12":
+        if packets.shape[1] != 0:
+            raise CausalProductionError("direct route fabricated raw packet evidence")
+        return {
+            "kind": "none_direct_reference",
+            "semantic_field_metrics_allowed": False,
+        }
+    if route == "equal_bit_unstructured_hard_st":
+        from world_action_model.contact_transition_schema import (
+            EQUAL_BIT_NUM_BITS,
+            EQUAL_BIT_VALID_STATES,
+            unstructured_ids_to_code,
+            validated_equal_bit_mixing_matrix,
+        )
+
+        matrix = validated_equal_bit_mixing_matrix().astype(np.float32)
+        mixed = np.einsum("nqw,bw->nqb", logits, matrix, optimize=False)
+        raw_bits = mixed >= 0.0
+        weights = (1 << np.arange(EQUAL_BIT_NUM_BITS, dtype=np.uint32))
+        raw_ids = (raw_bits.astype(np.uint32) * weights).sum(
+            axis=-1, dtype=np.uint32
+        )
+        invalid = raw_ids >= EQUAL_BIT_VALID_STATES
+        canonical_ids = np.where(invalid, 0, raw_ids).astype(np.uint16)
+        expected_packets = unstructured_ids_to_code(canonical_ids)
+        per_query_valid = np.all(packets == expected_packets, axis=-1)
+        if not bool(per_query_valid.all()):
+            raise CausalProductionError(
+                "equal-bit route packet differs from replayed logits codec"
+            )
+        counts = np.bincount(
+            canonical_ids.reshape(-1).astype(np.int64),
+            minlength=EQUAL_BIT_VALID_STATES,
+        )
+        probabilities = counts[counts > 0] / float(canonical_ids.size)
+        return {
+            "kind": "unstructured_code",
+            "codec_validity": float(per_query_valid.mean()),
+            "utilization": float(np.count_nonzero(counts) / EQUAL_BIT_VALID_STATES),
+            "entropy": float(-(probabilities * np.log2(probabilities)).sum()),
+            "invalid_to_zero_rate": float(invalid.mean()),
+            "semantic_field_metrics_allowed": False,
+        }
+    from world_action_model.contact_transition_schema import (
+        validate_hard_contact_segment_code,
+    )
+
+    try:
+        validate_hard_contact_segment_code(packets, time_bins=16)
+    except (TypeError, ValueError) as exc:
+        raise CausalProductionError("semantic route packet grammar failed replay") from exc
+    field_accuracy = sum(
+        reduced_contact_by_split[split]["segment_exact"][
+            "hard_b16_fully_supervised_accuracy"
+        ]
+        for split in ("val", "test")
+    ) / 2.0
+    return {
+        "kind": "semantic_grammar",
+        "grammar_validity": 1.0,
+        "field_accuracy": float(field_accuracy),
+        "semantic_field_metrics_allowed": True,
+    }
 
 
 def validate_route_evaluator_output(value: object, *, route: str) -> dict[str, Any]:
@@ -235,6 +560,24 @@ def _artifact_entry(value: object, name: str) -> dict[str, Any]:
     return entry
 
 
+def _route_output_artifact_entry(value: object) -> dict[str, Any]:
+    entry = _exact(
+        value,
+        {"path_record_only", "sha256", "row_count", "format"},
+        "causal route-output evidence",
+    )
+    if (
+        not isinstance(entry["path_record_only"], str)
+        or not Path(entry["path_record_only"]).is_absolute()
+        or isinstance(entry["row_count"], bool)
+        or entry["row_count"] != 3 * 2 * 256
+        or entry["format"] != ROUTE_OUTPUT_EVIDENCE_FORMAT
+    ):
+        raise CausalProductionError("causal route-output evidence entry differs")
+    _sha(entry["sha256"], "causal route-output evidence")
+    return entry
+
+
 def _tree_entry(value: object, name: str) -> dict[str, Any]:
     entry = _exact(
         value,
@@ -274,6 +617,7 @@ def validate_result_v3(
             "base_model_artifact_tree",
             "fixed_window_manifest",
             "per_window_csv",
+            "route_output_evidence",
             "evaluator_source_receipt_sha256",
             "precursor_receipt_bytes_sha256",
             "action_metrics_contract_sha256",
@@ -392,6 +736,9 @@ def validate_result_v3(
     ):
         raise CausalProductionError("causal per-window CSV identity/count differs")
     _sha(csv_entry["sha256"], "causal per-window CSV")
+    route_evidence_entry = _route_output_artifact_entry(
+        result["route_output_evidence"]
+    )
     outputs = result["checkpoint_outputs"]
     if not isinstance(outputs, list) or len(outputs) != 3:
         raise CausalProductionError("causal result needs exactly three checkpoint outputs")
@@ -451,7 +798,9 @@ def validate_result_v3(
             read_per_window_csv,
             reduce_metric_rows,
             public_tree_receipt,
+            score_heldout_window,
             snapshot_artifact_tree,
+            ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
         )
     except ImportError as exc:
         raise CausalProductionError(
@@ -566,6 +915,9 @@ def validate_result_v3(
         raise CausalProductionError("causal additive per-window CSV failed replay") from exc
     if len(rows) != csv_entry["row_count"]:
         raise CausalProductionError("causal per-window CSV row count changed")
+    route_evidence = _load_route_output_evidence(
+        route_evidence_entry, route=route
+    )
     window_identities = {
         (
             window["window_id"], window["split"], window["episode_id"],
@@ -587,6 +939,15 @@ def validate_result_v3(
         ):
             raise CausalProductionError("causal result independent acceptance changed")
         selected = [row for row in rows if row["checkpoint_step"] == step]
+        evidence_mask = route_evidence["checkpoint_steps"] == step
+        evidence_window_ids = route_evidence["window_ids"][evidence_mask].tolist()
+        expected_window_ids = [window["window_id"] for window in windows["windows"]]
+        if evidence_window_ids != expected_window_ids:
+            raise CausalProductionError(
+                "route-output evidence window order/identity differs"
+            )
+        if [row["window_id"] for row in selected] != expected_window_ids:
+            raise CausalProductionError("causal CSV window order/identity differs")
         identities = {
             (
                 row["window_id"], row["split"], row["episode_id"],
@@ -605,6 +966,59 @@ def validate_result_v3(
             )
         ):
             raise CausalProductionError("causal result window/checkpoint binding differs")
+        evidence_indices = np.flatnonzero(evidence_mask)
+        replayed_rows = []
+        for evidence_index, window in zip(
+            evidence_indices.tolist(), windows["windows"], strict=True
+        ):
+            try:
+                replayed_rows.append(
+                    score_heldout_window(
+                        window=window,
+                        split_seed=result["seed"],
+                        checkpoint_step=step,
+                        checkpoint_sha256=receipt["checkpoint_artifact_hashes"][
+                            "whole_bundle_sha256"
+                        ],
+                        action_prediction=route_evidence["action_predictions"][
+                            evidence_index
+                        ],
+                        action_target=route_evidence["action_targets"][evidence_index],
+                        action_dim_mask=route_evidence["action_dim_masks"][evidence_index],
+                        action_time_mask=route_evidence["action_time_masks"][
+                            evidence_index
+                        ],
+                        action_denorm_scale=route_evidence["action_denorm_scales"][
+                            evidence_index
+                        ],
+                        action_schema_contract=ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
+                        grip_active_future=None,
+                        contact_logits=route_evidence["semantic_aux_logits"][
+                            evidence_index
+                        ],
+                        contact_hard_semantic=route_evidence[
+                            "contact_hard_semantics"
+                        ][evidence_index],
+                        contact_target=route_evidence["contact_targets"][evidence_index],
+                        contact_loss_mask=route_evidence["contact_loss_masks"][
+                            evidence_index
+                        ],
+                        contact_confidence=route_evidence["contact_confidences"][
+                            evidence_index
+                        ],
+                        contact_condition_mask=route_evidence[
+                            "contact_condition_masks"
+                        ][evidence_index],
+                    )
+                )
+            except (ValueError, TypeError) as exc:
+                raise CausalProductionError(
+                    "causal raw metric evidence failed per-window replay"
+                ) from exc
+        if replayed_rows != selected:
+            raise CausalProductionError(
+                "causal per-window CSV differs from raw typed evidence"
+            )
         recomputed_action = {}
         recomputed_contact = {}
         for split in ("val", "test"):
@@ -622,6 +1036,42 @@ def validate_result_v3(
             or output["contact_aux_metrics"] != recomputed_contact
         ):
             raise CausalProductionError("causal result metrics differ from additive CSV")
+        evidence_action = route_evidence["action_predictions"][evidence_mask]
+        evidence_logits = route_evidence["semantic_aux_logits"][evidence_mask]
+        evidence_packets = route_evidence["route_packets"][evidence_mask]
+        if route == "hard_st_semantic" and not np.array_equal(
+            evidence_packets,
+            route_evidence["contact_hard_semantics"][evidence_mask],
+        ):
+            raise CausalProductionError(
+                "semantic route packet differs from scored hard semantics"
+            )
+        route_output = output["route_output"]
+        if (
+            route_output["action_prediction_sha256"]
+            != _array_stream_sha256(evidence_window_ids, evidence_action)
+            or route_output["semantic_aux_logits_sha256"]
+            != _array_stream_sha256(evidence_window_ids, evidence_logits)
+        ):
+            raise CausalProductionError(
+                "route-output action/logit digest failed raw replay"
+            )
+        if route == "aux_only_direct_q12":
+            replayed_packet_sha = None
+        else:
+            replayed_packet_sha = _array_stream_sha256(
+                evidence_window_ids, evidence_packets
+            )
+        if route_output["packet_sha256"] != replayed_packet_sha:
+            raise CausalProductionError("route-output packet digest failed raw replay")
+        replayed_packet_metrics = _recompute_route_packet_metrics(
+            route=route,
+            logits=evidence_logits,
+            packets=evidence_packets,
+            reduced_contact_by_split=recomputed_contact,
+        )
+        if route_output["packet_metrics"] != replayed_packet_metrics:
+            raise CausalProductionError("route-output packet metrics failed raw replay")
     return result
 
 
@@ -692,7 +1142,10 @@ def validate_aggregate_v5(
     for key, raw_entry in results.items():
         entry = _exact(
             raw_entry,
-            {"path_record_only", "sha256", "per_window_csv_sha256"},
+            {
+                "path_record_only", "sha256", "per_window_csv_sha256",
+                "route_output_evidence_sha256",
+            },
             f"causal aggregate result {key}",
         )
         if not isinstance(entry["path_record_only"], str) or not Path(
@@ -701,6 +1154,10 @@ def validate_aggregate_v5(
             raise CausalProductionError("causal aggregate result path must be absolute")
         _sha(entry["sha256"], f"causal aggregate result {key}")
         _sha(entry["per_window_csv_sha256"], f"causal aggregate CSV {key}")
+        _sha(
+            entry["route_output_evidence_sha256"],
+            f"causal aggregate route-output evidence {key}",
+        )
         if not verify_files:
             continue
         result, digest, _ = strict_json_file(
@@ -715,6 +1172,8 @@ def validate_aggregate_v5(
             or result["causal_route_id"] != route
             or result["per_window_csv"]["sha256"]
             != entry["per_window_csv_sha256"]
+            or result["route_output_evidence"]["sha256"]
+            != entry["route_output_evidence_sha256"]
         ):
             raise CausalProductionError("causal aggregate result key/binding differs")
         try:
@@ -736,6 +1195,16 @@ def validate_aggregate_v5(
                 raise CausalProductionError(
                     "causal aggregate evidence differs from result checkpoint manifest"
                 )
+            from world_action_model.contact_causal_production import (
+                verify_acceptance_bound_artifacts_v3,
+            )
+
+            receipt, acceptance = accepted[step]
+            verify_acceptance_bound_artifacts_v3(
+                acceptance,
+                receipt=receipt,
+                repository_root=Path(__file__).resolve().parents[1],
+            )
     metrics = aggregate["aggregate_metrics_by_route_step_split"]
     expected_metric_keys = [
         f"{route}/{step}/{split}"
@@ -821,6 +1290,9 @@ def build_aggregate_v5(
             "path_record_only": str(Path(path).expanduser().absolute()),
             "sha256": digest,
             "per_window_csv_sha256": result["per_window_csv"]["sha256"],
+            "route_output_evidence_sha256": result["route_output_evidence"][
+                "sha256"
+            ],
         }
         try:
             rows_by_key[key] = read_per_window_csv(

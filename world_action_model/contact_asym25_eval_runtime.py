@@ -38,6 +38,11 @@ class ProductionHeldoutRuntime:
         device: str,
         dtype: str,
         inference_steps: int,
+        force_cache_sync: bool = True,
+        training_source_runtime_receipt: list[dict] | None = None,
+        t5_runtime_source_receipt: list[dict] | None = None,
+        verified_private_cache_parent: str | None = None,
+        verified_training_run_nonce: str | None = None,
     ) -> None:
         import torch
         from diffusers.models import AutoencoderKLWan
@@ -77,7 +82,11 @@ class ProductionHeldoutRuntime:
             delta_frames={
                 "observation.images.ego_view": list(IMAGE_FRAME_OFFSETS)
             },
-            force_cache_sync=True,
+            force_cache_sync=force_cache_sync,
+            training_source_runtime_receipt=training_source_runtime_receipt,
+            t5_runtime_source_receipt=t5_runtime_source_receipt,
+            verified_private_cache_parent=verified_private_cache_parent,
+            verified_training_run_nonce=verified_training_run_nonce,
             video_backend="pyav",
             t5_load_from="dir",
             t5_cfg={

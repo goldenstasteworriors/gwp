@@ -1007,7 +1007,6 @@ class _LeRobotDatasetMetadata(_OriginalLeRobotDatasetMetadata):
             check_version_compatibility,
             load_info,
             load_stats,
-            load_subtasks,
             load_tasks,
         )
 
@@ -1079,6 +1078,10 @@ class _LeRobotDatasetMetadata(_OriginalLeRobotDatasetMetadata):
             self.episodes = datasets.Dataset.from_list(episode_rows)
             logging.info('Loaded local LeRobot v2.1 metadata through the read-only compatibility path.')
         else:
+            try:
+                from lerobot.datasets.utils import load_subtasks
+            except ImportError:
+                load_subtasks = lambda _root: None
             check_version_compatibility(
                 self.repo_id,
                 self._version,

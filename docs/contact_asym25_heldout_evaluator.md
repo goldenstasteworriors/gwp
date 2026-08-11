@@ -124,9 +124,21 @@ and 200. Production inference precision is fixed to bfloat16; Q12/D22/B16 and
 the robot25 action-group schema are receipt-bound. Ego grip metrics use the
 separate Ego20 schema and only dimensions 18/19 under the future-active mask.
 It emits strict metrics JSON, a metrics SHA-256 sidecar, and hashed additive
-per-window CSV evidence. Raw planner probabilities are used only for Brier,
+per-window CSV evidence. The causal evaluator additionally emits one typed,
+no-pickle NPZ containing the exact per-window action outputs, planner logits,
+action-visible packets, hard semantics, and metric targets/masks. Result v3
+opens that NPZ and recomputes every stream digest, every additive CSV row, the
+equal-bit codec/utilization/entropy/invalid-to-zero statistics, and the semantic
+grammar/field accuracy. Raw planner probabilities are used only for Brier,
 NLL, and soft timing MAE; all F1/accuracy/exact metrics use the action-visible
 hard-ST semantic tensor.
+
+Model inference receives an exact-key packet containing only window identity,
+reference images, prompt embeddings, state, embodiment ID, and the schema-derived
+action-dimension mask. The runtime uses a separate image/state/T5 dataset view
+with no future-action delta and no contact sidecar. It refuses to load and
+transform the action/contact metric targets until prediction has completed for
+the same window; any target-bearing inference packet is rejected.
 
 ```bash
 conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.py \

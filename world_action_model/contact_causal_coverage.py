@@ -57,6 +57,8 @@ def _nonzero_sha(value: object, name: str) -> str:
 
 
 def _verified_json(path: Path, name: str):
+    loader = None
+    inference_loader = None
     try:
         payload, digest, _ = read_verified_bytes(path)
         value = strict_json_loads(payload, name=name)
@@ -390,28 +392,66 @@ def real_loader_synthetic_instantiation_helper(
 
     try:
         dataset_id = "synthetic-reviewed-loader-contract-dataset"
-        info_payload = json.dumps(
-            {"dataset_id": dataset_id, "total_frames": 1, "total_episodes": 1},
-            sort_keys=True, separators=(",", ":"), allow_nan=False,
-        ).encode("utf-8")
-        info_sha = write_exclusive(data_root / "meta/info.json", info_payload)
-        sidecar_meta = {
-            "schema_version": SEGMENT_SCHEMA_VERSION,
-            "target_dim": SEGMENT_TARGET_DIM,
-            "num_queries": 12,
-            "builder_identity": (
-                "scripts/contact_labels/build_contact_segment_sidecars_v1_1.py"
-            ),
-            "annotation_contract": {
-                "annotation_role": "adjudicated", "review_status": "reviewed",
-                "label_origin": "human_adjudicated",
-                "automatic_or_proposal_ground_truth": False,
+        info = {
+            "codebase_version": "v2.1", "robot_type": "sonic_g1_asymmetric25",
+            "dataset_id": dataset_id, "total_episodes": 1, "total_frames": 1,
+            "total_tasks": 1, "total_videos": 0, "total_chunks": 1,
+            "chunks_size": 1000, "fps": 50, "splits": {"train": "0:1"},
+            "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+            "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+            "features": {
+                "observation.state": {"dtype": "float32", "shape": [3], "names": None},
+                "action": {"dtype": "float32", "shape": [2], "names": None},
+                "timestamp": {"dtype": "float32", "shape": [1], "names": None},
+                "frame_index": {"dtype": "int64", "shape": [1], "names": None},
+                "episode_index": {"dtype": "int64", "shape": [1], "names": None},
+                "index": {"dtype": "int64", "shape": [1], "names": None},
+                "task_index": {"dtype": "int64", "shape": [1], "names": None},
             },
         }
-        meta_payload = json.dumps(
-            sidecar_meta, sort_keys=True, separators=(",", ":"), allow_nan=False
+        info_payload = json.dumps(
+            info, sort_keys=True, separators=(",", ":"), allow_nan=False,
         ).encode("utf-8")
-        meta_sha = write_exclusive(sidecar_root / "meta.json", meta_payload)
+        info_sha = write_exclusive(data_root / "meta/info.json", info_payload)
+        write_exclusive(
+            data_root / "meta/tasks.jsonl",
+            b'{"task":"synthetic contact","task_index":0}\n',
+        )
+        write_exclusive(
+            data_root / "meta/episodes.jsonl",
+            b'{"episode_index":0,"length":1,"tasks":["synthetic contact"]}\n',
+        )
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            import torch
+        except ImportError as exc:
+            raise RuntimeError(
+                "real loader open acceptance requires existing labvla pyarrow/torch"
+            ) from exc
+        parquet_path = data_root / "data/chunk-000/episode_000000.parquet"
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "timestamp": pa.array([0.0], type=pa.float32()),
+                    "frame_index": pa.array([0], type=pa.int64()),
+                    "episode_index": pa.array([0], type=pa.int64()),
+                    "index": pa.array([0], type=pa.int64()),
+                    "task_index": pa.array([0], type=pa.int64()),
+                    "observation.state": pa.array([[0.0, 0.0, 0.0]], type=pa.list_(pa.float32())),
+                    "action": pa.array([[0.0, 0.0]], type=pa.list_(pa.float32())),
+                }
+            ),
+            parquet_path,
+        )
+        t5_buffer = io.BytesIO()
+        torch.save(
+            {"t5_embedding": torch.zeros((1, 4096), dtype=torch.float32)},
+            t5_buffer,
+        )
+        t5_path = data_root / "t5_embedding/episode_000000.pt"
+        write_exclusive(t5_path, t5_buffer.getvalue())
         contact_target = np.zeros((1, 12, SEGMENT_TARGET_DIM), dtype=np.float32)
         contact_loss_mask = np.zeros_like(contact_target)
         contact_confidence = np.zeros_like(contact_target)
@@ -430,11 +470,73 @@ def real_loader_synthetic_instantiation_helper(
         episode_sha = write_exclusive(
             sidecar_root / "episode_000000.npz", npz_buffer.getvalue()
         )
+        sidecar_meta = {
+            "schema_version": SEGMENT_SCHEMA_VERSION,
+            "target_dim": SEGMENT_TARGET_DIM,
+            "num_queries": 12,
+            "dataset_id": dataset_id,
+            "episode_npz_sha256": {"episode_000000.npz": episode_sha},
+            "builder_identity": (
+                "scripts/contact_labels/build_contact_segment_sidecars_v1_1.py"
+            ),
+            "annotation_contract": {
+                "annotation_role": "adjudicated", "review_status": "reviewed",
+                "label_origin": "human_adjudicated",
+                "automatic_or_proposal_ground_truth": False,
+            },
+        }
+        meta_payload = json.dumps(
+            sidecar_meta, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        meta_sha = write_exclusive(sidecar_root / "meta.json", meta_payload)
+
+        def runtime_entry(path: Path, logical_path: str, logical_role: str) -> dict[str, Any]:
+            _, digest, stat_receipt = read_verified_bytes(path)
+            return {
+                "logical_path": logical_path, "logical_role": logical_role,
+                "path_record_only": str(path.absolute()), "sha256": digest,
+                "stat": stat_receipt,
+            }
+
+        source_receipt = [
+            runtime_entry(data_root / "meta/info.json", "meta/info.json", "metadata"),
+            runtime_entry(data_root / "meta/tasks.jsonl", "meta/tasks.jsonl", "metadata"),
+            runtime_entry(data_root / "meta/episodes.jsonl", "meta/episodes.jsonl", "metadata"),
+            runtime_entry(parquet_path, "data/chunk-000/episode_000000.parquet", "parquet"),
+        ]
+        t5_entry = runtime_entry(
+            t5_path, "t5_embedding/episode_000000.pt", "t5_episode_condition"
+        )
+        t5_entry["episode_index"] = 0
+        filter_receipt = {
+            "receipt_version": "contact-asym25-training-data-receipt/v1",
+            "dataset_id": dataset_id,
+            "action_schema_id": "sonic_g1_rh56dftp6_omnipicker1_v1",
+            "split_seed": 6666,
+            "train_episode_ids": [0], "validation_episode_ids": [1],
+            "heldout_episode_ids": [2], "dataset_info_sha256": info_sha,
+            "episode_metadata_sha256": hashlib.sha256(b"episode-meta").hexdigest(),
+            "norm_stats_sha256": hashlib.sha256(b"norm").hexdigest(),
+            "sidecar_bundle_sha256": hashlib.sha256(b"sidecar").hexdigest(),
+            "split_manifest_sha256": hashlib.sha256(b"split").hexdigest(),
+            "training_gate_sha256": hashlib.sha256(b"gate").hexdigest(),
+            "preflight_code_sha256": hashlib.sha256(b"preflight").hexdigest(),
+        }
+        private_cache_parent = root / "verified-private-cache"
+        private_cache_parent.mkdir(parents=True, exist_ok=False)
+        private_cache_parent.chmod(0o700)
         from world_action_model.datasets.wam_lerobot_dataset import WAMLeRobotDataset
 
         loader = WAMLeRobotDataset(
             data_path=str(data_root), data_size=1, t5_load_from="dir",
             t5_cfg={"t5_embedding_dir": str(data_root / "t5_embedding")},
+            episodes=[0], force_cache_sync=False, skip_video_decoding=True,
+            training_source_runtime_receipt=source_receipt,
+            t5_runtime_source_receipt=[t5_entry],
+            verified_private_cache_parent=str(private_cache_parent),
+            verified_training_run_nonce="synthetic-loader-run-nonce-v1",
+            production_episode_filter_receipt=filter_receipt,
+            production_episode_filter_receipt_sha256=sha256_json(filter_receipt),
             contact_sidecar_dir=str(sidecar_root), contact_sidecar_strict=True,
             contact_sidecar_require_reviewed_v1_1=True,
             contact_sidecar_expected_meta_sha256=meta_sha,
@@ -448,8 +550,8 @@ def real_loader_synthetic_instantiation_helper(
             matched_control_identity=True, matched_control_dataset_id=dataset_id,
             matched_control_dataset_info_sha256=info_sha,
         )
-        loaded_batch = {"episode_index": 0, "frame_index": 0}
-        loader._load_contact_sidecar(loaded_batch)
+        loader.open()
+        loaded_batch = loader[0]
         if (
             set(key for key in loaded_batch if key.startswith("contact_"))
             != {
@@ -461,10 +563,25 @@ def real_loader_synthetic_instantiation_helper(
                 name in loaded_batch
                 for name in ("action_contact", "hand_active", "grip_contact")
             )
+            or loaded_batch.get("matched_control_dataset_id") != dataset_id
+            or int(loaded_batch["matched_control_global_index"]) != 0
+            or not isinstance(loaded_batch.get("t5_embedding"), torch.Tensor)
+            or tuple(loaded_batch["t5_embedding"].shape) != (1, 4096)
+            or type(loader.dataset).__name__ != "FastLeRobotDataset"
+            or set(loader.dataset._verified_source_entries) != {
+                "meta/info.json", "meta/tasks.jsonl", "meta/episodes.jsonl",
+                "data/chunk-000/episode_000000.parquet",
+            }
         ):
-            raise AssertionError("real loader did not replay the reviewed sidecar batch")
+            raise AssertionError(
+                "real loader open/sample did not replay all verified causal inputs"
+            )
         result = {
             "loader_class": type(loader).__name__,
+            "runtime_loader_class": type(loader.dataset).__name__,
+            "loader_opened_and_sampled": True,
+            "verified_source_entry_count": len(loader.dataset._verified_source_entries),
+            "verified_t5_entry_count": len(loader.t5_runtime_source_receipt),
             "matched_control_identity": loader.matched_control_identity,
             "matched_control_dataset_id": loader.matched_control_dataset_id,
             "contact_human_adjudicated_only": loader.contact_human_adjudicated_only,
@@ -472,10 +589,48 @@ def real_loader_synthetic_instantiation_helper(
             "episode_sha_map_size": len(loader.contact_sidecar_expected_episode_sha256),
             "episode_sidecar_sha256": episode_sha,
             "loaded_contact_shape": list(loaded_batch["contact_target"].shape),
+            "loaded_t5_shape": list(loaded_batch["t5_embedding"].shape),
         }
         loader.close()
+        loader = None
+        inference_loader = WAMLeRobotDataset(
+            data_path=str(data_root), data_size=1, t5_load_from="dir",
+            t5_cfg={"t5_embedding_dir": str(data_root / "t5_embedding")},
+            delta_frames={"observation.state": [0]}, episodes=[0],
+            force_cache_sync=False, skip_video_decoding=True,
+            training_source_runtime_receipt=source_receipt,
+            t5_runtime_source_receipt=[t5_entry],
+            verified_private_cache_parent=str(private_cache_parent),
+            verified_training_run_nonce="synthetic-inference-run-nonce-v1",
+            robotype="sonic_g1_asymmetric25",
+        )
+        inference_loader.open_target_free_inference_view()
+        inference_raw = inference_loader._get_data(0)
+        if (
+            any(
+                key == "action"
+                or key.startswith("action_")
+                or key.startswith("contact_")
+                for key in inference_raw
+            )
+            or inference_loader._target_free_removed_source_columns
+            != ("action",)
+        ):
+            raise AssertionError(
+                "target-free real loader projection read an action/contact target"
+            )
+        result["target_free_source_projection_sampled"] = True
+        result["target_free_removed_columns"] = list(
+            inference_loader._target_free_removed_source_columns
+        )
+        inference_loader.close()
+        inference_loader = None
         if result != {
             "loader_class": "WAMLeRobotDataset",
+            "runtime_loader_class": "FastLeRobotDataset",
+            "loader_opened_and_sampled": True,
+            "verified_source_entry_count": 4,
+            "verified_t5_entry_count": 1,
             "matched_control_identity": True,
             "matched_control_dataset_id": dataset_id,
             "contact_human_adjudicated_only": True,
@@ -483,9 +638,16 @@ def real_loader_synthetic_instantiation_helper(
             "episode_sha_map_size": 1,
             "episode_sidecar_sha256": episode_sha,
             "loaded_contact_shape": [12, SEGMENT_TARGET_DIM],
+            "loaded_t5_shape": [1, 4096],
+            "target_free_source_projection_sampled": True,
+            "target_free_removed_columns": ["action"],
         }:
             raise AssertionError("real loader lost causal admission fields")
         return result
     finally:
+        if inference_loader is not None:
+            inference_loader.close()
+        if loader is not None:
+            loader.close()
         if root.exists():
             shutil.rmtree(root)

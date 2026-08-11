@@ -21,5 +21,9 @@
   "precursor_receipt_bytes_sha256": null,
   "matched_control_report_sha256": null,
   "oracle_sufficiency_receipt_sha256": null,
+  "runtime_environment_sha256": null,
+  "dataset_runtime_source_receipt_sha256": null,
+  "t5_runtime_source_receipt_sha256": null,
+  "hardened_preflight_receipt_sha256": null,
   "oracle_is_main_matrix_route": false
 }

@@ -109,9 +109,40 @@ config["train"].update(
     max_steps=objective["fixed_save_step"],
     checkpoint_interval=objective["fixed_save_step"],
     checkpoint_total_limit=-1,
+    checkpoint_weights_only=True,
+    checkpoint_safe_serialization=True,
 )
-for dataset in config["dataloaders"]["train"]["data_or_config"]:
+_ego_datasets = config["dataloaders"]["train"]["data_or_config"]
+if len(_ego_datasets) != 1:
+    raise ValueError("Ego causal precursor requires exactly one verified dataset")
+for dataset in _ego_datasets:
+    if os.path.realpath(dataset["data_path"]) != _hardened_receipt["data_root"]:
+        raise ValueError("Ego causal precursor dataset root differs from hardened evidence")
+    if (
+        dataset.get("t5_load_from") != "dir"
+        or os.path.realpath(dataset.get("t5_cfg", {}).get("t5_embedding_dir", ""))
+        != _hardened_receipt["t5_embedding_dir"]
+    ):
+        raise ValueError("Ego causal precursor T5 root differs from hardened evidence")
+    if os.path.realpath(dataset.get("contact_sidecar_dir", "")) != os.path.realpath(
+        _hardened_receipt["sidecar_dir"]
+    ):
+        raise ValueError(
+            "Ego causal precursor sidecar root differs from hardened evidence"
+        )
+    dataset.pop("episodes", None)
     dataset.update(
+        force_cache_sync=False,
+        training_source_runtime_receipt=_hardened_receipt[
+            "training_source_runtime_receipt_record_only"
+        ],
+        t5_runtime_source_receipt=_hardened_receipt[
+            "t5_runtime_source_receipt_record_only"
+        ],
+        verified_private_cache_parent=str(
+            (Path(__file__).resolve().parents[1] / ".gwp_op42_ego_private_hf_cache")
+        ),
+        verified_training_run_nonce=precursor_gate["training_run_nonce"],
         contact_sidecar_strict=True,
         contact_sidecar_require_reviewed_v1_1=True,
         contact_sidecar_expected_meta_sha256=_hardened_receipt[

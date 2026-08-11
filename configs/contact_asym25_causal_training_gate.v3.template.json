@@ -43,7 +43,11 @@
     "oracle_sufficiency_receipt_sha256": null,
     "matched_control_report_sha256": null,
     "matched_control_trace_manifest_sha256": null,
-    "route_contract_bundle_sha256": null
+    "route_contract_bundle_sha256": null,
+    "runtime_environment_sha256": null,
+    "dataset_runtime_source_receipt_sha256": null,
+    "t5_runtime_source_receipt_sha256": null,
+    "hardened_preflight_receipt_sha256": null
   },
   "evidence_reports": {
     "annotation_agreement": {"path": null, "sha256": null},
@@ -56,6 +60,7 @@
   },
   "training_run_id_by_route": null,
   "training_run_nonce_by_route": null,
+  "external_acceptance_path_by_route": null,
   "external_acceptance_sha256_by_route": null,
   "reviewed_by": null,
   "reviewed_at_utc": null,

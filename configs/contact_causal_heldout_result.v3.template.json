@@ -11,6 +11,7 @@
   "base_model_artifact_tree": null,
   "fixed_window_manifest": null,
   "per_window_csv": null,
+  "route_output_evidence": null,
   "evaluator_source_receipt_sha256": null,
   "precursor_receipt_bytes_sha256": null,
   "action_metrics_contract_sha256": null,

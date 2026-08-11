@@ -8,6 +8,8 @@ import hashlib
 import io
 import json
 import math
+import numpy as np
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -17,9 +19,17 @@ from typing import Any
 import torch
 
 from world_action_model.contact_causal_heldout_eval import (
+    FORBIDDEN_INFERENCE_TARGET_KEYS,
+    INFERENCE_PACKET_KEYS,
+    ROUTE_OUTPUT_EVIDENCE_FORMAT,
+    _array_stream_sha256,
+    _load_route_output_evidence,
+    _recompute_route_packet_metrics,
     validate_aggregate_v5,
     validate_result_v3,
     validate_route_evaluator_output,
+    validate_target_free_inference_packet,
+    write_route_output_evidence,
 )
 from world_action_model.contact_causal_checkpoint import (
     inspect_causal_checkpoint_bundle,
@@ -28,8 +38,11 @@ from world_action_model.contact_causal_checkpoint import (
 )
 from world_action_model.contact_causal_matched_control import (
     build_trace_record,
+    build_current_run_trace_prefix_receipt_v1,
     build_synthetic_stable_contract_v3,
+    capture_pre_forward_rng_v3,
     compare_causal_records,
+    live_optimizer_scheduler_receipts_v3,
     runtime_control_config_receipts_v3,
     validate_collector_config_v3,
     validate_collector_runtime_bindings_v3,
@@ -37,6 +50,9 @@ from world_action_model.contact_causal_matched_control import (
 from world_action_model.contact_causal_preflight import (
     validate_robot_gate_review_v2,
     validate_robot_gate_v3,
+)
+from world_action_model.contact_causal_gate_bootstrap import (
+    validate_robot_route_acceptance_v1,
 )
 from world_action_model.contact_causal_production import (
     CAUSAL_ROUTES,
@@ -152,6 +168,14 @@ def _strict_json_negatives() -> None:
 
 
 def _false_template_negatives(root: Path) -> None:
+    def reject_route_acceptance_template(item: object) -> None:
+        try:
+            validate_robot_route_acceptance_v1(
+                item, gate={}, route=CAUSAL_ROUTES[0], repository_root=root
+            )
+        except ValueError as exc:
+            raise CausalProductionError("false route acceptance rejected") from exc
+
     template_cases = (
         (
             "ego_contact_causal_precursor_gate.v7.template.json",
@@ -174,6 +198,11 @@ def _false_template_negatives(root: Path) -> None:
             "contact_asym25_causal_gate_reviewer_acceptance.v2.template.json",
             "false Robot reviewer template",
             lambda item: validate_robot_gate_review_v2(item, gate={}),
+        ),
+        (
+            "contact_causal_route_training_acceptance.v1.template.json",
+            "false route training acceptance template",
+            reject_route_acceptance_template,
         ),
         (
             "contact_causal_matched_control_collector.v3.template.json",
@@ -403,13 +432,17 @@ class _TinyCausalCheckpointModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.tiny_weight = torch.nn.Parameter(
+        self.contact_planner_tiny_weight = torch.nn.Parameter(
             torch.tensor([0.0, 1.0, 2.0], dtype=torch.float32)
         )
         self.contact_condition_encoder = torch.nn.Linear(1, 1, bias=True)
         with torch.no_grad():
             self.contact_condition_encoder.weight.fill_(3.0)
             self.contact_condition_encoder.bias.fill_(4.0)
+
+    @property
+    def tiny_weight(self) -> torch.nn.Parameter:
+        return self.contact_planner_tiny_weight
 
 
 def _tiny_training_state(
@@ -453,6 +486,15 @@ def _tiny_training_state(
         checkpoint_step=step,
         step0_parameter_tensor_sha256=initial_parameter_sha256,
         observed_gradient_parameter_names=sorted(observed),
+        action_loss_gradient_parameter_names=(
+            []
+            if direct or step == 0
+            else sorted(
+                name
+                for name, _ in model.named_parameters()
+                if name.startswith("contact_")
+            )
+        ),
         unused_step0_tensor_sha256=unused_initial_sha256,
     )
     mapping = {
@@ -563,6 +605,23 @@ def _collector_v3_acceptance() -> str:
     action = torch.zeros(1, 2, 4)
     action_mask = torch.ones(1, 2)
     prompt_t5 = torch.zeros(1, 2, 3)
+    state_input = torch.zeros(1, 1, 3)
+    state_mask = None
+    embodiment_id = torch.zeros(1, dtype=torch.long)
+    actual_action_mask = {
+        "dimension_mask": None,
+        "time_mask": action_mask,
+        "dimension_weight": None,
+    }
+    model = _TinyCausalCheckpointModel()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda=lambda _: 1.0
+    )
+    live = live_optimizer_scheduler_receipts_v3(
+        model=model, optimizers=[optimizer], schedulers=[scheduler]
+    )
+    rng = capture_pre_forward_rng_v3()
     trace_key = "step0/micro0/rank0"
 
     def stream_digest(value: object) -> str:
@@ -599,6 +658,11 @@ def _collector_v3_acceptance() -> str:
         "normalization": {
             "train_only_norm_sha256": _h("collector-normalization")
         },
+        "runtime": {
+            "runtime_environment_sha256": _h("runtime-environment"),
+            "dataset_runtime_source_receipt_sha256": _h("dataset-runtime-source"),
+            "t5_runtime_source_receipt_sha256": _h("t5-runtime-source"),
+        },
         "precursor": {
             "precursor_receipt_bytes_sha256": _h("precursor-bytes"),
             "precursor_bundle_sha256": _h("precursor-bundle"),
@@ -612,7 +676,10 @@ def _collector_v3_acceptance() -> str:
             "contact_mask_stream_sha256": stream_digest(mask),
             "contact_confidence_stream_sha256": stream_digest(confidence),
             "action_target_stream_sha256": stream_digest(action),
-            "action_mask_stream_sha256": stream_digest(action_mask),
+            "action_mask_stream_sha256": stream_digest(actual_action_mask),
+            "state_input_stream_sha256": stream_digest(state_input),
+            "state_mask_stream_sha256": stream_digest(state_mask),
+            "embodiment_id_stream_sha256": stream_digest(embodiment_id),
             "prompt_t5_stream_sha256": stream_digest(prompt_t5),
         },
         "topology": {"world_size": 1, "rank_set": [0]},
@@ -647,13 +714,16 @@ def _collector_v3_acceptance() -> str:
                 contact_loss_mask=mask,
                 contact_confidence=confidence,
                 action_target=action,
-                action_loss_mask=action_mask,
+                action_loss_mask=actual_action_mask,
+                state_input=state_input,
+                state_input_mask=state_mask,
+                embodiment_id=embodiment_id,
                 prompt_t5=prompt_t5,
-                pre_forward_rng={"cpu": [1, 2, 3]},
+                pre_forward_rng=rng,
                 initial_parameter_tensors_sha256=_h("initial-tensors"),
-                optimizer_parameter_groups={"names": ["all"]},
-                optimizer_step0_state={},
-                scheduler_step0_state={"step": 0},
+                optimizer_parameter_groups=live["optimizer_parameter_groups"],
+                optimizer_step0_state=live["optimizer_step0_state"],
+                scheduler_step0_state=live["scheduler_step0_state"],
                 precursor_receipt_bytes_sha256=_h("precursor-bytes"),
             )
         ]
@@ -779,6 +849,16 @@ def _collector_runtime_binding_acceptance(root: Path, head: str) -> None:
         "coverage_receipt_sha256": coverage_sha,
         "current_head_source_receipt_sha256": sha256_json(source_receipt),
     }
+    live_model = _TinyCausalCheckpointModel()
+    live_optimizer = torch.optim.AdamW(live_model.parameters(), lr=1e-3)
+    live_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        live_optimizer, lr_lambda=lambda _: 1.0
+    )
+    live = live_optimizer_scheduler_receipts_v3(
+        model=live_model,
+        optimizers=[live_optimizer],
+        schedulers=[live_scheduler],
+    )
     collector = {
         "collector_version": "matched-control-hash-collector/v3",
         "enabled": True,
@@ -795,9 +875,7 @@ def _collector_runtime_binding_acceptance(root: Path, head: str) -> None:
         "initial_parameter_tensors_sha256": precursor[
             "parameter_tensor_sha256"
         ],
-        "optimizer_parameter_groups": {"names": ["all"]},
-        "optimizer_step0_state": {},
-        "scheduler_step0_state": {"step": 0},
+        **live,
         "precursor_receipt_bytes_sha256": precursor["receipt_bytes_sha256"],
         "current_head_source_tree_sha256": sha256_json(source_receipt),
         "dataset_contact_coverage_receipt_sha256": coverage_sha,
@@ -817,6 +895,15 @@ def _collector_runtime_binding_acceptance(root: Path, head: str) -> None:
         "precursor_binding": precursor,
         "sidecar_meta_sha256": sidecar_meta_sha,
         "source_tree_receipt": source_receipt,
+        "runtime_environment_sha256": stable["runtime"][
+            "runtime_environment_sha256"
+        ],
+        "dataset_runtime_source_receipt_sha256": stable["runtime"][
+            "dataset_runtime_source_receipt_sha256"
+        ],
+        "t5_runtime_source_receipt_sha256": stable["runtime"][
+            "t5_runtime_source_receipt_sha256"
+        ],
     }
     validate_collector_runtime_bindings_v3(collector, **kwargs)
     drift = deepcopy(collector)
@@ -869,7 +956,13 @@ def _stable_contract(
         "contact_confidence_stream_sha256": _h("contact-confidence-stream"),
         "action_target_stream_sha256": _h("action-target-stream"),
         "action_mask_stream_sha256": _h("action-mask-stream"),
+        "state_input_stream_sha256": _h("state-input-stream"),
+        "state_mask_stream_sha256": _h("state-mask-stream"),
+        "embodiment_id_stream_sha256": _h("embodiment-id-stream"),
         "prompt_t5_stream_sha256": _h("prompt-t5-stream"),
+        "runtime_environment_sha256": _h("runtime-environment"),
+        "dataset_runtime_source_receipt_sha256": _h("dataset-runtime-source"),
+        "t5_runtime_source_receipt_sha256": _h("t5-runtime-source"),
         "train_only_norm_sha256": _h(f"train-only-norm-{seed}"),
         "transform_config_sha256": _h("transform-config"),
         "augmentation_trace_sha256": _h("augmentation-trace"),
@@ -917,6 +1010,13 @@ def _make_receipt(
     checkpoint_sha = inspected["weight_file_sha256"]
     parameter_sha256 = parameter_topology["parameter_tensor_sha256"]
     buffer_sha256 = parameter_topology["buffer_tensor_sha256"]
+    trace_prefix = build_current_run_trace_prefix_receipt_v1(
+        [], route=route, seed=seed,
+        run_id=f"training-run-id-{run_label}",
+        run_nonce=f"training-run-nonce-{run_label}",
+        rank=0, world_size=1, through_checkpoint_step=step,
+        trace_path=checkpoint_path.parent / "synthetic-current-run-trace.jsonl",
+    )
     return {
         "receipt_version": "contact-asym25-checkpoint-training-receipt/v5",
         "matrix_schema_version": MATRIX_SCHEMA_VERSION,
@@ -995,6 +1095,7 @@ def _make_receipt(
         "evidence": {
             "training_gate_sha256": _h(f"training-gate-{seed}"),
             "production_preflight_receipt_sha256": _h(f"preflight-{seed}"),
+            "hardened_preflight_receipt_sha256": _h(f"hardened-preflight-{seed}"),
             "training_data_receipt_sha256": _h(f"training-data-{seed}"),
             "matched_control_receipt_sha256": _h(f"matched-control-{seed}"),
             "external_reviewer_acceptance_sha256": _h(f"gate-review-{seed}"),
@@ -1004,10 +1105,10 @@ def _make_receipt(
         },
         "topology": {"world_size": 1, "rank_set": [0]},
         "parameter_topology": parameter_topology,
-        "measured_route_costs": {
+        "diagnostic_not_admission": {
+            "admission_role": "diagnostic_not_admission",
             "forward_flops_proxy": 100.0 + CAUSAL_ROUTES.index(route),
             "backward_flops_proxy": 200.0 + CAUSAL_ROUTES.index(route),
-            "active_gradient_parameter_count": 1000 + CAUSAL_ROUTES.index(route),
             "peak_memory_bytes": 4096 + CAUSAL_ROUTES.index(route),
             "step_time_ms": 10.0 + CAUSAL_ROUTES.index(route),
             "action_only_latency_ms": 2.0 + CAUSAL_ROUTES.index(route),
@@ -1029,6 +1130,7 @@ def _make_receipt(
             "tensor_manifest": inspected["tensor_manifest"],
             "tensor_manifest_sha256": inspected["tensor_manifest_sha256"],
             "bundle_manifest": inspected["bundle_manifest"],
+            "current_run_trace_prefix_receipt": trace_prefix,
         },
         "parent_checkpoint_weight_sha256": parent_sha,
         "scientific_admission": {
@@ -1045,6 +1147,7 @@ def _make_acceptance(receipt: dict[str, Any]) -> dict[str, Any]:
     route = receipt["route"]["causal_route_id"]
     step = receipt["checkpoint_step"]
     label = f"seed{seed}-{route}-step{step}"
+    fixture_root = Path(receipt["checkpoint_file"]["path_record_only"]).parent
     return {
         "acceptance_version": "contact-asym25-checkpoint-independent-acceptance/v3",
         "status": "accepted",
@@ -1061,10 +1164,55 @@ def _make_acceptance(receipt: dict[str, Any]) -> dict[str, Any]:
         "checkpoint_path_record_only": receipt["checkpoint_file"][
             "path_record_only"
         ],
+        "robot_gate_path_record_only": str(fixture_root / "robot-gate.json"),
         "robot_gate_sha256": receipt["evidence"]["training_gate_sha256"],
+        "gate_reviewer_acceptance_path_record_only": str(
+            fixture_root / "gate-review.json"
+        ),
         "gate_reviewer_acceptance_sha256": receipt["evidence"][
             "external_reviewer_acceptance_sha256"
         ],
+        "route_training_acceptance_path_record_only": str(
+            fixture_root / "route-acceptance.json"
+        ),
+        "route_training_acceptance_sha256": receipt["run_identity"][
+            "external_acceptance_sha256"
+        ],
+        "precursor_receipt_path_record_only": str(fixture_root / "precursor.json"),
+        "precursor_receipt_bytes_sha256": receipt["precursor"]["receipt_bytes_sha256"],
+        "precursor_checkpoint_dir_record_only": str(fixture_root / "precursor"),
+        "precursor_bundle_sha256": receipt["precursor"]["bundle_sha256"],
+        "hardened_preflight_path_record_only": str(fixture_root / "hardened.json"),
+        "hardened_preflight_receipt_sha256": receipt["evidence"][
+            "hardened_preflight_receipt_sha256"
+        ],
+        "production_preflight_path_record_only": str(fixture_root / "preflight.json"),
+        "production_preflight_receipt_sha256": receipt["evidence"][
+            "production_preflight_receipt_sha256"
+        ],
+        "training_data_path_record_only": str(fixture_root / "training-data.json"),
+        "training_data_receipt_sha256": receipt["evidence"][
+            "training_data_receipt_sha256"
+        ],
+        "coverage_path_record_only": str(fixture_root / "coverage.json"),
+        "contact_coverage_receipt_sha256": receipt["evidence"][
+            "contact_coverage_receipt_sha256"
+        ],
+        "sidecar_dir_record_only": str(fixture_root / "sidecars"),
+        "t5_embedding_dir_record_only": str(fixture_root / "t5_embedding"),
+        "matched_control_report_path_record_only": str(
+            fixture_root / "matched-control-report.json"
+        ),
+        "matched_control_report_sha256": _h(f"current-matched-report-{seed}"),
+        "matched_control_trace_manifest_sha256": _h(
+            f"current-trace-manifest-{seed}"
+        ),
+        "matched_control_trace_path_by_route": {
+            item: str(fixture_root / f"{item}.jsonl") for item in CAUSAL_ROUTES
+        },
+        "current_run_trace_prefix_receipt_sha256": receipt["checkpoint_file"][
+            "current_run_trace_prefix_receipt"
+        ]["receipt_sha256"],
         "current_head_source_receipt_sha256": receipt["evidence"][
             "current_head_source_receipt_sha256"
         ],
@@ -1080,7 +1228,22 @@ def _make_acceptance(receipt: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _route_outputs() -> None:
+def _route_outputs(workspace: Path) -> None:
+    target_free = {key: object() for key in INFERENCE_PACKET_KEYS}
+    target_free["window_id"] = "synthetic-target-free-window"
+    validate_target_free_inference_packet(target_free)
+    for target_key in FORBIDDEN_INFERENCE_TARGET_KEYS:
+        leaked = dict(target_free)
+        leaked[target_key] = object()
+        try:
+            validate_target_free_inference_packet(leaked)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"target-free inference accepted target key {target_key}"
+            )
+
     equal_output = None
     for route in CAUSAL_ROUTES:
         kind = route_packet_kind(route)
@@ -1149,6 +1312,107 @@ def _route_outputs() -> None:
         else:
             raise AssertionError("causal evaluator accepted invalid codec metric")
 
+    row_count = 3 * 2 * 256
+    steps = np.repeat(np.asarray(CHECKPOINT_STEPS, dtype=np.int64), 512)
+    window_ids = [f"window-{index % 512:03d}" for index in range(row_count)]
+    actions = np.zeros((row_count, 48, 32), dtype=np.float32)
+    action_targets = np.zeros_like(actions)
+    action_dim_masks = np.zeros((row_count, 32), dtype=np.bool_)
+    action_dim_masks[:, :25] = True
+    action_time_masks = np.ones((row_count, 48), dtype=np.bool_)
+    action_denorm_scales = np.ones((row_count, 32), dtype=np.float32)
+    logits = np.zeros((row_count, 12, 22), dtype=np.float32)
+    hard = np.zeros_like(logits)
+    contact_targets = np.zeros_like(logits)
+    contact_masks = np.zeros_like(logits)
+    contact_confidences = np.zeros_like(logits)
+    contact_condition_masks = np.zeros_like(logits)
+    reduced = {
+        split: {
+            "segment_exact": {"hard_b16_fully_supervised_accuracy": 0.5}
+        }
+        for split in ("val", "test")
+    }
+    for route in CAUSAL_ROUTES:
+        packets = (
+            np.empty((row_count, 0, 22), dtype=np.float32)
+            if route == "aux_only_direct_q12"
+            else np.zeros((row_count, 12, 22), dtype=np.float32)
+        )
+        path = workspace / f"route-output-{route}.npz"
+        digest = write_route_output_evidence(
+            path,
+            route=route,
+            checkpoint_steps=steps,
+            window_ids=window_ids,
+            action_predictions=actions,
+            action_targets=action_targets,
+            action_dim_masks=action_dim_masks,
+            action_time_masks=action_time_masks,
+            action_denorm_scales=action_denorm_scales,
+            semantic_aux_logits=logits,
+            contact_hard_semantics=hard,
+            contact_targets=contact_targets,
+            contact_loss_masks=contact_masks,
+            contact_confidences=contact_confidences,
+            contact_condition_masks=contact_condition_masks,
+            route_packets=packets,
+        )
+        entry = {
+            "path_record_only": str(path.absolute()),
+            "sha256": digest,
+            "row_count": row_count,
+            "format": ROUTE_OUTPUT_EVIDENCE_FORMAT,
+        }
+        replayed = _load_route_output_evidence(entry, route=route)
+        first = replayed["checkpoint_steps"] == 0
+        first_ids = replayed["window_ids"][first].tolist()
+        replayed_action_sha = _array_stream_sha256(
+            first_ids, replayed["action_predictions"][first]
+        )
+        if len(replayed_action_sha) != 64:
+            raise AssertionError("CPU replayed action digest is invalid")
+        metrics = _recompute_route_packet_metrics(
+            route=route,
+            logits=replayed["semantic_aux_logits"][first],
+            packets=replayed["route_packets"][first],
+            reduced_contact_by_split=reduced,
+        )
+        if route == "equal_bit_unstructured_hard_st" and (
+            metrics["codec_validity"] != 1.0
+            or metrics["invalid_to_zero_rate"] != 1.0
+            or not 0.0 <= metrics["utilization"] <= 1.0
+            or not math.isfinite(metrics["entropy"])
+        ):
+            raise AssertionError("equal-bit raw metric replay differs")
+        if route == "equal_bit_unstructured_hard_st":
+            packet_tamper = replayed["route_packets"][first].copy()
+            packet_tamper[0, 0, 0] = 1.0
+            try:
+                _recompute_route_packet_metrics(
+                    route=route,
+                    logits=replayed["semantic_aux_logits"][first],
+                    packets=packet_tamper,
+                    reduced_contact_by_split=reduced,
+                )
+            except CausalProductionError:
+                pass
+            else:
+                raise AssertionError("equal-bit packet/logit mismatch was accepted")
+        if route == "hard_st_semantic" and (
+            metrics["grammar_validity"] != 1.0
+            or metrics["field_accuracy"] != 0.5
+        ):
+            raise AssertionError("semantic raw metric replay differs")
+        tampered = dict(entry)
+        tampered["sha256"] = _h(f"tampered-{route}")
+        try:
+            _load_route_output_evidence(tampered, route=route)
+        except CausalProductionError:
+            pass
+        else:
+            raise AssertionError("tampered route-output evidence was accepted")
+
 
 def _arbitrary_hex_aggregate_negative(
     *, workspace: Path, evidence: dict, matrix_contract: dict
@@ -1160,6 +1424,9 @@ def _arbitrary_hex_aggregate_negative(
             ),
             "sha256": _h(f"arbitrary-result-{seed}-{route}"),
             "per_window_csv_sha256": _h(f"arbitrary-csv-{seed}-{route}"),
+            "route_output_evidence_sha256": _h(
+                f"arbitrary-route-output-{seed}-{route}"
+            ),
         }
         for seed in SEEDS
         for route in CAUSAL_ROUTES
@@ -1198,6 +1465,85 @@ def _arbitrary_hex_aggregate_negative(
     raise AssertionError("arbitrary SHA-256 strings authorized causal aggregate")
 
 
+def _full_evaluator_acceptance_subprocess(
+    *, workspace: Path, root: Path, evidence: dict
+) -> dict[str, Any]:
+    input_path = workspace / "full-evaluator-input.json"
+    output_path = workspace / "full-evaluator-report.json"
+    serialized = {
+        "workspace": str(workspace / "full-evaluator-workspace"),
+        "evidence": [
+            {
+                "seed": seed,
+                "route": route,
+                "step": step,
+                "receipt": evidence[(seed, route, step)][0],
+                "acceptance": evidence[(seed, route, step)][1],
+            }
+            for seed in SEEDS
+            for route in CAUSAL_ROUTES
+            for step in CHECKPOINT_STEPS
+        ],
+    }
+    input_path.write_bytes(
+        json.dumps(
+            serialized,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+    environment = dict(os.environ)
+    environment["CUDA_VISIBLE_DEVICES"] = ""
+    command = [
+            "conda",
+            "run",
+            "-n",
+            "labvla",
+            "python",
+            "-B",
+            "-m",
+            "world_action_model.contact_causal_eval_synthetic_fixture",
+            "--serialized-full-acceptance",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--repository-root",
+            str(root),
+        ]
+    try:
+        subprocess.run(
+            command,
+            cwd=root,
+            env=environment,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise AssertionError(
+            f"full evaluator labvla subprocess failed: {detail}"
+        ) from exc
+    report, _, _ = strict_json_file(
+        output_path, name="full evaluator CPU acceptance"
+    )
+    if report != {
+        **report,
+        "acceptance_version": "contact-causal-full-evaluator-cpu-acceptance/v1",
+        "status": "passed",
+        "result_count": 9,
+        "checkpoint_acceptance_count": 27,
+        "verify_files": True,
+        "bound_acceptance_replay_count": 27,
+        "tampered_route_output_rejected": True,
+    }:
+        raise AssertionError("full evaluator subprocess report differs")
+    return report
+
+
 def run_cpu_acceptance(repository_root: str | Path) -> dict[str, Any]:
     root = Path(repository_root).expanduser().absolute()
     outputs = root / "outputs"
@@ -1213,7 +1559,7 @@ def run_cpu_acceptance(repository_root: str | Path) -> dict[str, Any]:
         _zero_safe_supervision()
         collector_report_sha256 = _collector_v3_acceptance()
         _collector_runtime_binding_acceptance(root, head)
-        _route_outputs()
+        _route_outputs(workspace)
         from world_action_model.contact_route_audit import (
             run_contact_route_cpu_audit,
         )
@@ -1296,6 +1642,9 @@ def run_cpu_acceptance(repository_root: str | Path) -> dict[str, Any]:
                     evidence[(seed, route, step)] = (receipt, acceptance)
                     parent = parameter_topology["parameter_tensor_sha256"]
         report = validate_27_checkpoint_matrix(evidence, verify_files=True)
+        full_evaluator_report = _full_evaluator_acceptance_subprocess(
+            workspace=workspace, root=root, evidence=evidence
+        )
         _arbitrary_hex_aggregate_negative(
             workspace=workspace, evidence=evidence, matrix_contract=report
         )
@@ -1387,6 +1736,54 @@ def run_cpu_acceptance(repository_root: str | Path) -> dict[str, Any]:
             pass
         else:
             raise AssertionError("direct unused-parameter subset was accepted")
+        cache_policy_drift = deepcopy(
+            evidence[(6666, "hard_st_semantic", 0)][0]
+        )
+        cache_policy_drift["route"]["cache_policy"] = "forged-cache-policy"
+        try:
+            validate_training_receipt_v5(cache_policy_drift)
+        except CausalProductionError:
+            pass
+        else:
+            raise AssertionError("forged route cache policy was accepted")
+        optimizer_group_omission = deepcopy(
+            evidence[(6666, "hard_st_semantic", 0)][0]
+        )
+        groups = optimizer_group_omission["parameter_topology"][
+            "optimizer_group_parameter_names"
+        ]
+        groups[0].pop()
+        optimizer_group_omission["parameter_topology"][
+            "optimizer_group_names_sha256"
+        ] = sha256_json(groups)
+        try:
+            validate_training_receipt_v5(optimizer_group_omission)
+        except CausalProductionError:
+            pass
+        else:
+            raise AssertionError("optimizer parameter omission was accepted")
+        optimizer_state_omission = deepcopy(
+            evidence[(6666, "hard_st_semantic", 100)][0]
+        )
+        topology = optimizer_state_omission["parameter_topology"]
+        omitted_name = topology["optimizer_state_parameter_names"].pop()
+        topology["optimizer_state_receipt"] = [
+            row
+            for row in topology["optimizer_state_receipt"]
+            if row["parameter_name"] != omitted_name
+        ]
+        topology["optimizer_state_names_sha256"] = sha256_json(
+            topology["optimizer_state_parameter_names"]
+        )
+        topology["optimizer_state_sha256"] = sha256_json(
+            topology["optimizer_state_receipt"]
+        )
+        try:
+            validate_training_receipt_v5(optimizer_state_omission)
+        except CausalProductionError:
+            pass
+        else:
+            raise AssertionError("active optimizer state omission was accepted")
         alias_receipt = deepcopy(evidence[(6666, CAUSAL_ROUTES[2], 0)][0])
         alias_receipt["route"]["causal_route_id"] = "hard_st"
         try:
@@ -1416,6 +1813,7 @@ def run_cpu_acceptance(repository_root: str | Path) -> dict[str, Any]:
             "synthetic_checkpoint_files_nonempty": True,
             "synthetic_checkpoint_files_are_loadable_torch_weights": True,
             "matrix_report": report,
+            "full_evaluator_report": full_evaluator_report,
             "negative_cases": [
                 "strict_json_duplicate_nan_inf_overflow",
                 "false_null_templates",
@@ -1428,8 +1826,14 @@ def run_cpu_acceptance(repository_root: str | Path) -> dict[str, Any]:
                 "training_run_identity_cross_step_drift",
                 "reviewer_nonce_replay",
                 "direct_unused_parameter_subset",
+                "route_cache_policy_drift",
+                "optimizer_parameter_group_omission",
+                "active_optimizer_state_omission",
                 "boolean_integer_alias",
                 "GT_oracle_evaluator_leakage",
+                "target_key_in_exact_inference_packet",
+                "route_output_evidence_sha_tamper",
+                "equal_bit_packet_logits_codec_tamper",
                 "nonfinite_or_out_of_range_evaluator_metrics",
                 "arbitrary_hex_aggregate_artifact_replay",
                 "zero_supervision_unknown_not_negative",

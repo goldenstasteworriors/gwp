@@ -27,6 +27,12 @@ an unstructured code; the semantic route exposes the finite contact grammar.
 The equal-bit mixing matrix is nonpersistent and cannot enter a checkpoint
 state dict.
 
+Forward/backward proxy FLOPs, peak memory, wall time, and latency live only in
+`diagnostic_not_admission`. They are finite diagnostics, are not compared for
+Go, and especially do not turn the direct route into a compute/backward-matched
+control. Admission equality is limited to exact live topology, gradient sets
+and counts, optimizer/scheduler schemas and states, and the versioned codec.
+
 The route-local and seed-derived differences are the exact JSON pointers in
 the matrix manifest. The canonical comparator replaces only those leaves and
 then compares the complete receipt. A new or unknown field is stable by
@@ -93,12 +99,16 @@ Additional required evidence paths are named
 `GWP_CONTACT_CAUSAL_TRAINING_GATE`,
 `GWP_CONTACT_CAUSAL_MATRIX_MANIFEST`,
 `GWP_EGO_CAUSAL_PRECURSOR_RECEIPT`,
+`GWP_CONTACT_CAUSAL_HARDENED_PREFLIGHT_RECEIPT`,
 `GWP_CONTACT_CAUSAL_DATASET_COVERAGE_RECEIPT`,
 `GWP_CONTACT_CAUSAL_TRAINING_DATA_RECEIPT`,
 `GWP_CONTACT_CAUSAL_PREFLIGHT_RECEIPT`,
 `GWP_CONTACT_CAUSAL_COLLECTOR_CONFIG`, and
 `GWP_CONTACT_CAUSAL_CHECKPOINT_RECEIPT_BASE`. This repository intentionally
-contains no true values for them.
+contains no true values for them. The gate itself additionally carries exact
+paths and byte digests for all three independent route-training acceptances;
+the config also requires the hardened v2 sidecar/data/hardware environment
+paths and `GWP_T5_EMBEDDING_DIR` for fresh same-byte replay.
 
 Dataset-level supervision must include at least one reviewed positive contact
 event and nonzero grouped coverage. A particular training window may have zero
@@ -119,9 +129,10 @@ trace, gate, preflight, dataset, norm, hardware, current HEAD/source tree, and
 expiry-bound external identities. Step 200 is the preregistered primary;
 held-out best-step selection is forbidden.
 
-A checkpoint directory contains exactly `config.json` and one approved
+A checkpoint's model payload has exactly one `config.json` and one approved
 `diffusion_pytorch_model.bin` or `diffusion_pytorch_model.safetensors` weight
-file. The reviewer safely loads only a top-level string-to-tensor mapping,
+layout; the adjacent versioned bundle manifest and training receipt are
+evidence, not alternate weights. The reviewer safely loads only a top-level string-to-tensor mapping,
 matches every tensor name/shape/dtype/byte digest to the live topology, and
 rejects random bytes, README placeholders, nested objects, duplicate layouts,
 or config route/matrix drift. The trainer cannot emit checkpoint acceptance.
@@ -132,6 +143,19 @@ CUDA_VISIBLE_DEVICES='' conda run -n dit4dit python -B scripts/review_contact_ca
   --checkpoint-dir /ABS/PROJECT/CHECKPOINT/transformer \
   --robot-gate /ABS/PROJECT/EVIDENCE/contact_asym25_causal_gate.v3.json \
   --gate-reviewer-acceptance /ABS/PROJECT/EVIDENCE/gate_review.v2.json \
+  --route-training-acceptance /ABS/PROJECT/EVIDENCE/route_acceptance.v1.json \
+  --precursor-receipt /ABS/PROJECT/EVIDENCE/precursor_receipt.v1.json \
+  --precursor-checkpoint-dir /ABS/PROJECT/EVIDENCE/precursor_checkpoint \
+  --hardened-preflight-receipt /ABS/PROJECT/EVIDENCE/hardened_preflight.v1.json \
+  --production-preflight-receipt /ABS/PROJECT/EVIDENCE/causal_preflight.v2.json \
+  --training-data-receipt /ABS/PROJECT/EVIDENCE/training_data.v2.json \
+  --coverage-receipt /ABS/PROJECT/EVIDENCE/contact_coverage.v2.json \
+  --sidecar-dir /ABS/PROJECT/DATA/contact_sidecars \
+  --t5-embedding-dir /ABS/PROJECT/DATA/t5_embedding \
+  --matched-control-report /ABS/PROJECT/EVIDENCE/matched_control_report.v3.json \
+  --trace-aux-only-direct-q12 /ABS/PROJECT/EVIDENCE/direct.jsonl \
+  --trace-equal-bit-unstructured-hard-st /ABS/PROJECT/EVIDENCE/equal.jsonl \
+  --trace-hard-st-semantic /ABS/PROJECT/EVIDENCE/semantic.jsonl \
   --output /ABS/PROJECT/REVIEWS/checkpoint_acceptance.v3.json \
   --reviewer-identity REVIEWER_ID_AT_LEAST_16_CHARS \
   --reviewer-attestation-nonce UNIQUE_REVIEW_NONCE_AT_LEAST_16_CHARS \
@@ -192,8 +216,10 @@ compares 15 protected legacy files byte-for-byte with the op42 baseline. A
 second CPU subprocess uses the existing `labvla` environment and bypasses only
 three unrelated package `__init__` side-effect chains; its report names that
 stub scope and proves that the real WAM loader module was imported. It executes
-the real loader constructor, reviewed sidecar NPZ replay, and real collector
-batch record path. No dependency is installed. A passing synthetic audit is
+the real loader constructor plus `open()`/sample read, verified parquet/T5 and
+reviewed sidecar replay, and real collector batch record path. The harness only
+stubs package initializers unrelated to those target modules; no dependency is
+installed. A passing synthetic audit is
 implementation evidence only: it does not claim
 benefit, admit production data, or authorize server/5B training.
 
@@ -204,10 +230,11 @@ CUDA_VISIBLE_DEVICES='' conda run -n dit4dit python -B scripts/compare_contact_c
   --seed 6666 \
   --aux-only-direct-q12 /ABS/PROJECT/EVIDENCE/direct.jsonl \
   --equal-bit-unstructured-hard-st /ABS/PROJECT/EVIDENCE/equal.jsonl \
-  --hard-st-semantic /ABS/PROJECT/EVIDENCE/semantic.jsonl
+  --hard-st-semantic /ABS/PROJECT/EVIDENCE/semantic.jsonl \
+  --output /ABS/PROJECT/EVIDENCE/matched_control_report.json
 ```
 
-换行位置：每个行尾反斜杠后换行；替换 seed 和三个项目盘绝对路径。不要使用 `/tmp`。
+换行位置：每个行尾反斜杠后换行；替换 seed、三个 trace 和 output 的项目盘绝对路径。输出使用 O_EXCL，已存在文件会拒绝；不要使用 `/tmp`。
 
 ## Current decision
 

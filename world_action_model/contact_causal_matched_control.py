@@ -11,8 +11,10 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import random
 from typing import Any
 
+import numpy as np
 import torch
 
 from world_action_model.contact_causal_production import (
@@ -45,7 +47,7 @@ TRACE_VERSION = "contact-causal-matched-trace/v3"
 STABLE_CONTRACT_VERSION = "contact-causal-matched-stable-contract/v3"
 STABLE_CONTRACT_KEYS = {
     "stable_contract_version", "code", "config", "dataset", "hardware",
-    "normalization", "precursor", "labels", "topology", "source_receipts",
+    "normalization", "runtime", "precursor", "labels", "topology", "source_receipts",
 }
 STABLE_RECEIPT_KEYS = {
     "code": {"git_commit", "source_tree_sha256", "collector_source_sha256"},
@@ -64,6 +66,11 @@ STABLE_RECEIPT_KEYS = {
         "calibration_capture_sha256",
     },
     "normalization": {"train_only_norm_sha256"},
+    "runtime": {
+        "runtime_environment_sha256",
+        "dataset_runtime_source_receipt_sha256",
+        "t5_runtime_source_receipt_sha256",
+    },
     "precursor": {
         "precursor_receipt_bytes_sha256", "precursor_bundle_sha256",
         "initial_parameter_tensors_sha256",
@@ -73,7 +80,8 @@ STABLE_RECEIPT_KEYS = {
         "contact_coverage_sha256", "contact_target_stream_sha256",
         "contact_mask_stream_sha256", "contact_confidence_stream_sha256",
         "action_target_stream_sha256", "action_mask_stream_sha256",
-        "prompt_t5_stream_sha256",
+        "state_input_stream_sha256", "state_mask_stream_sha256",
+        "embodiment_id_stream_sha256", "prompt_t5_stream_sha256",
     },
     "topology": {"world_size", "rank_set"},
     "source_receipts": {
@@ -113,6 +121,7 @@ REQUIRED_HASHES = (
     "dataset_receipt",
     "hardware_receipt",
     "normalization_receipt",
+    "runtime_receipt",
     "precursor_receipt",
     "labels_receipt",
     "topology_receipt",
@@ -129,6 +138,9 @@ REQUIRED_HASHES = (
     "contact_supervision_counts",
     "action_target",
     "action_loss_mask",
+    "state_input",
+    "state_input_mask",
+    "embodiment_id",
     "prompt_t5",
     "pre_forward_rng",
     "initial_parameter_tensors",
@@ -137,6 +149,171 @@ REQUIRED_HASHES = (
     "scheduler_step0_state",
     "precursor_receipt_bytes",
 )
+
+
+def _live_state_receipt(value: Any) -> Any:
+    """Convert a live training-state object to strict, typed JSON."""
+
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().to(device="cpu").contiguous()
+        return {
+            "kind": "tensor",
+            "shape": list(tensor.shape),
+            "dtype": str(tensor.dtype),
+            "bytes_sha256": canonical_sha256(tensor),
+        }
+    if isinstance(value, np.ndarray):
+        array = np.ascontiguousarray(value)
+        return {
+            "kind": "ndarray",
+            "shape": list(array.shape),
+            "dtype": array.dtype.str,
+            "bytes_sha256": canonical_sha256(array),
+        }
+    if isinstance(value, np.generic):
+        return _live_state_receipt(np.asarray(value))
+    if value is None or isinstance(value, (str, bool, int, float)):
+        if isinstance(value, float) and not np.isfinite(value):
+            raise CausalProductionError("live optimizer/scheduler state is non-finite")
+        return value
+    if isinstance(value, Mapping):
+        rows = []
+        for key, item in value.items():
+            if isinstance(key, bool) or not isinstance(key, (str, int)):
+                raise CausalProductionError(
+                    "live optimizer/scheduler mapping key must be string/integer"
+                )
+            rows.append(
+                {
+                    "key_type": "integer" if isinstance(key, int) else "string",
+                    "key": str(key),
+                    "value": _live_state_receipt(item),
+                }
+            )
+        rows.sort(key=lambda row: (row["key_type"], row["key"]))
+        return {"kind": "mapping", "entries": rows}
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return {
+            "kind": "sequence",
+            "items": [_live_state_receipt(item) for item in value],
+        }
+    raise CausalProductionError(
+        f"unsupported live optimizer/scheduler state: {type(value).__name__}"
+    )
+
+
+def live_optimizer_scheduler_receipts_v3(
+    *, model: Any, optimizers: Sequence[Any], schedulers: Sequence[Any]
+) -> dict[str, Any]:
+    """Read exact named membership/order and state from actual training objects."""
+
+    named_parameters = list(model.named_parameters())
+    if not named_parameters:
+        raise CausalProductionError("causal collector live model has no parameters")
+    by_identity = {id(parameter): name for name, parameter in named_parameters}
+    groups = []
+    covered_names = []
+    optimizer_states = []
+    for optimizer_index, optimizer in enumerate(optimizers):
+        raw_optimizer = getattr(optimizer, "optimizer", optimizer)
+        if not hasattr(raw_optimizer, "param_groups") or not hasattr(
+            raw_optimizer, "state"
+        ):
+            raise CausalProductionError("causal collector optimizer object is invalid")
+        for group_index, group in enumerate(raw_optimizer.param_groups):
+            names = []
+            for parameter in group.get("params", []):
+                if id(parameter) not in by_identity:
+                    raise CausalProductionError(
+                        "causal collector optimizer references a parameter outside the live model"
+                    )
+                names.append(by_identity[id(parameter)])
+            covered_names.extend(names)
+            groups.append(
+                {
+                    "optimizer_index": optimizer_index,
+                    "optimizer_type": (
+                        f"{raw_optimizer.__class__.__module__}."
+                        f"{raw_optimizer.__class__.__qualname__}"
+                    ),
+                    "group_index": group_index,
+                    "parameter_names_in_order": names,
+                    "hyperparameters": {
+                        key: _live_state_receipt(item)
+                        for key, item in group.items()
+                        if key != "params"
+                    },
+                }
+            )
+        state_rows = []
+        for parameter, state in raw_optimizer.state.items():
+            if id(parameter) not in by_identity:
+                raise CausalProductionError(
+                    "causal collector optimizer state references an unknown parameter"
+                )
+            state_rows.append(
+                {
+                    "parameter_name": by_identity[id(parameter)],
+                    "state": _live_state_receipt(state),
+                }
+            )
+        state_rows.sort(key=lambda row: row["parameter_name"])
+        optimizer_states.append(
+            {
+                "optimizer_index": optimizer_index,
+                "optimizer_type": (
+                    f"{raw_optimizer.__class__.__module__}."
+                    f"{raw_optimizer.__class__.__qualname__}"
+                ),
+                "parameter_state": state_rows,
+            }
+        )
+    expected_names = [name for name, _ in named_parameters]
+    if len(covered_names) != len(set(covered_names)) or set(covered_names) != set(
+        expected_names
+    ):
+        raise CausalProductionError(
+            "causal collector optimizer groups must cover every live parameter exactly once"
+        )
+    scheduler_states = []
+    for scheduler_index, scheduler in enumerate(schedulers):
+        if not hasattr(scheduler, "state_dict"):
+            raise CausalProductionError("causal collector scheduler object is invalid")
+        scheduler_states.append(
+            {
+                "scheduler_index": scheduler_index,
+                "scheduler_type": (
+                    f"{scheduler.__class__.__module__}."
+                    f"{scheduler.__class__.__qualname__}"
+                ),
+                "state": _live_state_receipt(scheduler.state_dict()),
+            }
+        )
+    if not groups or not optimizer_states or not scheduler_states:
+        raise CausalProductionError(
+            "causal collector requires live optimizer groups/state and scheduler state"
+        )
+    return {
+        "optimizer_parameter_groups": groups,
+        "optimizer_step0_state": optimizer_states,
+        "scheduler_step0_state": scheduler_states,
+    }
+
+
+def capture_pre_forward_rng_v3() -> dict[str, Any]:
+    """Capture all process-global RNG states immediately before model forward."""
+
+    cuda_states = []
+    if torch.cuda.is_available():
+        cuda_states = list(torch.cuda.get_rng_state_all())
+    return {
+        "python_random_state": random.getstate(),
+        "numpy_random_state": np.random.get_state(),
+        "torch_cpu_rng_state": torch.get_rng_state(),
+        "torch_cuda_rng_state_by_device": cuda_states,
+    }
 
 
 class CausalMatchedControlCollector:
@@ -183,6 +360,9 @@ class CausalMatchedControlCollector:
         self.optimizer_parameter_groups = config.get("optimizer_parameter_groups")
         self.optimizer_step0_state = config.get("optimizer_step0_state")
         self.scheduler_step0_state = config.get("scheduler_step0_state")
+        self._live_optimizer_parameter_groups = None
+        self._live_optimizer_step0_state = None
+        self._live_scheduler_step0_state = None
         self.precursor_receipt_bytes_sha256 = config.get(
             "precursor_receipt_bytes_sha256"
         )
@@ -199,6 +379,36 @@ class CausalMatchedControlCollector:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
             self._output_fd = os.open(self.output_path, flags, 0o600)
         self._micro_steps: dict[int, int] = {}
+        self._record_sha256_by_key: dict[str, str] = {}
+        self._records: list[dict[str, Any]] = []
+
+    def bind_live_training_state(
+        self, *, model: Any, optimizers: Sequence[Any], schedulers: Sequence[Any]
+    ) -> dict[str, Any]:
+        """Bind this run to the actual step-0 model/optimizer/scheduler objects."""
+
+        live = live_optimizer_scheduler_receipts_v3(
+            model=model, optimizers=optimizers, schedulers=schedulers
+        )
+        expected = {
+            "optimizer_parameter_groups": self.optimizer_parameter_groups,
+            "optimizer_step0_state": self.optimizer_step0_state,
+            "scheduler_step0_state": self.scheduler_step0_state,
+        }
+        if live != expected:
+            raise CausalProductionError(
+                "causal collector configured optimizer/scheduler receipts differ from live step-0 objects"
+            )
+        if self._live_optimizer_parameter_groups is not None and live != {
+            "optimizer_parameter_groups": self._live_optimizer_parameter_groups,
+            "optimizer_step0_state": self._live_optimizer_step0_state,
+            "scheduler_step0_state": self._live_scheduler_step0_state,
+        }:
+            raise CausalProductionError("causal collector live step-0 binding changed")
+        self._live_optimizer_parameter_groups = live["optimizer_parameter_groups"]
+        self._live_optimizer_step0_state = live["optimizer_step0_state"]
+        self._live_scheduler_step0_state = live["scheduler_step0_state"]
+        return live
 
     @staticmethod
     def _decode_json_list(value: object, *, name: str) -> list[Any]:
@@ -220,7 +430,18 @@ class CausalMatchedControlCollector:
         action_timestep: torch.Tensor,
         visual_noise: torch.Tensor,
         action_noise: torch.Tensor,
+        action_target: torch.Tensor,
+        action_loss_mask: object,
+        state_input: torch.Tensor,
+        state_input_mask: object,
+        embodiment_id: torch.Tensor,
+        prompt_t5: torch.Tensor,
+        pre_forward_rng: object,
     ) -> dict[str, Any]:
+        if self._live_optimizer_parameter_groups is None:
+            raise CausalProductionError(
+                "causal collector must bind actual step-0 optimizer/scheduler objects before recording"
+            )
         micro_step = self._micro_steps.get(global_step, 0)
         self._micro_steps[global_step] = micro_step + 1
         identities = self._decode_json_list(
@@ -242,18 +463,10 @@ class CausalMatchedControlCollector:
             "contact_target",
             "contact_loss_mask",
             "contact_confidence",
-            "action",
-            "prompt_embeds",
         )
         missing = [name for name in required_batch if name not in batch_dict]
         if missing:
             raise CausalProductionError(f"causal collector batch fields missing: {missing}")
-        action_mask = batch_dict.get("action_loss_mask")
-        if action_mask is None:
-            action_mask = torch.ones(
-                batch_dict["action"].shape[:-1],
-                device=batch_dict["action"].device,
-            )
         record = build_trace_record(
             route=self.route,
             seed=self.seed,
@@ -275,16 +488,19 @@ class CausalMatchedControlCollector:
             contact_target=batch_dict["contact_target"],
             contact_loss_mask=batch_dict["contact_loss_mask"],
             contact_confidence=batch_dict["contact_confidence"],
-            action_target=batch_dict["action"],
-            action_loss_mask=action_mask,
-            prompt_t5=batch_dict["prompt_embeds"],
-            pre_forward_rng={"cpu_rng_state": torch.get_rng_state()},
+            action_target=action_target,
+            action_loss_mask=action_loss_mask,
+            state_input=state_input,
+            state_input_mask=state_input_mask,
+            embodiment_id=embodiment_id,
+            prompt_t5=prompt_t5,
+            pre_forward_rng=pre_forward_rng,
             initial_parameter_tensors_sha256=(
                 self.initial_parameter_tensors_sha256
             ),
-            optimizer_parameter_groups=self.optimizer_parameter_groups,
-            optimizer_step0_state=self.optimizer_step0_state,
-            scheduler_step0_state=self.scheduler_step0_state,
+            optimizer_parameter_groups=self._live_optimizer_parameter_groups,
+            optimizer_step0_state=self._live_optimizer_step0_state,
+            scheduler_step0_state=self._live_scheduler_step0_state,
             precursor_receipt_bytes_sha256=(
                 self.precursor_receipt_bytes_sha256
             ),
@@ -300,7 +516,26 @@ class CausalMatchedControlCollector:
                     raise OSError("short write for causal collector trace")
                 offset += written
             os.fsync(self._output_fd)
+        key = f"step{global_step}/micro{micro_step}/rank{self.rank}"
+        if key in self._record_sha256_by_key:
+            raise CausalProductionError("causal collector trace key was reused")
+        self._record_sha256_by_key[key] = record["record_sha256"]
+        self._records.append(record)
         return record
+
+    def current_run_trace_prefix_receipt(self, *, through_step: int) -> dict[str, Any]:
+        if isinstance(through_step, bool) or not isinstance(through_step, int) or through_step < 0:
+            raise CausalProductionError("causal trace prefix step is invalid")
+        if self.output_path is None:
+            raise CausalProductionError(
+                "production trace prefix requires write_report=true/O_EXCL trace"
+            )
+        return build_current_run_trace_prefix_receipt_v1(
+            self._records,
+            route=self.route, seed=self.seed, run_id=self.run_id,
+            run_nonce=self.run_nonce, rank=self.rank, world_size=self.world_size,
+            through_checkpoint_step=through_step, trace_path=self.output_path,
+        )
 
     def close(self) -> None:
         if self._output_fd is not None:
@@ -436,6 +671,9 @@ def validate_collector_runtime_bindings_v3(
     training_data_receipt_sha256: str, preflight_receipt_sha256: str,
     coverage_receipt_sha256: str, precursor_binding: Mapping[str, Any],
     sidecar_meta_sha256: str, source_tree_receipt: Mapping[str, Any],
+    runtime_environment_sha256: str,
+    dataset_runtime_source_receipt_sha256: str,
+    t5_runtime_source_receipt_sha256: str,
 ) -> dict[str, Any]:
     """Recompute every stable source section from the admitted live inputs."""
 
@@ -448,6 +686,9 @@ def validate_collector_runtime_bindings_v3(
         ("preflight receipt", preflight_receipt_sha256),
         ("coverage receipt", coverage_receipt_sha256),
         ("sidecar meta", sidecar_meta_sha256),
+        ("runtime environment", runtime_environment_sha256),
+        ("dataset runtime source receipt", dataset_runtime_source_receipt_sha256),
+        ("T5 runtime source receipt", t5_runtime_source_receipt_sha256),
     ):
         _sha(value, name)
     source_sha = sha256_json(source_tree_receipt)
@@ -501,6 +742,13 @@ def validate_collector_runtime_bindings_v3(
             "train_only_norm_sha256": training_data_receipt.get(
                 "train_only_norm_sha256"
             )
+        },
+        "runtime": {
+            "runtime_environment_sha256": runtime_environment_sha256,
+            "dataset_runtime_source_receipt_sha256": (
+                dataset_runtime_source_receipt_sha256
+            ),
+            "t5_runtime_source_receipt_sha256": t5_runtime_source_receipt_sha256,
         },
         "precursor": {
             "precursor_receipt_bytes_sha256": precursor_binding.get(
@@ -653,7 +901,10 @@ def build_trace_record(
     contact_loss_mask: torch.Tensor,
     contact_confidence: torch.Tensor,
     action_target: torch.Tensor,
-    action_loss_mask: torch.Tensor,
+    action_loss_mask: object,
+    state_input: torch.Tensor,
+    state_input_mask: object,
+    embodiment_id: torch.Tensor,
     prompt_t5: torch.Tensor,
     pre_forward_rng: object,
     initial_parameter_tensors_sha256: str,
@@ -708,6 +959,9 @@ def build_trace_record(
         "contact_supervision_counts": canonical_sha256(counts),
         "action_target": canonical_sha256(action_target),
         "action_loss_mask": canonical_sha256(action_loss_mask),
+        "state_input": canonical_sha256(state_input),
+        "state_input_mask": canonical_sha256(state_input_mask),
+        "embodiment_id": canonical_sha256(embodiment_id),
         "prompt_t5": canonical_sha256(prompt_t5),
         "pre_forward_rng": canonical_sha256(pre_forward_rng),
         "initial_parameter_tensors": initial_parameter_tensors_sha256,
@@ -911,6 +1165,9 @@ def compare_causal_records(
         "contact_confidence_stream_sha256": "contact_confidence",
         "action_target_stream_sha256": "action_target",
         "action_mask_stream_sha256": "action_loss_mask",
+        "state_input_stream_sha256": "state_input",
+        "state_mask_stream_sha256": "state_input_mask",
+        "embodiment_id_stream_sha256": "embodiment_id",
         "prompt_t5_stream_sha256": "prompt_t5",
     }
     stable_labels = next(iter(baseline.values()))["stable_contract"]["labels"]
@@ -1067,6 +1324,122 @@ def load_trace_jsonl(path: str | Path, *, route: str) -> list[dict[str, Any]]:
     return records
 
 
+def build_current_run_trace_prefix_receipt_v1(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    route: str,
+    seed: int,
+    run_id: str,
+    run_nonce: str,
+    rank: int,
+    world_size: int,
+    through_checkpoint_step: int,
+    trace_path: str | Path,
+) -> dict[str, Any]:
+    route = ensure_exact_causal_route(route)
+    trace_path = Path(trace_path).expanduser().absolute()
+    selected: dict[str, str] = {}
+    for record in records:
+        validate_trace_record(record)
+        if (
+            record["causal_route_id"] != route
+            or record["seed"] != seed
+            or record["run_id"] != run_id
+            or record["run_nonce"] != run_nonce
+            or record["rank"] != rank
+            or record["world_size"] != world_size
+        ):
+            raise CausalProductionError("current-run trace prefix identity differs")
+        if record["global_step"] > through_checkpoint_step:
+            continue
+        key = (
+            f"step{record['global_step']}/micro{record['micro_step']}"
+            f"/rank{record['rank']}"
+        )
+        if key in selected:
+            raise CausalProductionError("current-run trace prefix key is duplicated")
+        selected[key] = record["record_sha256"]
+    unsigned = {
+        "receipt_version": "contact-causal-current-run-trace-prefix/v1",
+        "causal_route_id": route,
+        "seed": seed,
+        "run_id": run_id,
+        "run_nonce": run_nonce,
+        "rank": rank,
+        "world_size": world_size,
+        "through_checkpoint_step": through_checkpoint_step,
+        "record_count": len(selected),
+        "record_sha256_by_key": dict(sorted(selected.items())),
+        "trace_path_record_only": str(trace_path),
+    }
+    return {**unsigned, "receipt_sha256": sha256_json(unsigned)}
+
+
+def validate_current_run_trace_prefix_receipt_v1(value: object) -> dict[str, Any]:
+    receipt = _exact(
+        value,
+        {
+            "receipt_version", "causal_route_id", "seed", "run_id", "run_nonce",
+            "rank", "world_size", "through_checkpoint_step", "record_count",
+            "record_sha256_by_key", "trace_path_record_only", "receipt_sha256",
+        },
+        "current-run trace prefix receipt",
+    )
+    route = ensure_exact_causal_route(receipt["causal_route_id"])
+    if receipt["receipt_version"] != "contact-causal-current-run-trace-prefix/v1":
+        raise CausalProductionError("current-run trace prefix version differs")
+    for name in ("seed", "rank", "world_size", "through_checkpoint_step", "record_count"):
+        if isinstance(receipt[name], bool) or not isinstance(receipt[name], int):
+            raise CausalProductionError(f"current-run trace prefix {name} differs")
+    if (
+        receipt["seed"] not in SEEDS
+        or receipt["world_size"] <= 0
+        or not 0 <= receipt["rank"] < receipt["world_size"]
+        or receipt["through_checkpoint_step"] < 0
+        or receipt["record_count"] < 0
+    ):
+        raise CausalProductionError("current-run trace prefix bounds differ")
+    for name in ("run_id", "run_nonce"):
+        if not isinstance(receipt[name], str) or len(receipt[name]) < 16:
+            raise CausalProductionError("current-run trace prefix identity differs")
+    path = Path(receipt["trace_path_record_only"])
+    if not path.is_absolute():
+        raise CausalProductionError("current-run trace prefix path must be absolute")
+    rows = receipt["record_sha256_by_key"]
+    if not isinstance(rows, dict) or list(rows) != sorted(rows):
+        raise CausalProductionError("current-run trace prefix manifest is not sorted")
+    if len(rows) != receipt["record_count"]:
+        raise CausalProductionError("current-run trace prefix count differs")
+    for key, digest in rows.items():
+        if not isinstance(key, str) or not key:
+            raise CausalProductionError("current-run trace prefix key is invalid")
+        _sha(digest, "current-run trace record")
+    unsigned = dict(receipt)
+    claimed = unsigned.pop("receipt_sha256")
+    _sha(claimed, "current-run trace prefix receipt")
+    if claimed != sha256_json(unsigned):
+        raise CausalProductionError("current-run trace prefix receipt digest differs")
+    return receipt
+
+
+def replay_current_run_trace_prefix_v1(value: object) -> dict[str, Any]:
+    receipt = validate_current_run_trace_prefix_receipt_v1(value)
+    records = load_trace_jsonl(
+        receipt["trace_path_record_only"], route=receipt["causal_route_id"]
+    )
+    rebuilt = build_current_run_trace_prefix_receipt_v1(
+        records,
+        route=receipt["causal_route_id"], seed=receipt["seed"],
+        run_id=receipt["run_id"], run_nonce=receipt["run_nonce"],
+        rank=receipt["rank"], world_size=receipt["world_size"],
+        through_checkpoint_step=receipt["through_checkpoint_step"],
+        trace_path=receipt["trace_path_record_only"],
+    )
+    if rebuilt != receipt:
+        raise CausalProductionError("current-run trace prefix replay differs")
+    return receipt
+
+
 def write_trace_jsonl_exclusive(
     path: str | Path,
     records: Sequence[Mapping[str, Any]],
@@ -1133,6 +1506,11 @@ def build_synthetic_stable_contract_v3(*, world_size: int = 1) -> dict[str, Any]
             "calibration_capture_sha256": digest("capture"),
         },
         "normalization": {"train_only_norm_sha256": digest("norm")},
+        "runtime": {
+            "runtime_environment_sha256": digest("runtime-environment"),
+            "dataset_runtime_source_receipt_sha256": digest("dataset-runtime-source"),
+            "t5_runtime_source_receipt_sha256": digest("t5-runtime-source"),
+        },
         "precursor": {
             "precursor_receipt_bytes_sha256": digest("precursor-receipt"),
             "precursor_bundle_sha256": digest("precursor-bundle"),
@@ -1147,6 +1525,9 @@ def build_synthetic_stable_contract_v3(*, world_size: int = 1) -> dict[str, Any]
             "contact_confidence_stream_sha256": digest("contact-confidence"),
             "action_target_stream_sha256": digest("action-target"),
             "action_mask_stream_sha256": digest("action-mask"),
+            "state_input_stream_sha256": digest("state-input"),
+            "state_mask_stream_sha256": digest("state-mask"),
+            "embodiment_id_stream_sha256": digest("embodiment-id"),
             "prompt_t5_stream_sha256": digest("prompt-t5"),
         },
         "topology": {"world_size": world_size, "rank_set": list(range(world_size))},
@@ -1167,6 +1548,17 @@ def collector_cpu_recording_acceptance_helper(project_dir: str | Path) -> dict[s
 
     stable = build_synthetic_stable_contract_v3()
     route = CAUSAL_ROUTES[0]
+    model = torch.nn.Module()
+    model.register_parameter(
+        "shared_weight", torch.nn.Parameter(torch.ones(2, dtype=torch.float32))
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda=lambda _: 1.0
+    )
+    live = live_optimizer_scheduler_receipts_v3(
+        model=model, optimizers=[optimizer], schedulers=[scheduler]
+    )
     config = {
         "collector_version": COLLECTOR_VERSION, "enabled": True,
         "matrix_schema_version": MATRIX_SCHEMA_VERSION, "matrix_id": MATRIX_ID,
@@ -1179,8 +1571,7 @@ def collector_cpu_recording_acceptance_helper(project_dir: str | Path) -> dict[s
         "initial_parameter_tensors_sha256": stable["precursor"][
             "initial_parameter_tensors_sha256"
         ],
-        "optimizer_parameter_groups": {"names": ["all"]},
-        "optimizer_step0_state": {}, "scheduler_step0_state": {"step": 0},
+        **live,
         "precursor_receipt_bytes_sha256": stable["precursor"][
             "precursor_receipt_bytes_sha256"
         ],
@@ -1194,6 +1585,9 @@ def collector_cpu_recording_acceptance_helper(project_dir: str | Path) -> dict[s
     }
     collector = CausalMatchedControlCollector(
         config, rank=0, world_size=1, trainer_seed=SEEDS[0], project_dir=project_dir
+    )
+    collector.bind_live_training_state(
+        model=model, optimizers=[optimizer], schedulers=[scheduler]
     )
     raw = hashlib.sha256(b"synthetic-raw-batch").hexdigest()
     batch = {
@@ -1211,6 +1605,16 @@ def collector_cpu_recording_acceptance_helper(project_dir: str | Path) -> dict[s
         global_step=0, batch_dict=batch,
         visual_timestep=torch.tensor([10]), action_timestep=torch.tensor([20]),
         visual_noise=torch.zeros(1, 1), action_noise=torch.zeros(1, 2, 4),
+        action_target=torch.ones(1, 2, 4),
+        action_loss_mask={
+            "dimension_mask": None,
+            "time_mask": torch.ones(1, 2),
+            "dimension_weight": None,
+        },
+        state_input=torch.zeros(1, 1, 3), state_input_mask=None,
+        embodiment_id=torch.zeros(1, dtype=torch.long),
+        prompt_t5=batch["prompt_embeds"],
+        pre_forward_rng=capture_pre_forward_rng_v3(),
     )
     collector.close()
     validate_trace_record(record)

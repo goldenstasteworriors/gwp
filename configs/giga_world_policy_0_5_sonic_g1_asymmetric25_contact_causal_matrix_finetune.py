@@ -19,7 +19,9 @@ import copy  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from world_action_model.contact_causal_preflight import (
+    build_robot_runtime_source_receipts_v1,
     load_robot_gate_from_environment,
+    replay_robot_gate_evidence_v3,
     replay_hardened_contact_asym25_v2_from_environment,
     validate_preflight_receipt_v2,
     validate_training_data_receipt_v2,
@@ -56,11 +58,29 @@ from world_action_model.contact_transition_schema import (
 gate, gate_sha256, gate_path = load_robot_gate_from_environment(
     bootstrap_receipt=_stdlib_bootstrap
 )
+gate_evidence_replay = replay_robot_gate_evidence_v3(gate, gate_path=gate_path)
 route = ensure_exact_causal_route(os.environ["GWP_CONTACT_CAUSAL_ROUTE"].strip())
 hardened_source_replay = replay_hardened_contact_asym25_v2_from_environment(
     causal_gate=gate, causal_gate_sha256=gate_sha256, route=route
 )
 _hardened_receipt = hardened_source_replay["legacy_preflight_receipt"]
+_t5_embedding_dir = os.path.abspath(
+    os.environ.get(
+        "GWP_T5_EMBEDDING_DIR",
+        os.path.join(_hardened_receipt["data_root"], "t5_embedding"),
+    )
+)
+runtime_source_receipts = build_robot_runtime_source_receipts_v1(
+    hardened_preflight_receipt=_hardened_receipt,
+    t5_embedding_dir=_t5_embedding_dir,
+)
+if (
+    runtime_source_receipts["training_source_runtime_receipt_sha256"]
+    != gate["artifact_fingerprints"]["dataset_runtime_source_receipt_sha256"]
+    or runtime_source_receipts["t5_runtime_source_receipt_sha256"]
+    != gate["artifact_fingerprints"]["t5_runtime_source_receipt_sha256"]
+):
+    raise ValueError("Robot runtime dataset/T5 bytes differ from the v3 gate")
 
 
 def _required_json_environment(name, description):
@@ -72,11 +92,31 @@ def _required_json_environment(name, description):
     return path, value, digest, payload
 
 
+hardened_preflight_path, persisted_hardened_preflight, hardened_preflight_sha256, _ = (
+    _required_json_environment(
+        "GWP_CONTACT_CAUSAL_HARDENED_PREFLIGHT_RECEIPT",
+        "persisted hardened contact-asym25 v2 preflight receipt",
+    )
+)
+if (
+    persisted_hardened_preflight != _hardened_receipt
+    or hardened_preflight_sha256
+    != hardened_source_replay["legacy_preflight_receipt_sha256"]
+    or hardened_preflight_sha256
+    != gate["artifact_fingerprints"]["hardened_preflight_receipt_sha256"]
+):
+    raise ValueError("persisted hardened v2 receipt differs from live verified replay")
+
+
 matrix_path, matrix_manifest, matrix_sha256, _ = _required_json_environment(
     "GWP_CONTACT_CAUSAL_MATRIX_MANIFEST", "causal production matrix"
 )
 validate_matrix_manifest(matrix_manifest)
-if matrix_sha256 != gate["artifact_fingerprints"]["matrix_manifest_sha256"]:
+if (
+    matrix_sha256 != gate["artifact_fingerprints"]["matrix_manifest_sha256"]
+    or sha256_json(matrix_manifest["route_receipts"])
+    != gate["artifact_fingerprints"]["route_contract_bundle_sha256"]
+):
     raise ValueError("causal production matrix bytes differ from the v3 gate")
 source_tree_receipt = current_head_source_tree_receipt(
     Path(__file__).resolve().parents[1],
@@ -168,6 +208,8 @@ if (
     or checkpoint_receipt_base["evidence"]["training_gate_sha256"] != gate_sha256
     or checkpoint_receipt_base["evidence"]["production_preflight_receipt_sha256"]
     != preflight_sha256
+    or checkpoint_receipt_base["evidence"]["hardened_preflight_receipt_sha256"]
+    != hardened_preflight_sha256
     or checkpoint_receipt_base["evidence"]["training_data_receipt_sha256"]
     != training_data_sha256
     or checkpoint_receipt_base["evidence"]["contact_coverage_receipt_sha256"]
@@ -182,6 +224,14 @@ if (
     != training_data_receipt["hardware_contract_sha256"]
     or checkpoint_receipt_base["stable_contract"]["train_only_norm_sha256"]
     != training_data_receipt["train_only_norm_sha256"]
+    or checkpoint_receipt_base["stable_contract"]["runtime_environment_sha256"]
+    != gate["artifact_fingerprints"]["runtime_environment_sha256"]
+    or checkpoint_receipt_base["stable_contract"][
+        "dataset_runtime_source_receipt_sha256"
+    ] != runtime_source_receipts["training_source_runtime_receipt_sha256"]
+    or checkpoint_receipt_base["stable_contract"][
+        "t5_runtime_source_receipt_sha256"
+    ] != runtime_source_receipts["t5_runtime_source_receipt_sha256"]
 ):
     raise ValueError("causal checkpoint v5 base receipt differs from reviewed inputs")
 
@@ -191,6 +241,7 @@ collector_path, collector_config, _, _ = _required_json_environment(
 validate_collector_config_v3(collector_config)
 if (
     collector_config["causal_route_id"] != route
+    or collector_config["write_report"] is not True
     or collector_config["seed"] != training_data_receipt["split_seed"]
     or collector_config["run_id"] != gate["training_run_id_by_route"][route]
     or collector_config["run_nonce"] != gate["training_run_nonce_by_route"][route]
@@ -216,8 +267,36 @@ config["project_dir"] = os.environ.get(
     "GWP05_PROJECT_DIR", f"outputs/contact_causal_main_{route}"
 )
 for dataset in config["dataloaders"]["train"]["data_or_config"]:
+    if os.path.realpath(dataset["data_path"]) != _hardened_receipt["data_root"]:
+        raise ValueError("causal Robot dataset root differs from hardened v2 evidence")
+    if (
+        dataset.get("t5_load_from") != "dir"
+        or os.path.realpath(dataset.get("t5_cfg", {}).get("t5_embedding_dir", ""))
+        != _t5_embedding_dir
+    ):
+        raise ValueError("causal Robot T5 root differs from reviewed runtime evidence")
     dataset.update(
         episodes=training_data_receipt["train_episode_ids"],
+        # Verified-source loading rebuilds an unpublished private Arrow cache
+        # from pinned FDs. LeRobot's force_cache_sync flag instead requests a
+        # Hub refresh and must stay disabled for production same-byte replay.
+        force_cache_sync=False,
+        training_source_runtime_receipt=runtime_source_receipts[
+            "training_source_runtime_receipt"
+        ],
+        t5_runtime_source_receipt=runtime_source_receipts[
+            "t5_runtime_source_receipt"
+        ],
+        verified_private_cache_parent=str(
+            Path(__file__).resolve().parents[1] / ".gwp_op42_robot_private_hf_cache"
+        ),
+        verified_training_run_nonce=gate["training_run_nonce_by_route"][route],
+        production_episode_filter_receipt=_hardened_receipt[
+            "training_data_receipt"
+        ],
+        production_episode_filter_receipt_sha256=_hardened_receipt[
+            "training_data_receipt_sha256"
+        ],
         contact_sidecar_dir=os.environ["GWP_CONTACT_SIDECAR_DIR"],
         contact_sidecar_pattern="episode_{episode_index:06d}.npz",
         contact_sidecar_strict=True,
@@ -275,11 +354,15 @@ config["models"].update(
     causal_precursor_binding=precursor_binding,
     causal_checkpoint_receipt_base=checkpoint_receipt_base,
     matched_control_collector=collector_config,
+    enable_gradient_checkpointing=False,
 )
 config["train"].update(
     seed=training_data_receipt["split_seed"],
     checkpoint_interval=100,
     checkpoint_total_limit=-1,
+    checkpoint_weights_only=True,
+    checkpoint_safe_serialization=True,
+    activation_checkpointing=False,
 )
 if config["train"].get("mixed_precision") != "bf16" or int(
     config["train"].get("max_steps", 0)
@@ -297,6 +380,15 @@ validate_collector_runtime_bindings_v3(
     precursor_binding=precursor_binding,
     sidecar_meta_sha256=gate["artifact_fingerprints"]["sidecar_meta_sha256"],
     source_tree_receipt=source_tree_receipt,
+    runtime_environment_sha256=gate["artifact_fingerprints"][
+        "runtime_environment_sha256"
+    ],
+    dataset_runtime_source_receipt_sha256=runtime_source_receipts[
+        "training_source_runtime_receipt_sha256"
+    ],
+    t5_runtime_source_receipt_sha256=runtime_source_receipts[
+        "t5_runtime_source_receipt_sha256"
+    ],
 )
 
 config["contact_causal_main_integration"] = {
@@ -306,6 +398,7 @@ config["contact_causal_main_integration"] = {
     "route_receipt": build_production_route_receipt(route),
     "precursor_binding": precursor_binding,
     "hardened_contact_asym25_source_replay": hardened_source_replay,
+    "causal_gate_evidence_replay": gate_evidence_replay,
     "gate_path_record_only": str(gate_path),
     "matrix_path_record_only": str(matrix_path),
     "preflight_path_record_only": str(preflight_path),
@@ -313,6 +406,7 @@ config["contact_causal_main_integration"] = {
     "coverage_path_record_only": str(coverage_path),
     "collector_config_path_record_only": str(collector_path),
     "checkpoint_receipt_base_path_record_only": str(checkpoint_base_path),
+    "hardened_preflight_path_record_only": str(hardened_preflight_path),
     "contact_condition_mode": "predicted",
     "oracle_used": False,
     "production_data_admission": False,

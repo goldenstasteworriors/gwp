@@ -495,6 +495,8 @@ class CasualWATrainerMoT(Trainer):
                 or base["precursor"] != self.causal_precursor_binding
                 or base["evidence"]["production_preflight_receipt_sha256"]
                 != self.causal_preflight_receipt_sha256
+                or base["evidence"].get("hardened_preflight_receipt_sha256")
+                is None
                 or base["evidence"]["training_data_receipt_sha256"]
                 != self.causal_training_data_receipt_sha256
                 or base["stable_contract"]["dataset_tree_sha256"]
@@ -876,6 +878,8 @@ class CasualWATrainerMoT(Trainer):
             ):
                 raise ValueError("causal Stage2 initial tensors differ from the precursor")
             self._causal_seen_gradient_names = set()
+            self._causal_action_gradient_names = set()
+            self._causal_action_gradient_probe_completed = False
             for parameter_name, parameter in transformer.named_parameters():
                 if parameter.requires_grad:
                     parameter.register_hook(
@@ -1073,7 +1077,15 @@ class CasualWATrainerMoT(Trainer):
             observed_gradient_parameter_names=(
                 [] if step == 0 else sorted(self._causal_seen_gradient_names)
             ),
+            action_loss_gradient_parameter_names=(
+                [] if step == 0 else sorted(self._causal_action_gradient_names)
+            ),
             unused_step0_tensor_sha256=self._causal_unused_step0_sha256,
+        )
+        if self.matched_control_collector is None:
+            raise ValueError("causal checkpoint requires the live collector")
+        trace_prefix = self.matched_control_collector.current_run_trace_prefix_receipt(
+            through_step=step
         )
         if step == 0:
             parent_sha256 = self.causal_precursor_binding["parameter_tensor_sha256"]
@@ -1095,6 +1107,7 @@ class CasualWATrainerMoT(Trainer):
             parent_checkpoint_weight_sha256=parent_sha256,
             parameter_topology=topology,
             gradient_reachability_receipt=reachability,
+            current_run_trace_prefix_receipt=trace_prefix,
         )
         write_canonical_json_exclusive(
             artifact_dir / "checkpoint_training_receipt.json", receipt
@@ -1107,6 +1120,13 @@ class CasualWATrainerMoT(Trainer):
         if self.cur_step != 0:
             raise ValueError("production step-0 checkpoint must precede optimization")
         self._verify_production_training_source()
+        if self.production_matrix_id and self.matched_control_collector is not None:
+            unwrapped = self.accelerator.unwrap_model(self.models[0])
+            self.matched_control_collector.bind_live_training_state(
+                model=unwrapped["transformer"],
+                optimizers=self.optimizers,
+                schedulers=self.schedulers,
+            )
         output_dir = self._production_checkpoint_dir(0)
         if self.is_main_process:
             if output_dir.exists():
@@ -1124,7 +1144,11 @@ class CasualWATrainerMoT(Trainer):
     def train(self) -> None:
         if self.current_training_data_receipt is not None or self.production_matrix_id:
             self._save_production_initial_checkpoint()
-        super().train()
+        try:
+            super().train()
+        finally:
+            if self.matched_control_collector is not None:
+                self.matched_control_collector.close()
 
     def _verify_production_training_source(self) -> None:
         if self.current_training_source_snapshot is None:
@@ -1149,6 +1173,17 @@ class CasualWATrainerMoT(Trainer):
         )
         if should_save and is_production_evidence_step:
             self._verify_production_training_source()
+        if should_save and (
+            is_production_evidence_step
+            or self.ego_contact_precursor_objective is not None
+        ):
+            guarded_output = Path(self.model_dir) / (
+                f"checkpoint_epoch_{self.cur_epoch}_step_{self.cur_step}"
+            )
+            if self.is_main_process and guarded_output.exists():
+                raise FileExistsError(
+                    f"refusing base-trainer checkpoint overwrite: {guarded_output}"
+                )
         super().save_checkpoint_step()
         if (
             should_save
@@ -1240,16 +1275,6 @@ class CasualWATrainerMoT(Trainer):
         action_noise = torch.randn_like(action) * flow_mask
         action_target = (action_noise - action_for_flow) * flow_mask
         noisy_action = action_noise * action_sigma + action_for_flow * (1 - action_sigma)
-        if self.matched_control_collector is not None:
-            self.matched_control_collector.record(
-                global_step=self.cur_step,
-                batch_dict=batch_dict,
-                visual_timestep=visual_timestep,
-                action_timestep=action_timestep,
-                visual_noise=visual_noise,
-                action_noise=action_noise,
-            )
-
         prompt_embeds = prompt_embeds.to(self.dtype)
         if "ref_images" not in batch_dict:
             raise ValueError("CasualWATrainerMoT requires ref_images in batch_dict")
@@ -1349,6 +1374,47 @@ class CasualWATrainerMoT(Trainer):
                 ):
                     contact_condition_mask = contact_condition_mask.amax(dim=-1)
 
+        time_mask = None
+        if "action_loss_mask" in batch_dict:
+            raw_time_mask = batch_dict["action_loss_mask"]
+            if self.action_repeats > 1:
+                raw_time_mask = raw_time_mask.repeat(1, self.action_repeats)
+            time_mask = _as_time_mask(
+                raw_time_mask,
+                batch_size=bs,
+                seq_len=action.shape[1],
+                device=action.device,
+            )
+        action_loss_weight = batch_dict.get("action_loss_weight")
+        if action_loss_weight is not None and self.action_repeats > 1:
+            action_loss_weight = action_loss_weight.repeat(
+                1, self.action_repeats, 1
+            )
+        if self.matched_control_collector is not None:
+            from world_action_model.contact_causal_matched_control import (
+                capture_pre_forward_rng_v3,
+            )
+
+            self.matched_control_collector.record(
+                global_step=self.cur_step,
+                batch_dict=batch_dict,
+                visual_timestep=visual_timestep,
+                action_timestep=action_timestep,
+                visual_noise=visual_noise,
+                action_noise=action_noise,
+                action_target=action_target,
+                action_loss_mask={
+                    "dimension_mask": dim_mask,
+                    "time_mask": time_mask,
+                    "dimension_weight": action_loss_weight,
+                },
+                state_input=state,
+                state_input_mask=None,
+                embodiment_id=embodiment_id,
+                prompt_t5=prompt_embeds,
+                pre_forward_rng=capture_pre_forward_rng_v3(),
+            )
+
         model_output = transformer(
             ref_latents=ref_latents,
             noisy_latents=noisy_latents,
@@ -1369,22 +1435,6 @@ class CasualWATrainerMoT(Trainer):
 
         visual_loss = ((visual_pred.float() - visual_target.float()) * first_frame_mask).pow(2).mean()
 
-        time_mask = None
-        if "action_loss_mask" in batch_dict:
-            raw_time_mask = batch_dict["action_loss_mask"]
-            if self.action_repeats > 1:
-                raw_time_mask = raw_time_mask.repeat(1, self.action_repeats)
-            time_mask = _as_time_mask(
-                raw_time_mask,
-                batch_size=bs,
-                seq_len=action.shape[1],
-                device=action_pred.device,
-            )
-        action_loss_weight = batch_dict.get("action_loss_weight")
-        if action_loss_weight is not None and self.action_repeats > 1:
-            action_loss_weight = action_loss_weight.repeat(
-                1, self.action_repeats, 1
-            )
         action_loss = masked_weighted_action_mse(
             action_pred.float(),
             action_target.float(),
@@ -1392,6 +1442,39 @@ class CasualWATrainerMoT(Trainer):
             time_mask=time_mask,
             action_loss_weight=action_loss_weight,
         )
+        if self.production_matrix_id and not self._causal_action_gradient_probe_completed:
+            unwrapped = self.accelerator.unwrap_model(self.models[0])["transformer"]
+            planner_parameters = [
+                (name, parameter)
+                for name, parameter in unwrapped.named_parameters()
+                if name.startswith("contact_") and parameter.requires_grad
+            ]
+            if not planner_parameters:
+                raise ValueError("causal production model has no planner parameters")
+            gradients = torch.autograd.grad(
+                action_loss,
+                [parameter for _, parameter in planner_parameters],
+                retain_graph=True,
+                create_graph=False,
+                allow_unused=True,
+            )
+            self._causal_action_gradient_names = {
+                name
+                for (name, _), gradient in zip(
+                    planner_parameters, gradients, strict=True
+                )
+                if gradient is not None
+            }
+            expected_names = (
+                set()
+                if self.production_causal_route_id == "aux_only_direct_q12"
+                else {name for name, _ in planner_parameters}
+            )
+            if self._causal_action_gradient_names != expected_names:
+                raise ValueError(
+                    "live action-loss-to-planner gradient reachability differs from the causal route"
+                )
+            self._causal_action_gradient_probe_completed = True
         losses = {
             "visual_loss": visual_loss,
             "action_loss": action_loss,

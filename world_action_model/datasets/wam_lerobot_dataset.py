@@ -86,6 +86,7 @@ class WAMLeRobotDataset(BaseDataset):
         hand_active_contact_ground_truth: bool = False,
         grip_contact_ground_truth: bool = False,
         other_proxy_contact_ground_truth: bool = False,
+        action_fields_record_only_not_scientific_io: bool = False,
         ego_hand_active_sidecar_dir: str | None = None,
         ego_hand_active_sidecar_pattern: str = "episode_{episode_index:06d}.npz",
         ego_hand_active_sidecar_cache_size: int = 8,
@@ -205,6 +206,9 @@ class WAMLeRobotDataset(BaseDataset):
         )
         self.contact_label_origin = contact_label_origin
         self.contact_human_adjudicated_only = bool(contact_human_adjudicated_only)
+        self.action_fields_record_only_not_scientific_io = bool(
+            action_fields_record_only_not_scientific_io
+        )
         proxy_flags = {
             "action": action_contact_ground_truth,
             "hand_active": hand_active_contact_ground_truth,
@@ -354,6 +358,8 @@ class WAMLeRobotDataset(BaseDataset):
                 or meta.get("num_queries") != 12
                 or meta.get("builder_identity")
                 != "scripts/contact_labels/build_contact_segment_sidecars_v1_1.py"
+                or meta.get("episode_npz_sha256")
+                != self.contact_sidecar_expected_episode_sha256
                 or meta.get("annotation_contract")
                 != {
                     "annotation_role": "adjudicated",
@@ -363,6 +369,12 @@ class WAMLeRobotDataset(BaseDataset):
                 }
             ):
                 raise ValueError("contact sidecar meta is not reviewed contact_segment_v1_1")
+            if self.matched_control_identity and (
+                meta.get("dataset_id") != self.matched_control_dataset_id
+            ):
+                raise ValueError(
+                    "reviewed sidecar dataset identity differs from matched-control data"
+                )
             if self.contact_human_adjudicated_only and (
                 meta["annotation_contract"]["label_origin"] != "human_adjudicated"
                 or meta["annotation_contract"]["automatic_or_proposal_ground_truth"]
@@ -544,6 +556,40 @@ class WAMLeRobotDataset(BaseDataset):
                 if self.robotype is None:
                     raise KeyError(f"missing robotype in meta/info.* under {self.data_path}")
             self._init_t5_source()
+
+    def open_target_free_inference_view(self) -> None:
+        """Open a column-projected Arrow view that never reads action/contact targets."""
+
+        self.open()
+        if self.dataset is None or self.dataset.hf_dataset is None:
+            raise ValueError("target-free inference requires an opened LeRobot dataset")
+        if getattr(self, "_target_free_inference_projection", False):
+            return
+        source_columns = list(self.dataset.hf_dataset.column_names)
+        forbidden = {
+            name
+            for name in source_columns
+            if name == "action"
+            or name.startswith("action_")
+            or name.startswith("contact_")
+        }
+        if "action" not in forbidden:
+            raise ValueError(
+                "target-free inference cannot prove removal of the action source column"
+            )
+        retained = [name for name in source_columns if name not in forbidden]
+        if not retained:
+            raise ValueError("target-free inference projection removed every source column")
+        self.dataset.hf_dataset = self.dataset.hf_dataset.select_columns(retained)
+        if any(
+            name == "action"
+            or name.startswith("action_")
+            or name.startswith("contact_")
+            for name in self.dataset.hf_dataset.column_names
+        ):
+            raise ValueError("target-free inference source projection retained a target")
+        self._target_free_inference_projection = True
+        self._target_free_removed_source_columns = tuple(sorted(forbidden))
 
     @staticmethod
     def _split_main_subtask(task_text) -> tuple[str | None, str | None]:
