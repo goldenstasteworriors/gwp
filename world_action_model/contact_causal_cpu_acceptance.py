@@ -67,6 +67,7 @@ from world_action_model.contact_causal_production import (
     SEEDS,
     SUPERVISION_VERSION,
     build_production_route_receipt,
+    checkpoint_transformer_semantic_config,
     build_live_training_state_receipts,
     compare_same_seed_route_contracts,
     ensure_exact_causal_route,
@@ -426,6 +427,254 @@ def _actual_tiny_model_topology_and_precursor(workspace: Path, head: str) -> Non
     validate_precursor_receipt(receipt)
     if bundle["file_count"] != 2:
         raise AssertionError("precursor bundle is not config + one safe weight file")
+
+
+def _trainer_first_batch_three_route_acceptance() -> dict[str, Any]:
+    """Run the real causal trainer forward/backward with the real tiny model."""
+
+    import sys
+    import types
+
+    trainer_package = types.ModuleType("world_action_model.trainer")
+    trainer_package.__path__ = [
+        str(Path(__file__).parent / "trainer")
+    ]
+    sys.modules["world_action_model.trainer"] = trainer_package
+    giga_train = types.ModuleType("giga_train")
+    giga_train.ModuleDict = torch.nn.ModuleDict
+    giga_train.Trainer = object
+    sys.modules["giga_train"] = giga_train
+    giga_models = types.ModuleType("giga_models")
+    giga_models_utils = types.ModuleType("giga_models.utils")
+    giga_models.utils = giga_models_utils
+    sys.modules["giga_models"] = giga_models
+    sys.modules["giga_models.utils"] = giga_models_utils
+
+    from world_action_model.contact_supervision_contract import (
+        CONTACT_GROUPED_SUPERVISION_ZERO_SAFE_VERSION,
+    )
+    from world_action_model.contact_transition_schema import (
+        SEGMENT_SCHEMA_VERSION,
+        SEGMENT_TARGET_DIM,
+    )
+    from world_action_model.trainer.wa_casual_trainer_mot import (
+        CasualWATrainerMoT,
+    )
+
+    class _NamedModel:
+        def __init__(self, transformer):
+            self.transformer = transformer
+            self.forward_conditions = []
+
+        def __call__(self, name, **kwargs):
+            if name != "transformer":
+                raise AssertionError("trainer requested an unexpected model")
+            self.forward_conditions.append(
+                (
+                    kwargs.get("contact_condition"),
+                    kwargs.get("contact_condition_mask"),
+                )
+            )
+            return self.transformer(**kwargs)
+
+    class _Accelerator:
+        @staticmethod
+        def unwrap_model(value):
+            return value
+
+    def _model(route: str) -> CasualWorldActionTransformer_MoT:
+        direct = route == "aux_only_direct_q12"
+        return CasualWorldActionTransformer_MoT(
+            patch_size=(1, 2, 2),
+            num_attention_heads=2,
+            attention_head_dim=8,
+            in_channels=4,
+            out_channels=4,
+            text_dim=8,
+            freq_dim=8,
+            ffn_dim=32,
+            num_layers=1,
+            action_expert_dim=32,
+            action_ffn_dim=64,
+            in_action_channels=4,
+            out_action_channels=4,
+            num_embodiments=1,
+            num_contact_tokens=12,
+            contact_target_dim=SEGMENT_TARGET_DIM,
+            contact_condition_dim=SEGMENT_TARGET_DIM,
+            contact_bottleneck=not direct,
+            contact_schema_version=SEGMENT_SCHEMA_VERSION,
+            contact_semantic_bottleneck=not direct,
+            contact_semantic_transport_mode="hard_st",
+            contact_time_bins=16,
+            contact_causal_route=route,
+            production_matrix_id=MATRIX_ID,
+        ).train()
+
+    report = {}
+    for route_index, route in enumerate(CAUSAL_ROUTES):
+        torch.manual_seed(42_000 + route_index)
+        model = _model(route)
+        trainer = CasualWATrainerMoT.__new__(CasualWATrainerMoT)
+        named_model = _NamedModel(model)
+        trainer.model = named_model
+        trainer.models = [{"transformer": model}]
+        trainer.accelerator = _Accelerator()
+        trainer.dtype = torch.float32
+        trainer.ego_contact_precursor_objective = None
+        trainer.expand_timesteps = True
+        trainer.visual_flow_shift = 5.0
+        trainer.action_flow_shift = 5.0
+        trainer.state_repeats = 1
+        trainer.action_repeats = 1
+        trainer.matched_control_collector = None
+        trainer.cur_step = 1
+        trainer.production_matrix_id = MATRIX_ID
+        trainer.production_causal_route_id = route
+        trainer.contact_causal_route = route
+        trainer.contact_condition_mode = "predicted"
+        trainer.contact_schema_version = SEGMENT_SCHEMA_VERSION
+        trainer.contact_supervision_rule_version = (
+            CONTACT_GROUPED_SUPERVISION_ZERO_SAFE_VERSION
+        )
+        trainer.require_positive_contact_supervision = False
+        trainer.require_contact_targets = True
+        trainer.contact_loss_type = "bce"
+        trainer.contact_loss_weight = 1.0
+        trainer._causal_action_gradient_probe_completed = False
+        trainer._causal_action_gradient_names = set()
+
+        def _forward_vae(images):
+            return torch.zeros(
+                images.shape[0], 4, images.shape[1], 2, 2, dtype=torch.float32
+            )
+
+        def _get_timestep_and_sigma(batch_size, ndim, _flow_shift):
+            return (
+                torch.full((batch_size,), 500.0, dtype=torch.float32),
+                torch.full(
+                    (batch_size,) + (1,) * (ndim - 1),
+                    0.5,
+                    dtype=torch.float32,
+                ),
+            )
+
+        trainer.forward_vae = _forward_vae
+        trainer.get_timestep_and_sigma = _get_timestep_and_sigma
+        target = torch.zeros(1, 12, SEGMENT_TARGET_DIM)
+        mask = torch.ones_like(target)
+        confidence = torch.ones_like(target)
+        batch = {
+            "images": torch.zeros(1, 2, 3, 2, 2),
+            "ref_images": torch.zeros(1, 1, 3, 2, 2),
+            "prompt_embeds": torch.zeros(1, 2, 8),
+            "action": torch.zeros(1, 3, 4),
+            "state": torch.zeros(1, 2, 4),
+            "embodiment_id": torch.zeros(1, dtype=torch.long),
+            "action_dim_mask": torch.ones(4, dtype=torch.bool),
+            "action_loss_mask": torch.ones(3, dtype=torch.bool),
+            "contact_target": target,
+            "contact_loss_mask": mask,
+            "contact_confidence": confidence,
+        }
+        rejected = dict(batch)
+        rejected["contact_condition_mask"] = torch.ones_like(target)
+        try:
+            trainer.forward_step(rejected)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"causal trainer accepted a model-side condition mask: {route}"
+            )
+
+        step0_sha = named_tensor_digest(list(model.named_parameters()))
+        direct_unused = [
+            (name, parameter)
+            for name, parameter in model.named_parameters()
+            if name.startswith("contact_condition_encoder.")
+        ]
+        unused_step0_sha = named_tensor_digest(direct_unused)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=lambda _: 1.0
+        )
+        optimizer.zero_grad(set_to_none=True)
+        losses = trainer.forward_step(batch)
+        if set(losses) != {"visual_loss", "action_loss", "contact_loss"}:
+            raise AssertionError(f"causal first batch loss schema differs: {route}")
+        total = sum(losses.values())
+        if not torch.isfinite(total):
+            raise AssertionError(f"causal first batch produced a nonfinite loss: {route}")
+        total.backward()
+        observed = sorted(
+            name
+            for name, parameter in model.named_parameters()
+            if parameter.grad is not None
+        )
+        optimizer.step()
+        scheduler.step()
+        parameter_names_by_id = {
+            id(parameter): name for name, parameter in model.named_parameters()
+        }
+        optimizer_state_names = {
+            parameter_names_by_id[id(parameter)] for parameter in optimizer.state
+        }
+        expected_optimizer_state_names = set(observed)
+        if optimizer_state_names != expected_optimizer_state_names:
+            raise AssertionError(
+                f"causal live optimizer state coverage differs for {route}: "
+                f"missing={sorted(expected_optimizer_state_names - optimizer_state_names)} "
+                f"extra={sorted(optimizer_state_names - expected_optimizer_state_names)}"
+            )
+        topology, reachability = build_live_training_state_receipts(
+            model=model,
+            optimizers=[optimizer],
+            schedulers=[scheduler],
+            route=route,
+            checkpoint_step=100,
+            step0_parameter_tensor_sha256=step0_sha,
+            observed_gradient_parameter_names=observed,
+            action_loss_gradient_parameter_names=sorted(
+                trainer._causal_action_gradient_names
+            ),
+            unused_step0_tensor_sha256=unused_step0_sha,
+        )
+        if any(
+            condition is not None
+            for pair in named_model.forward_conditions
+            for condition in pair
+        ):
+            raise AssertionError(f"causal model received a condition input: {route}")
+        report[route] = {
+            "losses": sorted(losses),
+            "action_loss_gradient_parameter_count": len(
+                trainer._causal_action_gradient_names
+            ),
+            "live_optimizer_state_parameter_count": len(
+                topology["optimizer_state_parameter_names"]
+            ),
+            "active_parameter_count": reachability[
+                "active_gradient_parameter_count"
+            ],
+            "model_condition_inputs_all_none": True,
+            "condition_mask_negative_rejected": True,
+        }
+    return {
+        "status": "passed",
+        "actual_trainer_module": str(
+            Path(__import__(
+                "world_action_model.trainer.wa_casual_trainer_mot",
+                fromlist=["__file__"],
+            ).__file__).absolute()
+        ),
+        "stub_scope": {
+            "giga_train": "base Trainer/ModuleDict import only; forward_step is real",
+            "giga_models": "unused get_models import only",
+            "world_action_model.trainer": "package_init_only",
+        },
+        "routes": report,
+    }
 
 
 class _TinyCausalCheckpointModel(torch.nn.Module):
@@ -1585,6 +1834,7 @@ def run_cpu_acceptance(repository_root: str | Path) -> dict[str, Any]:
         _capacity_and_direct_claims()
         head = _git_bytes(root, "rev-parse", "HEAD").decode("ascii").strip()
         _actual_tiny_model_topology_and_precursor(workspace, head)
+        trainer_first_batch_report = _trainer_first_batch_three_route_acceptance()
         _zero_safe_supervision()
         collector_report_sha256 = _collector_v3_acceptance()
         _collector_runtime_binding_acceptance(root, head)
@@ -1626,8 +1876,7 @@ def run_cpu_acceptance(repository_root: str | Path) -> dict[str, Any]:
                     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
                     config = {
                         "_class_name": "SyntheticCausalCheckpoint",
-                        "contact_causal_route": route,
-                        "production_matrix_id": MATRIX_ID,
+                        **checkpoint_transformer_semantic_config(route),
                     }
                     (checkpoint_path.parent / "config.json").write_bytes(
                         json.dumps(
@@ -1838,6 +2087,7 @@ def run_cpu_acceptance(repository_root: str | Path) -> dict[str, Any]:
             "legacy_protected_sha256": sha256_json(protected),
             "protected_op38_route_audit_sha256": op38_report["report_sha256"],
             "causal_collector_v3_report_sha256": collector_report_sha256,
+            "trainer_first_batch_three_route": trainer_first_batch_report,
             "synthetic_checkpoint_file_count": 27,
             "synthetic_checkpoint_files_nonempty": True,
             "synthetic_checkpoint_files_are_loadable_torch_weights": True,

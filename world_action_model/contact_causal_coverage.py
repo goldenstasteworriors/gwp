@@ -373,6 +373,8 @@ def real_loader_synthetic_instantiation_helper(
         raise FileExistsError("synthetic loader acceptance root already exists")
     data_root = root / "dataset"
     sidecar_root = root / "sidecar"
+    loader = None
+    inference_loader = None
 
     def write_exclusive(path: Path, payload: bytes) -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -576,6 +578,33 @@ def real_loader_synthetic_instantiation_helper(
             raise AssertionError(
                 "real loader open/sample did not replay all verified causal inputs"
             )
+        from world_action_model.contact_supervision_contract import (
+            select_contact_supervision_inputs,
+        )
+
+        predicted_supervision = select_contact_supervision_inputs(
+            loaded_batch, emit_contact_condition_inputs=False
+        )
+        if set(predicted_supervision) != {
+            "contact_target",
+            "contact_loss_mask",
+            "contact_confidence",
+        }:
+            raise AssertionError(
+                "predicted-route transform selection leaked a condition input"
+            )
+        oracle_probe = dict(loaded_batch)
+        oracle_probe["contact_condition"] = loaded_batch["contact_target"]
+        try:
+            select_contact_supervision_inputs(
+                oracle_probe, emit_contact_condition_inputs=False
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                "predicted-route transform accepted an oracle contact condition"
+            )
         result = {
             "loader_class": type(loader).__name__,
             "runtime_loader_class": type(loader.dataset).__name__,
@@ -590,6 +619,8 @@ def real_loader_synthetic_instantiation_helper(
             "episode_sidecar_sha256": episode_sha,
             "loaded_contact_shape": list(loaded_batch["contact_target"].shape),
             "loaded_t5_shape": list(loaded_batch["t5_embedding"].shape),
+            "predicted_contact_supervision_keys": sorted(predicted_supervision),
+            "oracle_contact_condition_rejected": True,
         }
         loader.close()
         loader = None
@@ -602,6 +633,10 @@ def real_loader_synthetic_instantiation_helper(
             t5_runtime_source_receipt=[t5_entry],
             verified_private_cache_parent=str(private_cache_parent),
             verified_training_run_nonce="synthetic-inference-run-nonce-v1",
+            source_column_projection=(
+                "index", "episode_index", "frame_index", "timestamp",
+                "task_index", "observation.state",
+            ),
             robotype="sonic_g1_asymmetric25",
         )
         inference_loader.open_target_free_inference_view()
@@ -620,6 +655,9 @@ def real_loader_synthetic_instantiation_helper(
                 "target-free real loader projection read an action/contact target"
             )
         result["target_free_source_projection_sampled"] = True
+        result["target_free_arrow_schema"] = list(
+            inference_loader._target_free_source_columns
+        )
         result["target_free_removed_columns"] = list(
             inference_loader._target_free_removed_source_columns
         )
@@ -639,8 +677,18 @@ def real_loader_synthetic_instantiation_helper(
             "episode_sidecar_sha256": episode_sha,
             "loaded_contact_shape": [12, SEGMENT_TARGET_DIM],
             "loaded_t5_shape": [1, 4096],
+            "predicted_contact_supervision_keys": [
+                "contact_confidence",
+                "contact_loss_mask",
+                "contact_target",
+            ],
+            "oracle_contact_condition_rejected": True,
             "target_free_source_projection_sampled": True,
             "target_free_removed_columns": ["action"],
+            "target_free_arrow_schema": [
+                "index", "episode_index", "frame_index", "timestamp",
+                "task_index", "observation.state",
+            ],
         }:
             raise AssertionError("real loader lost causal admission fields")
         return result

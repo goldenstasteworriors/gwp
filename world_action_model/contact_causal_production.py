@@ -832,17 +832,32 @@ def validate_parameter_topology(value: object, *, route: str, step: int) -> dict
         raise CausalProductionError("unused parameter allowlist is invalid")
     if unused != sorted(set(unused)) or sha256_json(unused) != receipt["unused_parameter_names_sha256"]:
         raise CausalProductionError("unused parameter allowlist digest differs")
-    if route == "aux_only_direct_q12":
-        if unused != list(DIRECT_UNUSED_PARAMETER_NAMES):
-            raise CausalProductionError("direct unused set must be exactly contact_condition_encoder.*")
-        if (
-            receipt["unused_parameters_have_grad"] is not False
-            or receipt["unused_parameters_have_optimizer_state"] is not False
-            or receipt["unused_parameters_changed_from_step0"] is not False
-        ):
-            raise CausalProductionError("direct unused parameters acquired grad/state/drift")
-    elif unused:
-        raise CausalProductionError("strict routes must not declare route-local unused parameters")
+    direct_unused = set(DIRECT_UNUSED_PARAMETER_NAMES)
+    if step == 0:
+        expected_step0_unused = (
+            list(DIRECT_UNUSED_PARAMETER_NAMES)
+            if route == "aux_only_direct_q12"
+            else []
+        )
+        if unused != expected_step0_unused:
+            raise CausalProductionError("step-0 route-unused set differs")
+    elif route == "aux_only_direct_q12":
+        if not direct_unused.issubset(unused):
+            raise CausalProductionError(
+                "direct route did not retain its exact 22-to-action inactive set"
+            )
+    elif direct_unused & set(unused):
+        raise CausalProductionError(
+            "strict route declared its 22-to-action encoder inactive"
+        )
+    if (
+        receipt["unused_parameters_have_grad"] is not False
+        or receipt["unused_parameters_have_optimizer_state"] is not False
+        or receipt["unused_parameters_changed_from_step0"] is not False
+    ):
+        raise CausalProductionError(
+            "inactive parameters acquired grad/state or route-unused drift"
+        )
     if step > 0:
         expected_state_names = sorted(parameter_name_set - set(unused))
         if state_names != expected_state_names:
@@ -1212,9 +1227,11 @@ def validate_training_receipt_v5(value: object) -> dict[str, Any]:
         raise CausalProductionError(
             "active-gradient parameter count differs from the live active set"
         )
+    expected_no_action_gradient = direct or receipt["checkpoint_step"] == 0
     if (
-        action_gradient
-        != ([] if direct or receipt["checkpoint_step"] == 0 else planner_names)
+        any(name not in planner_names or name not in active for name in action_gradient)
+        or (expected_no_action_gradient and action_gradient)
+        or (not expected_no_action_gradient and not action_gradient)
         or reachability["action_loss_reaches_planner"] is not bool(action_gradient)
         or reachability["unused_parameter_names"]
         != receipt["parameter_topology"]["unused_parameter_names"]
@@ -1322,6 +1339,9 @@ def verify_checkpoint_file(receipt: Mapping[str, Any]) -> None:
     validate_weight_mapping_against_topology(
         entry["path_record_only"], receipt["parameter_topology"]
     )
+    validate_checkpoint_transformer_semantics(
+        inspected["config"], route=receipt["route"]["causal_route_id"]
+    )
     if (
         inspected["weight_file_sha256"] != entry["sha256"]
         or inspected["weight_file_size_bytes"] != entry["size_bytes"]
@@ -1339,6 +1359,63 @@ def verify_checkpoint_file(receipt: Mapping[str, Any]) -> None:
     ):
         raise CausalProductionError(
             "checkpoint safe tensor/config/bundle bytes changed"
+        )
+
+
+def checkpoint_transformer_semantic_config(route: str) -> dict[str, Any]:
+    """Return the exact constructor semantics shared by all admitted checkpoints."""
+
+    route = ensure_exact_causal_route(route)
+    direct = route == "aux_only_direct_q12"
+    return {
+        "added_kv_proj_dim": None,
+        "attention_head_dim": 128,
+        "cross_attn_norm": True,
+        "eps": 1e-6,
+        "ffn_dim": 14336,
+        "freq_dim": 256,
+        "image_dim": None,
+        "in_channels": 48,
+        "num_attention_heads": 24,
+        "num_layers": 30,
+        "out_channels": 48,
+        "patch_size": [1, 2, 2],
+        "pos_embed_seq_len": None,
+        "qk_norm": "rms_norm_across_heads",
+        "rope_max_seq_len": 1024,
+        "text_dim": 4096,
+        "action_expert_dim": 1024,
+        "action_ffn_dim": 4096,
+        "in_action_channels": 32,
+        "out_action_channels": 32,
+        "num_embodiments": 2,
+        "num_contact_tokens": 12,
+        "contact_target_dim": 22,
+        "contact_condition_dim": 22,
+        "contact_bottleneck": not direct,
+        "contact_schema_version": SEGMENT_SCHEMA_VERSION,
+        "contact_semantic_bottleneck": not direct,
+        "contact_planner_num_heads": 8,
+        "contact_semantic_transport_mode": "hard_st",
+        "contact_time_bins": 16,
+        "contact_causal_route": route,
+        "contact_planner_precursor": False,
+        "production_matrix_id": MATRIX_ID,
+    }
+
+
+def validate_checkpoint_transformer_semantics(
+    config: Mapping[str, Any], *, route: str
+) -> None:
+    """Bind every constructor field that changes production forward semantics."""
+
+    expected = checkpoint_transformer_semantic_config(route)
+    if any(config.get(name) != value for name, value in expected.items()):
+        differing = sorted(
+            name for name, value in expected.items() if config.get(name) != value
+        )
+        raise CausalProductionError(
+            "checkpoint transformer semantic config differs: " + ",".join(differing)
         )
 
 
@@ -1456,16 +1533,31 @@ def build_live_training_state_receipts(
         {"name": name, "shape": list(tensor.shape), "dtype": str(tensor.dtype)}
         for name, tensor in sorted(named_buffers.items())
     ]
-    if route == "aux_only_direct_q12":
-        unused = [name for name in named_parameters if name.startswith("contact_condition_encoder.")]
-        unused.sort()
-        if unused != list(DIRECT_UNUSED_PARAMETER_NAMES):
-            raise CausalProductionError("live direct unused parameter set differs")
+    direct_route_unused = sorted(
+        name
+        for name in named_parameters
+        if name.startswith("contact_condition_encoder.")
+    )
+    if direct_route_unused != list(DIRECT_UNUSED_PARAMETER_NAMES):
+        raise CausalProductionError(
+            "live causal model route-unused parameter schema differs"
+        )
+    observed = sorted(set(observed_gradient_parameter_names))
+    if checkpoint_step == 0:
+        unused = (
+            direct_route_unused if route == "aux_only_direct_q12" else []
+        )
     else:
-        unused = []
+        unused = sorted(set(named_parameters) - set(observed))
+    if route == "aux_only_direct_q12":
+        if not set(direct_route_unused).issubset(unused):
+            raise CausalProductionError("live direct unused parameter set differs")
+    elif set(direct_route_unused) & set(unused):
+        raise CausalProductionError(
+            "strict route did not activate its 22-to-action encoder"
+        )
     parameter_names = sorted(named_parameters)
     active = sorted(set(parameter_names) - set(unused))
-    observed = sorted(set(observed_gradient_parameter_names))
     action_gradient = sorted(set(action_loss_gradient_parameter_names))
     if any(name not in parameter_names for name in observed):
         raise CausalProductionError("observed gradient name is absent from live model")
@@ -1522,8 +1614,8 @@ def build_live_training_state_receipts(
             {"scheduler_index": index, "state": _runtime_state_receipt(state)}
         )
     parameter_sha256, buffer_sha256 = model_parameter_and_buffer_digests(model)
-    unused_current_sha256 = named_tensor_digest(
-        [(name, named_parameters[name]) for name in unused]
+    direct_unused_current_sha256 = named_tensor_digest(
+        [(name, named_parameters[name]) for name in direct_route_unused]
     )
     topology = {
         "persistent_parameter_schema": parameter_schema,
@@ -1551,8 +1643,8 @@ def build_live_training_state_receipts(
         ),
         "unused_parameters_have_optimizer_state": bool(set(unused) & set(state_names)),
         "unused_parameters_changed_from_step0": (
-            bool(unused)
-            and unused_current_sha256 != unused_step0_tensor_sha256
+            route == "aux_only_direct_q12"
+            and direct_unused_current_sha256 != unused_step0_tensor_sha256
         ),
     }
     reachability = {
@@ -1769,6 +1861,10 @@ def validate_acceptance_v3(value: object, *, receipt: Mapping[str, Any]) -> dict
         != receipt["checkpoint_file"]["current_run_trace_prefix_receipt"][
             "receipt_sha256"
         ]
+        or acceptance["matched_control_report_sha256"]
+        != receipt["evidence"]["matched_control_receipt_sha256"]
+        or acceptance["matched_control_trace_manifest_sha256"]
+        != receipt["evidence"]["trace_manifest_sha256"]
         or acceptance["current_head_source_receipt_sha256"]
         != receipt["evidence"]["current_head_source_receipt_sha256"]
         or acceptance["reviewed_current_head_sha256"] != receipt["stable_contract"]["git_commit"]
@@ -1944,8 +2040,12 @@ def verify_acceptance_bound_artifacts_v3(
     parameter_names = precursor["parameter_partition"]["all_parameter_names"]
     if (
         precursor_sha != acceptance["precursor_receipt_bytes_sha256"]
+        or precursor_sha
+        != gate["artifact_fingerprints"]["precursor_receipt_bytes_sha256"]
         or precursor_bundle["bundle_manifest"]["bundle_sha256"]
         != acceptance["precursor_bundle_sha256"]
+        or precursor_bundle["bundle_manifest"]["bundle_sha256"]
+        != gate["artifact_fingerprints"]["precursor_bundle_sha256"]
         or not set(parameter_names).issubset(precursor_mapping)
         or named_tensor_digest(
             [(name, precursor_mapping[name]) for name in parameter_names]
@@ -2020,6 +2120,9 @@ def verify_acceptance_bound_artifacts_v3(
         report_sha != acceptance["matched_control_report_sha256"]
         or report["trace_manifest_sha256"]
         != acceptance["matched_control_trace_manifest_sha256"]
+        or report_sha != receipt["evidence"]["matched_control_receipt_sha256"]
+        or report["trace_manifest_sha256"]
+        != receipt["evidence"]["trace_manifest_sha256"]
         or report != compare_causal_records(traces, required_seed=receipt["seed"])
     ):
         raise CausalProductionError("accepted current-run matched-control replay changed")
@@ -2265,6 +2368,7 @@ def validate_27_checkpoint_matrix(
                             )
             equal = same_step[1]
             semantic = same_step[2]
+            direct = same_step[0]
             for field in (
                 "persistent_parameter_schema",
                 "persistent_parameter_schema_sha256",
@@ -2300,6 +2404,39 @@ def validate_27_checkpoint_matrix(
                     raise CausalProductionError(
                         "equal-bit and semantic gradient reachability differs"
                     )
+            direct_reachability = direct["gradient_reachability_receipt"]
+            strict_reachability = equal["gradient_reachability_receipt"]
+            direct_only = set(DIRECT_UNUSED_PARAMETER_NAMES)
+            if (
+                set(direct_reachability["inactive_parameter_names"])
+                != set(strict_reachability["inactive_parameter_names"])
+                | direct_only
+                or set(direct_reachability["active_parameter_names"])
+                != set(strict_reachability["active_parameter_names"])
+                - direct_only
+            ):
+                raise CausalProductionError(
+                    "direct active/inactive difference exceeds the exact 22-to-action allowlist"
+                )
+            if step > 0 and (
+                set(direct_reachability["observed_gradient_parameter_names"])
+                != set(strict_reachability["observed_gradient_parameter_names"])
+                - direct_only
+                or set(
+                    direct["parameter_topology"][
+                        "optimizer_state_parameter_names"
+                    ]
+                )
+                != set(
+                    equal["parameter_topology"][
+                        "optimizer_state_parameter_names"
+                    ]
+                )
+                - direct_only
+            ):
+                raise CausalProductionError(
+                    "direct optimizer/gradient population difference exceeds the exact allowlist"
+                )
     return {
         "matrix_report_version": MATRIX_REPORT_VERSION,
         "matrix_schema_version": MATRIX_SCHEMA_VERSION,

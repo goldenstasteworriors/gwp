@@ -18,6 +18,9 @@ from world_action_model.ego_action_schema import (
 )
 from world_action_model.ego_hand_active_sidecar import build_future_action_time_mask
 from world_action_model.asymmetric_action_schema import ASYMMETRIC_SCHEMA_ID
+from world_action_model.contact_supervision_contract import (
+    select_contact_supervision_inputs,
+)
 from world_action_model.matched_control_hashes import (
     SAMPLE_AUGMENTATION_KEY,
     SAMPLE_DATA_PATH_KEY,
@@ -68,6 +71,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         max_prompt_len=64,
         subtask_prob=0,
         matched_control_capture=False,
+        emit_contact_condition_inputs=True,
         eval_crop_mode="legacy_random",
     ):
         if norm_path is None:
@@ -243,6 +247,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         self.subtask_prob = float(subtask_prob)
         self.image_augmentation = dict(image_augmentation or {})
         self.matched_control_capture = bool(matched_control_capture)
+        self.emit_contact_condition_inputs = bool(emit_contact_condition_inputs)
         self.eval_crop_mode = str(eval_crop_mode)
         if self.eval_crop_mode not in {"legacy_random", "center"}:
             raise ValueError(
@@ -984,15 +989,12 @@ class WALeRobotTransformsPretrain(WATransforms):
         # action chunk by the dataset.  Keep them geometry-free and pass them
         # through without action normalization; confidence/masks are consumed
         # directly by CasualWATrainerMoT.
-        for key in (
-            "contact_target",
-            "contact_loss_mask",
-            "contact_confidence",
-            "contact_condition",
-            "contact_condition_mask",
-        ):
-            if key in data_dict and data_dict[key] is not None:
-                out[key] = torch.as_tensor(data_dict[key], dtype=torch.float32)
+        out.update(
+            select_contact_supervision_inputs(
+                data_dict,
+                emit_contact_condition_inputs=self.emit_contact_condition_inputs,
+            )
+        )
 
         keys = list(out.keys())
         for k in keys:

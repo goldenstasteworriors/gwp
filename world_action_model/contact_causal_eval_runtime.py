@@ -20,7 +20,10 @@ from world_action_model.contact_asym25_heldout_eval import (
     MODEL_ACTION_DIM,
     HeldoutEvaluationError,
 )
-from world_action_model.contact_causal_production import ensure_exact_causal_route
+from world_action_model.contact_causal_production import (
+    ensure_exact_causal_route,
+    validate_checkpoint_transformer_semantics,
+)
 from world_action_model.contact_causal_heldout_eval import (
     INFERENCE_PACKET_KEYS,
     validate_target_free_inference_packet,
@@ -40,6 +43,169 @@ METRIC_TARGET_PACKET_KEYS = frozenset(
         "contact_condition_mask",
     }
 )
+
+
+class CausalMetricTargetReader:
+    """Verified target-only reader used after the prediction process exits."""
+
+    def __init__(
+        self,
+        *,
+        preflight_receipt: Mapping[str, Any],
+        verified_private_cache_parent: str,
+        verified_run_nonce: str,
+    ) -> None:
+        import torch
+
+        from world_action_model.asymmetric_action_schema import (
+            ASYMMETRIC_SCHEMA_ID,
+        )
+        from world_action_model.contact_asym25_heldout_eval import MODEL_ACTION_DIM
+        from world_action_model.contact_causal_preflight import (
+            build_robot_runtime_source_receipts_v1,
+        )
+        from world_action_model.datasets.wam_lerobot_dataset import WAMLeRobotDataset
+        from world_action_model.transforms.wa_transforms_lerobot_pretrain import (
+            WALeRobotTransformsPretrain,
+        )
+
+        self.torch = torch
+        self.preflight = dict(preflight_receipt)
+        data_root = Path(self.preflight["data_root"])
+        runtime_sources = build_robot_runtime_source_receipts_v1(
+            hardened_preflight_receipt=self.preflight,
+            t5_embedding_dir=data_root / "t5_embedding",
+        )
+        self.dataset = WAMLeRobotDataset(
+            data_path=str(data_root),
+            data_size=None,
+            delta_info={"action": HORIZON_FRAMES},
+            force_cache_sync=False,
+            training_source_runtime_receipt=runtime_sources[
+                "training_source_runtime_receipt"
+            ],
+            t5_runtime_source_receipt=runtime_sources["t5_runtime_source_receipt"],
+            verified_private_cache_parent=verified_private_cache_parent,
+            verified_training_run_nonce=verified_run_nonce,
+            source_column_projection=(
+                "index",
+                "episode_index",
+                "frame_index",
+                "timestamp",
+                "task_index",
+                "observation.state",
+                "action",
+            ),
+            source_column_projection_allow_targets=True,
+            skip_video_decoding=True,
+            video_backend="pyav",
+            t5_load_from="dir",
+            t5_cfg={
+                "t5_embedding_dir": str(data_root / "t5_embedding"),
+                "t5_embedding_pattern": "episode_{episode_index:06d}.pt",
+                "t5_embedding_key": "t5_embedding",
+            },
+            t5_cache_size=128,
+            contact_sidecar_dir=self.preflight["sidecar_dir"],
+            contact_sidecar_pattern="episode_{episode_index:06d}.npz",
+            contact_sidecar_cache_size=8,
+            contact_sidecar_strict=True,
+            contact_sidecar_require_reviewed_v1_1=True,
+            contact_sidecar_expected_meta_sha256=self.preflight[
+                "sidecar_meta_sha256"
+            ],
+            contact_sidecar_expected_episode_sha256=self.preflight[
+                "episode_npz_sha256"
+            ],
+            robotype="sonic_g1_asymmetric25",
+        )
+        norm_path = Path(self.preflight["norm_stats_path"])
+        self.transform = WALeRobotTransformsPretrain(
+            is_train=False,
+            eval_crop_mode="center",
+            dst_size=(320, 384),
+            num_frames=HORIZON_FRAMES,
+            fps=float(self.preflight["dataset_fps"]),
+            norm_path=[{
+                "path": str(norm_path),
+                "data_paths": [str(data_root)],
+                "sha256": self.preflight["norm_stats_sha256"],
+            }],
+            robotype_to_embodiment_id={"sonic_g1_asymmetric25": 0},
+            robotype_default_embodiment_id=0,
+            model_action_dim=MODEL_ACTION_DIM,
+            delta_mask_by_embodiment_id={"0": [False] * ASYMMETRIC_ACTION_DIM},
+            require_exact_effective_dim=True,
+            expected_action_schema_id=ASYMMETRIC_SCHEMA_ID,
+            expected_hardware_contract_sha256=self.preflight[
+                "hardware_contract_sha256"
+            ],
+            expected_calibration_capture_sha256=self.preflight[
+                "calibration_capture_sha256"
+            ],
+            norm_use_quantiles=True,
+            norm_enable_clamp=True,
+            num_views=1,
+            view_keys=["observation.images.ego_view"],
+            image_cfg={"mask_generator": {"max_ref_frames": 1, "start": 1, "factor": 4}},
+            image_augmentation={"enabled": False},
+            max_prompt_len=64,
+            subtask_prob=0,
+            matched_control_capture=False,
+            emit_action_denorm_scale=True,
+            emit_contact_condition_inputs=True,
+        )
+        self.dataset.open()
+        columns = tuple(self.dataset.dataset.hf_dataset.column_names)
+        expected_columns = tuple(self.dataset.dataset._loaded_source_columns or ())
+        if columns != expected_columns or "action" not in columns:
+            raise HeldoutEvaluationError(
+                "metric target Arrow schema was not source-projected before loading"
+            )
+        self.source_column_receipt = {
+            "reader_role": "post_prediction_metric_targets_only",
+            "arrow_schema_columns": list(columns),
+            "action_column_read": True,
+            "contact_sidecar_read": True,
+            "model_loaded": False,
+        }
+
+    @staticmethod
+    def _scalar_int(value: object, name: str) -> int:
+        if hasattr(value, "item"):
+            value = value.item()
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise HeldoutEvaluationError(f"metric target {name} is invalid")
+        return int(value)
+
+    def load(self, window: Mapping[str, Any]) -> dict[str, Any]:
+        raw = self.dataset._get_data(int(window["global_index"]))
+        if (
+            self._scalar_int(raw.get("episode_index"), "episode")
+            != int(window["episode_id"])
+            or self._scalar_int(raw.get("frame_index"), "frame")
+            != int(window["frame_index"])
+            or self._scalar_int(raw.get("index"), "index")
+            != int(window["global_index"])
+        ):
+            raise HeldoutEvaluationError("metric target fixed-window identity differs")
+        raw = dict(raw)
+        raw["observation.images.ego_view"] = self.torch.zeros(
+            (5, 3, 384, 320), dtype=self.torch.uint8
+        )
+        transformed = self.transform(raw)
+        packet = {
+            "window_id": window["window_id"],
+            **{
+                key: transformed[key]
+                for key in METRIC_TARGET_PACKET_KEYS - {"window_id"}
+            },
+        }
+        validate_metric_target_packet(packet)
+        return packet
+
+    def close(self) -> None:
+        self.dataset.close()
 
 
 def validate_metric_target_packet(value: object) -> Mapping[str, Any]:
@@ -71,6 +237,7 @@ class CausalProductionHeldoutRuntime(ProductionHeldoutRuntime):
             t5_embedding_dir=data_root / "t5_embedding",
         )
         super().__init__(
+            open_metric_dataset=False,
             force_cache_sync=False,
             training_source_runtime_receipt=runtime_sources[
                 "training_source_runtime_receipt"
@@ -115,8 +282,28 @@ class CausalProductionHeldoutRuntime(ProductionHeldoutRuntime):
                 },
                 t5_cache_size=128,
                 robotype="sonic_g1_asymmetric25",
+                source_column_projection=(
+                    "index",
+                    "episode_index",
+                    "frame_index",
+                    "timestamp",
+                    "task_index",
+                    "observation.state",
+                    "observation.images.ego_view",
+                ),
             )
             self.inference_dataset.open_target_free_inference_view()
+            self.prediction_source_column_receipt = {
+                "reader_role": "prediction_inputs_only",
+                "arrow_schema_columns": list(
+                    self.inference_dataset._target_free_source_columns
+                ),
+                "removed_target_columns": list(
+                    self.inference_dataset._target_free_removed_source_columns
+                ),
+                "action_column_read": False,
+                "contact_sidecar_read": False,
+            }
         except BaseException:
             if self.inference_dataset is not None:
                 self.inference_dataset.close()
@@ -192,34 +379,12 @@ class CausalProductionHeldoutRuntime(ProductionHeldoutRuntime):
         return packet
 
     def load_metric_targets(self, window: Mapping[str, Any]) -> dict[str, Any]:
-        """Load targets only after prediction has completed for this window."""
+        """Prediction workers are structurally unable to load metric targets."""
 
-        if (
-            self._pending_window_id != window.get("window_id")
-            or not self._prediction_completed_for_window
-        ):
-            raise HeldoutEvaluationError(
-                "metric targets may be loaded only after same-window prediction"
-            )
-        transformed = super().load_window(window)
-        if self._pending_safe_inputs is None or any(
-            not self.torch.equal(
-                self._pending_safe_inputs[key], transformed[key].detach().cpu()
-            )
-            for key in INFERENCE_PACKET_KEYS - {"window_id"}
-        ):
-            raise HeldoutEvaluationError(
-                "target-free and post-prediction metric transforms differ"
-            )
-        packet = {
-            "window_id": window["window_id"],
-            **{key: transformed[key] for key in METRIC_TARGET_PACKET_KEYS - {"window_id"}},
-        }
-        validate_metric_target_packet(packet)
-        self._pending_window_id = None
-        self._prediction_completed_for_window = False
-        self._pending_safe_inputs = None
-        return packet
+        del window
+        raise HeldoutEvaluationError(
+            "metric targets require the independent post-prediction scorer process"
+        )
 
     def load_checkpoint(self, checkpoint_path: str) -> None:
         from diffusers import FlowMatchEulerDiscreteScheduler
@@ -237,6 +402,7 @@ class CausalProductionHeldoutRuntime(ProductionHeldoutRuntime):
         route = ensure_exact_causal_route(
             getattr(model.config, "contact_causal_route", None)
         )
+        validate_checkpoint_transformer_semantics(model.config.to_dict(), route=route)
         direct = route == "aux_only_direct_q12"
         expected = {
             "in_action_channels": MODEL_ACTION_DIM,

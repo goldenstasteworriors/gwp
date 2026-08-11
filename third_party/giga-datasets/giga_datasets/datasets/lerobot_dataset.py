@@ -1458,7 +1458,33 @@ class FastLeRobotDataset(_LeRobotDataset):
         verified_source_receipt: list[dict] | None = None,
         verified_private_cache_parent: str | Path | None = None,
         verified_training_run_nonce: str | None = None,
+        source_column_projection: tuple[str, ...] | list[str] | None = None,
+        source_column_projection_allow_targets: bool = False,
     ):
+        if source_column_projection is None:
+            self._source_column_projection = None
+        else:
+            projected = tuple(source_column_projection)
+            if (
+                not projected
+                or len(projected) != len(set(projected))
+                or any(not isinstance(name, str) or not name for name in projected)
+                or (
+                    not source_column_projection_allow_targets
+                    and any(
+                        name == "action"
+                        or name.startswith("action_")
+                        or name.startswith("contact_")
+                        for name in projected
+                    )
+                )
+            ):
+                raise ValueError("source column projection is invalid or contains targets")
+            self._source_column_projection = projected
+        self._loaded_source_columns: tuple[str, ...] | None = None
+        self._source_column_projection_allow_targets = bool(
+            source_column_projection_allow_targets
+        )
         self._verified_source_entries: dict[str, dict] = {}
         self._verified_source_fd_owner = _FDLeaseGroup()
         self._verified_parquet_paths: list[Path] | None = None
@@ -2145,6 +2171,18 @@ class FastLeRobotDataset(_LeRobotDataset):
         from pyarrow import dataset as pa_ds
 
         features = get_hf_features_from_features(self.features)
+        if self._source_column_projection is not None:
+            available = set(features)
+            selected = [
+                name for name in self._source_column_projection if name in available
+            ]
+            required = {"index", "episode_index", "frame_index", "observation.state"}
+            if not required.issubset(selected):
+                raise ValueError(
+                    "target-free source projection lacks required sample/state columns"
+                )
+            features = datasets.Features({name: features[name] for name in selected})
+            self._loaded_source_columns = tuple(selected)
         paths = self._verified_parquet_paths or sorted(
             (self.root / 'data').glob('*/*.parquet')
         )

@@ -102,6 +102,8 @@ class WAMLeRobotDataset(BaseDataset):
         matched_control_dataset_info_sha256: str | None = None,
         production_episode_filter_receipt: dict | None = None,
         production_episode_filter_receipt_sha256: str | None = None,
+        source_column_projection: tuple[str, ...] | list[str] | None = None,
+        source_column_projection_allow_targets: bool = False,
         meta_name: str | None = None,
         robotype: str | None = None,
         **kwargs,
@@ -111,6 +113,14 @@ class WAMLeRobotDataset(BaseDataset):
         self.delta_info = delta_info
         self.delta_frames = delta_frames
         self.delta_timestamps = delta_timestamps
+        self.source_column_projection = (
+            None
+            if source_column_projection is None
+            else tuple(source_column_projection)
+        )
+        self.source_column_projection_allow_targets = bool(
+            source_column_projection_allow_targets
+        )
         self.robotype = robotype
         self.t5_load_from = str(t5_load_from)
         if self.t5_load_from not in _T5_LOAD_FROM_CHOICES:
@@ -525,6 +535,10 @@ class WAMLeRobotDataset(BaseDataset):
                 verified_source_receipt=self.training_source_runtime_receipt or None,
                 verified_private_cache_parent=self.verified_private_cache_parent,
                 verified_training_run_nonce=self.verified_training_run_nonce,
+                source_column_projection=self.source_column_projection,
+                source_column_projection_allow_targets=(
+                    self.source_column_projection_allow_targets
+                ),
                 **fast_kwargs,
             )
             if self.production_allowed_episode_ids is not None:
@@ -558,38 +572,41 @@ class WAMLeRobotDataset(BaseDataset):
             self._init_t5_source()
 
     def open_target_free_inference_view(self) -> None:
-        """Open a column-projected Arrow view that never reads action/contact targets."""
+        """Open an Arrow view projected before Parquet/Arrow construction."""
 
+        if self.source_column_projection is None:
+            raise ValueError(
+                "target-free inference requires a pre-construction source projection"
+            )
         self.open()
         if self.dataset is None or self.dataset.hf_dataset is None:
             raise ValueError("target-free inference requires an opened LeRobot dataset")
         if getattr(self, "_target_free_inference_projection", False):
             return
-        source_columns = list(self.dataset.hf_dataset.column_names)
-        forbidden = {
-            name
-            for name in source_columns
-            if name == "action"
-            or name.startswith("action_")
-            or name.startswith("contact_")
-        }
-        if "action" not in forbidden:
-            raise ValueError(
-                "target-free inference cannot prove removal of the action source column"
-            )
-        retained = [name for name in source_columns if name not in forbidden]
-        if not retained:
-            raise ValueError("target-free inference projection removed every source column")
-        self.dataset.hf_dataset = self.dataset.hf_dataset.select_columns(retained)
+        source_columns = tuple(self.dataset.hf_dataset.column_names)
+        loaded_columns = getattr(self.dataset, "_loaded_source_columns", None)
         if any(
             name == "action"
             or name.startswith("action_")
             or name.startswith("contact_")
-            for name in self.dataset.hf_dataset.column_names
+            for name in source_columns
         ):
             raise ValueError("target-free inference source projection retained a target")
+        if loaded_columns is None or tuple(loaded_columns) != source_columns:
+            raise ValueError(
+                "target-free Arrow schema was not built from the requested projection"
+            )
         self._target_free_inference_projection = True
-        self._target_free_removed_source_columns = tuple(sorted(forbidden))
+        self._target_free_removed_source_columns = tuple(
+            sorted(
+                name
+                for name in getattr(self.dataset, "features", {})
+                if name == "action"
+                or name.startswith("action_")
+                or name.startswith("contact_")
+            )
+        )
+        self._target_free_source_columns = source_columns
 
     @staticmethod
     def _split_main_subtask(task_text) -> tuple[str | None, str | None]:

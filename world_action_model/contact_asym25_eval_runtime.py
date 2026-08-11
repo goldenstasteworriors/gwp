@@ -43,6 +43,7 @@ class ProductionHeldoutRuntime:
         t5_runtime_source_receipt: list[dict] | None = None,
         verified_private_cache_parent: str | None = None,
         verified_training_run_nonce: str | None = None,
+        open_metric_dataset: bool = True,
     ) -> None:
         import torch
         from diffusers.models import AutoencoderKLWan
@@ -75,39 +76,41 @@ class ProductionHeldoutRuntime:
 
         self.preflight = dict(preflight_receipt)
         data_root = Path(self.preflight["data_root"])
-        self.dataset = WAMLeRobotDataset(
-            data_path=str(data_root),
-            data_size=None,
-            delta_info={"action": HORIZON_FRAMES},
-            delta_frames={
-                "observation.images.ego_view": list(IMAGE_FRAME_OFFSETS)
-            },
-            force_cache_sync=force_cache_sync,
-            training_source_runtime_receipt=training_source_runtime_receipt,
-            t5_runtime_source_receipt=t5_runtime_source_receipt,
-            verified_private_cache_parent=verified_private_cache_parent,
-            verified_training_run_nonce=verified_training_run_nonce,
-            video_backend="pyav",
-            t5_load_from="dir",
-            t5_cfg={
-                "t5_embedding_dir": str(data_root / "t5_embedding"),
-                "t5_embedding_pattern": "episode_{episode_index:06d}.pt",
-                "t5_embedding_key": "t5_embedding",
-            },
-            t5_cache_size=128,
-            contact_sidecar_dir=self.preflight["sidecar_dir"],
-            contact_sidecar_pattern="episode_{episode_index:06d}.npz",
-            contact_sidecar_cache_size=8,
-            contact_sidecar_strict=True,
-            contact_sidecar_require_reviewed_v1_1=True,
-            contact_sidecar_expected_meta_sha256=self.preflight[
-                "sidecar_meta_sha256"
-            ],
-            contact_sidecar_expected_episode_sha256=self.preflight[
-                "episode_npz_sha256"
-            ],
-            robotype="sonic_g1_asymmetric25",
-        )
+        self.dataset = None
+        if open_metric_dataset:
+            self.dataset = WAMLeRobotDataset(
+                data_path=str(data_root),
+                data_size=None,
+                delta_info={"action": HORIZON_FRAMES},
+                delta_frames={
+                    "observation.images.ego_view": list(IMAGE_FRAME_OFFSETS)
+                },
+                force_cache_sync=force_cache_sync,
+                training_source_runtime_receipt=training_source_runtime_receipt,
+                t5_runtime_source_receipt=t5_runtime_source_receipt,
+                verified_private_cache_parent=verified_private_cache_parent,
+                verified_training_run_nonce=verified_training_run_nonce,
+                video_backend="pyav",
+                t5_load_from="dir",
+                t5_cfg={
+                    "t5_embedding_dir": str(data_root / "t5_embedding"),
+                    "t5_embedding_pattern": "episode_{episode_index:06d}.pt",
+                    "t5_embedding_key": "t5_embedding",
+                },
+                t5_cache_size=128,
+                contact_sidecar_dir=self.preflight["sidecar_dir"],
+                contact_sidecar_pattern="episode_{episode_index:06d}.npz",
+                contact_sidecar_cache_size=8,
+                contact_sidecar_strict=True,
+                contact_sidecar_require_reviewed_v1_1=True,
+                contact_sidecar_expected_meta_sha256=self.preflight[
+                    "sidecar_meta_sha256"
+                ],
+                contact_sidecar_expected_episode_sha256=self.preflight[
+                    "episode_npz_sha256"
+                ],
+                robotype="sonic_g1_asymmetric25",
+            )
         norm_path = Path(self.preflight["norm_stats_path"])
         self.transform = WALeRobotTransformsPretrain(
             is_train=False,
@@ -145,7 +148,8 @@ class ProductionHeldoutRuntime:
             matched_control_capture=False,
             emit_action_denorm_scale=True,
         )
-        self.dataset.open()
+        if self.dataset is not None:
+            self.dataset.open()
 
         self.base_model_path = str(Path(base_model_path).expanduser().absolute())
         self.vae = AutoencoderKLWan.from_pretrained(
@@ -184,6 +188,10 @@ class ProductionHeldoutRuntime:
             raise HeldoutEvaluationError(f"invalid {name}") from exc
 
     def load_window(self, window: Mapping[str, Any]) -> dict[str, Any]:
+        if self.dataset is None:
+            raise HeldoutEvaluationError(
+                "metric targets are unavailable in the prediction-only runtime"
+            )
         random.seed(0)
         np.random.seed(0)
         self.torch.manual_seed(0)

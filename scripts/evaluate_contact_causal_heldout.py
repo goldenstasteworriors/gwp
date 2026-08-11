@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 
 import numpy as np
@@ -101,6 +103,95 @@ def _digest_array(digest: Any, window_id: str, value: np.ndarray) -> None:
         digest.update(payload)
 
 
+PREDICTION_EVIDENCE_FORMAT = "contact-causal-prediction-evidence-npz/v1"
+_PREDICTION_KEYS = {
+    "metadata_json",
+    "checkpoint_steps",
+    "window_ids",
+    "action_predictions",
+    "semantic_aux_logits",
+    "contact_hard_semantics",
+    "route_packets",
+}
+
+
+def _write_exclusive_bytes(path: Path, payload: bytes) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(fd, payload[offset:])
+            if written <= 0:
+                raise OSError("short write for causal prediction evidence")
+            offset += written
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _write_prediction_evidence(
+    path: Path,
+    *,
+    metadata: dict,
+    checkpoint_steps: list[int],
+    window_ids: list[str],
+    action_predictions: np.ndarray,
+    semantic_aux_logits: np.ndarray,
+    contact_hard_semantics: np.ndarray,
+    route_packets: np.ndarray,
+) -> str:
+    metadata_bytes = json.dumps(
+        metadata,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    arrays = {
+        "metadata_json": np.frombuffer(metadata_bytes, dtype=np.uint8),
+        "checkpoint_steps": np.asarray(checkpoint_steps, dtype=np.int64),
+        "window_ids": np.asarray(window_ids, dtype=np.str_),
+        "action_predictions": np.asarray(action_predictions, dtype=np.float32),
+        "semantic_aux_logits": np.asarray(semantic_aux_logits, dtype=np.float32),
+        "contact_hard_semantics": np.asarray(contact_hard_semantics, dtype=np.float32),
+        "route_packets": np.asarray(route_packets, dtype=np.float32),
+    }
+    row_count = len(checkpoint_steps)
+    if (
+        row_count != 3 * 512
+        or len(window_ids) != row_count
+        or any(array.shape[0] != row_count for key, array in arrays.items()
+               if key not in {"metadata_json", "checkpoint_steps", "window_ids"})
+        or any(
+            not np.isfinite(array).all()
+            for key, array in arrays.items()
+            if key not in {"metadata_json", "checkpoint_steps", "window_ids"}
+        )
+    ):
+        raise CausalProductionError("prediction evidence row/finite contract differs")
+    buffer = io.BytesIO()
+    np.savez(buffer, **arrays)
+    return _write_exclusive_bytes(path, buffer.getvalue())
+
+
+def _load_prediction_evidence(path: Path) -> tuple[dict, dict[str, np.ndarray], str]:
+    payload = path.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    with np.load(io.BytesIO(payload), allow_pickle=False) as archive:
+        if set(archive.files) != _PREDICTION_KEYS:
+            raise CausalProductionError("prediction evidence NPZ schema differs")
+        arrays = {name: np.array(archive[name], copy=True) for name in archive.files}
+    try:
+        metadata = json.loads(arrays.pop("metadata_json").tobytes().decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise CausalProductionError("prediction evidence metadata is invalid") from exc
+    if not isinstance(metadata, dict):
+        raise CausalProductionError("prediction evidence metadata must be an object")
+    return metadata, arrays, digest
+
+
 def prepare_windows(args: argparse.Namespace) -> None:
     output = ensure_not_project_tmp(args.output, project_root=REPOSITORY_ROOT)
     try:
@@ -123,9 +214,152 @@ def prepare_windows(args: argparse.Namespace) -> None:
     print(json.dumps({"output": str(output), "sha256": digest}, sort_keys=True))
 
 
+def predict_phase(args: argparse.Namespace) -> None:
+    """Run checkpoints in a target-free worker and persist predictions O_EXCL."""
+
+    output = ensure_not_project_tmp(args.output, project_root=REPOSITORY_ROOT)
+    causal, causal_sha, hardened, hardened_sha, assignments = _source_contract(
+        args.causal_preflight_receipt, args.hardened_preflight_receipt
+    )
+    try:
+        windows, windows_sha = load_fixed_window_manifest(
+            args.window_manifest,
+            preflight_receipt=hardened,
+            preflight_receipt_sha256=hardened_sha,
+            split_assignments=assignments,
+        )
+    except HeldoutEvaluationError as exc:
+        raise CausalProductionError("prediction fixed windows replay failed") from exc
+    manifest, manifest_sha, _ = strict_json_file(
+        args.checkpoint_manifest, name="causal prediction checkpoint manifest"
+    )
+    manifest, accepted = validate_checkpoint_manifest_v3(manifest, verify_files=True)
+    seed = causal["training_data_receipt"]["split_seed"]
+    route = manifest["causal_route_id"]
+    selected_windows = [window for window in windows["windows"] if window["seed"] == seed]
+    if len(selected_windows) != 512:
+        raise CausalProductionError("prediction worker requires 512 fixed windows")
+    base_snapshot = snapshot_artifact_tree(args.base_model)
+    environment = build_environment_receipt(
+        device=args.device, dtype="bfloat16", inference_steps=args.inference_steps
+    )
+    cache_parent = output.parent / ".prediction_private_hf_cache"
+    cache_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cache_parent.chmod(0o700)
+    evaluator_nonce = "causal-predict-" + hashlib.sha256(
+        (manifest["training_run_nonce"] + ":" + route + ":" + str(seed)).encode()
+    ).hexdigest()
+    from world_action_model.contact_causal_eval_runtime import (
+        CausalProductionHeldoutRuntime,
+    )
+
+    runtime = CausalProductionHeldoutRuntime(
+        preflight_receipt=hardened,
+        base_model_path=args.base_model,
+        device=args.device,
+        dtype="bfloat16",
+        inference_steps=args.inference_steps,
+        verified_private_cache_parent=str(cache_parent),
+        verified_run_nonce=evaluator_nonce,
+    )
+    steps: list[int] = []
+    window_ids: list[str] = []
+    actions: list[np.ndarray] = []
+    logits: list[np.ndarray] = []
+    hard_semantics: list[np.ndarray] = []
+    packets: list[np.ndarray] = []
+    try:
+        for step in CHECKPOINT_STEPS:
+            receipt, _ = accepted[step]
+            runtime.load_checkpoint(
+                str(Path(receipt["checkpoint_file"]["path_record_only"]).parent)
+            )
+            if runtime.causal_route != route:
+                raise CausalProductionError("prediction checkpoint route differs")
+            for window in selected_windows:
+                packet = runtime.load_inference_window(window)
+                prediction = runtime.predict(
+                    packet, action_noise_seed=window["action_noise_seed"]
+                )
+                steps.append(step)
+                window_ids.append(window["window_id"])
+                actions.append(prediction["action_prediction"])
+                logits.append(prediction["contact_logits"])
+                hard_semantics.append(prediction["contact_hard_semantic"])
+                if route != "aux_only_direct_q12":
+                    route_packet = prediction["route_packet"]
+                    if route_packet is None:
+                        raise CausalProductionError("prediction worker omitted route packet")
+                    packets.append(route_packet)
+            runtime.unload_checkpoint()
+        prediction_source_receipt = dict(runtime.prediction_source_column_receipt)
+    finally:
+        runtime.close()
+    cache_parent.rmdir()
+    verify_artifact_tree_unchanged(base_snapshot)
+    schedule = [
+        {
+            "window_id": window["window_id"],
+            "global_index": window["global_index"],
+            "action_noise_seed": window["action_noise_seed"],
+        }
+        for window in selected_windows
+    ]
+    checkpoint_bindings = {
+        str(step): {
+            "whole_bundle_sha256": accepted[step][0]["checkpoint_artifact_hashes"][
+                "whole_bundle_sha256"
+            ],
+            "weight_tensor_sha256": accepted[step][0]["checkpoint_artifact_hashes"][
+                "weight_tensor_sha256"
+            ],
+            "acceptance_sha256": sha256_json(accepted[step][1]),
+        }
+        for step in CHECKPOINT_STEPS
+    }
+    metadata = {
+        "format": PREDICTION_EVIDENCE_FORMAT,
+        "matrix_id": MATRIX_ID,
+        "seed": seed,
+        "causal_route_id": route,
+        "causal_preflight_sha256": causal_sha,
+        "hardened_preflight_sha256": hardened_sha,
+        "checkpoint_manifest_sha256": manifest_sha,
+        "fixed_window_manifest_sha256": windows_sha,
+        "fixed_window_schedule_sha256": sha256_json(schedule),
+        "checkpoint_bindings": checkpoint_bindings,
+        "base_model_artifact_tree": public_tree_receipt(base_snapshot),
+        "environment_receipt": environment,
+        "evaluator_source_receipt_sha256": causal[
+            "current_head_source_tree_sha256"
+        ],
+        "prediction_source_column_receipt": prediction_source_receipt,
+        "target_columns_or_sidecars_read": False,
+        "row_count": len(steps),
+    }
+    packet_array = (
+        np.empty((len(steps), 0, 22), dtype=np.float32)
+        if route == "aux_only_direct_q12"
+        else np.stack(packets).astype(np.float32, copy=False)
+    )
+    digest = _write_prediction_evidence(
+        output,
+        metadata=metadata,
+        checkpoint_steps=steps,
+        window_ids=window_ids,
+        action_predictions=np.stack(actions),
+        semantic_aux_logits=np.stack(logits),
+        contact_hard_semantics=np.stack(hard_semantics),
+        route_packets=packet_array,
+    )
+    print(json.dumps({"prediction": str(output), "sha256": digest}, sort_keys=True))
+
+
 def evaluate(args: argparse.Namespace) -> None:
     output_dir = ensure_not_project_tmp(args.output_dir, project_root=REPOSITORY_ROOT)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if args.overwrite:
+        raise CausalProductionError("production causal evaluation forbids overwrite")
+    output_dir.mkdir(parents=True, exist_ok=False)
     causal, causal_sha, hardened, hardened_sha, assignments = _source_contract(
         args.causal_preflight_receipt, args.hardened_preflight_receipt
     )
@@ -159,11 +393,89 @@ def evaluate(args: argparse.Namespace) -> None:
     if len(selected_windows) != 512:
         raise CausalProductionError("causal evaluator needs 256 val + 256 test windows")
 
-    from world_action_model.contact_causal_eval_runtime import (
-        CausalProductionHeldoutRuntime,
+    prediction_path = output_dir / "contact_causal_predictions.npz"
+    command = [
+        sys.executable,
+        str(Path(__file__).absolute()),
+        "_predict-phase",
+        "--causal-preflight-receipt", str(args.causal_preflight_receipt.absolute()),
+        "--hardened-preflight-receipt", str(args.hardened_preflight_receipt.absolute()),
+        "--window-manifest", str(args.window_manifest.absolute()),
+        "--checkpoint-manifest", str(args.checkpoint_manifest.absolute()),
+        "--base-model", str(args.base_model.absolute()),
+        "--output", str(prediction_path.absolute()),
+        "--device", args.device,
+        "--inference-steps", str(args.inference_steps),
+    ]
+    subprocess.run(
+        command,
+        cwd=REPOSITORY_ROOT,
+        env=dict(os.environ),
+        check=True,
     )
+    prediction_metadata, prediction_arrays, prediction_sha = (
+        _load_prediction_evidence(prediction_path)
+    )
+    schedule = [
+        {
+            "window_id": window["window_id"],
+            "global_index": window["global_index"],
+            "action_noise_seed": window["action_noise_seed"],
+        }
+        for window in selected_windows
+    ]
+    expected_bindings = {
+        str(step): {
+            "whole_bundle_sha256": accepted[step][0]["checkpoint_artifact_hashes"][
+                "whole_bundle_sha256"
+            ],
+            "weight_tensor_sha256": accepted[step][0]["checkpoint_artifact_hashes"][
+                "weight_tensor_sha256"
+            ],
+            "acceptance_sha256": sha256_json(accepted[step][1]),
+        }
+        for step in CHECKPOINT_STEPS
+    }
+    expected_prediction_metadata = {
+        "format": PREDICTION_EVIDENCE_FORMAT,
+        "matrix_id": MATRIX_ID,
+        "seed": seed,
+        "causal_route_id": route,
+        "causal_preflight_sha256": causal_sha,
+        "hardened_preflight_sha256": hardened_sha,
+        "checkpoint_manifest_sha256": manifest_sha,
+        "fixed_window_manifest_sha256": windows_sha,
+        "fixed_window_schedule_sha256": sha256_json(schedule),
+        "checkpoint_bindings": expected_bindings,
+        "base_model_artifact_tree": public_tree_receipt(base_model_snapshot),
+        "environment_receipt": environment_receipt,
+        "evaluator_source_receipt_sha256": causal[
+            "current_head_source_tree_sha256"
+        ],
+        "prediction_source_column_receipt": prediction_metadata.get(
+            "prediction_source_column_receipt"
+        ),
+        "target_columns_or_sidecars_read": False,
+        "row_count": 3 * 512,
+    }
+    if prediction_metadata != expected_prediction_metadata:
+        raise CausalProductionError("prediction worker evidence binding differs")
+    expected_steps = np.repeat(np.asarray(CHECKPOINT_STEPS, dtype=np.int64), 512)
+    expected_window_ids = np.asarray(
+        [window["window_id"] for _ in CHECKPOINT_STEPS for window in selected_windows],
+        dtype=np.str_,
+    )
+    if (
+        not np.array_equal(prediction_arrays["checkpoint_steps"], expected_steps)
+        or not np.array_equal(prediction_arrays["window_ids"], expected_window_ids)
+        or any(
+            array.shape[0] != 3 * 512
+            for array in prediction_arrays.values()
+        )
+    ):
+        raise CausalProductionError("prediction worker row order differs")
 
-    cache_parent = output_dir.parent / ".contact_causal_eval_private_hf_cache"
+    cache_parent = output_dir / ".metric_target_private_hf_cache"
     cache_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     cache_stat = cache_parent.lstat()
     if (
@@ -175,20 +487,20 @@ def evaluate(args: argparse.Namespace) -> None:
         raise CausalProductionError(
             "causal evaluator private HF cache parent must be owned mode 0700"
         )
-    evaluator_nonce = "causal-eval-" + hashlib.sha256(
+    scorer_nonce = "causal-score-" + hashlib.sha256(
         (
             manifest["training_run_nonce"] + ":" + route + ":" + str(seed)
         ).encode("utf-8")
     ).hexdigest()
 
-    runtime = CausalProductionHeldoutRuntime(
+    from world_action_model.contact_causal_eval_runtime import (
+        CausalMetricTargetReader,
+    )
+
+    target_reader = CausalMetricTargetReader(
         preflight_receipt=hardened,
-        base_model_path=args.base_model,
-        device=args.device,
-        dtype="bfloat16",
-        inference_steps=args.inference_steps,
         verified_private_cache_parent=str(cache_parent),
-        verified_run_nonce=evaluator_nonce,
+        verified_run_nonce=scorer_nonce,
     )
     rows = []
     step_digests = {}
@@ -205,90 +517,93 @@ def evaluate(args: argparse.Namespace) -> None:
     evidence_contact_loss_masks = []
     evidence_contact_confidences = []
     evidence_contact_condition_masks = []
-    evidence_packets = []
+    evidence_packets = prediction_arrays["route_packets"]
     try:
-        for step in CHECKPOINT_STEPS:
+        targets_by_window = {
+            window["window_id"]: target_reader.load(window)
+            for window in selected_windows
+        }
+        target_source_receipt = dict(target_reader.source_column_receipt)
+        for row_index, (step, window_id) in enumerate(
+            zip(expected_steps.tolist(), expected_window_ids.tolist(), strict=True)
+        ):
             receipt, _ = accepted[step]
-            checkpoint_dir = Path(receipt["checkpoint_file"]["path_record_only"]).parent
-            runtime.load_checkpoint(str(checkpoint_dir))
-            if runtime.causal_route != route:
-                raise CausalProductionError("runtime checkpoint route differs from manifest")
-            digests = {
-                "action": hashlib.sha256(),
-                "logits": hashlib.sha256(),
-                "packet": hashlib.sha256(),
+            window = selected_windows[row_index % 512]
+            targets = targets_by_window[window_id]
+            prediction = {
+                "action_prediction": prediction_arrays["action_predictions"][row_index],
+                "contact_logits": prediction_arrays["semantic_aux_logits"][row_index],
+                "contact_hard_semantic": prediction_arrays[
+                    "contact_hard_semantics"
+                ][row_index],
             }
-            for window in selected_windows:
-                inference_packet = runtime.load_inference_window(window)
-                prediction = runtime.predict(
-                    inference_packet, action_noise_seed=window["action_noise_seed"]
+            if row_index % 512 == 0:
+                digests = {
+                    "action": hashlib.sha256(),
+                    "logits": hashlib.sha256(),
+                    "packet": hashlib.sha256(),
+                }
+            _digest_array(digests["action"], window_id, prediction["action_prediction"])
+            _digest_array(digests["logits"], window_id, prediction["contact_logits"])
+            if route != "aux_only_direct_q12":
+                _digest_array(
+                    digests["packet"], window_id, evidence_packets[row_index]
                 )
-                targets = runtime.load_metric_targets(window)
-                _digest_array(digests["action"], window["window_id"], prediction["action_prediction"])
-                _digest_array(digests["logits"], window["window_id"], prediction["contact_logits"])
-                packet = prediction["route_packet"]
-                if route == "aux_only_direct_q12":
-                    if packet is not None:
-                        raise CausalProductionError("direct evaluator observed a packet")
-                else:
-                    if packet is None:
-                        raise CausalProductionError("strict evaluator omitted route packet")
-                    _digest_array(digests["packet"], window["window_id"], packet)
-                    evidence_packets.append(packet)
-                evidence_steps.append(step)
-                evidence_window_ids.append(window["window_id"])
-                evidence_actions.append(prediction["action_prediction"])
-                evidence_action_targets.append(targets["action"].cpu().numpy())
-                evidence_action_dim_masks.append(
-                    targets["action_dim_mask"].cpu().numpy()
+            evidence_steps.append(step)
+            evidence_window_ids.append(window_id)
+            evidence_actions.append(prediction["action_prediction"])
+            evidence_action_targets.append(targets["action"].cpu().numpy())
+            evidence_action_dim_masks.append(
+                targets["action_dim_mask"].cpu().numpy()
+            )
+            evidence_action_time_masks.append(
+                targets["action_time_mask"].cpu().numpy()
+            )
+            evidence_action_denorm_scales.append(
+                targets["action_denorm_scale"].cpu().numpy()
+            )
+            evidence_logits.append(prediction["contact_logits"])
+            evidence_hard_semantics.append(prediction["contact_hard_semantic"])
+            evidence_contact_targets.append(
+                targets["contact_target"].cpu().numpy()
+            )
+            evidence_contact_loss_masks.append(
+                targets["contact_loss_mask"].cpu().numpy()
+            )
+            evidence_contact_confidences.append(
+                targets["contact_confidence"].cpu().numpy()
+            )
+            evidence_contact_condition_masks.append(
+                targets["contact_condition_mask"].cpu().numpy()
+            )
+            rows.append(
+                score_heldout_window(
+                    window=window,
+                    split_seed=seed,
+                    checkpoint_step=step,
+                    checkpoint_sha256=receipt["checkpoint_artifact_hashes"]["whole_bundle_sha256"],
+                    action_prediction=prediction["action_prediction"],
+                    action_target=targets["action"].cpu().numpy(),
+                    action_dim_mask=targets["action_dim_mask"].cpu().numpy(),
+                    action_time_mask=targets["action_time_mask"].cpu().numpy(),
+                    action_denorm_scale=targets["action_denorm_scale"].cpu().numpy(),
+                    action_schema_contract=ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
+                    grip_active_future=None,
+                    contact_logits=prediction["contact_logits"],
+                    contact_hard_semantic=prediction["contact_hard_semantic"],
+                    contact_target=targets["contact_target"].cpu().numpy(),
+                    contact_loss_mask=targets["contact_loss_mask"].cpu().numpy(),
+                    contact_confidence=targets["contact_confidence"].cpu().numpy(),
+                    contact_condition_mask=targets["contact_condition_mask"].cpu().numpy(),
                 )
-                evidence_action_time_masks.append(
-                    targets["action_time_mask"].cpu().numpy()
-                )
-                evidence_action_denorm_scales.append(
-                    targets["action_denorm_scale"].cpu().numpy()
-                )
-                evidence_logits.append(prediction["contact_logits"])
-                evidence_hard_semantics.append(
-                    prediction["contact_hard_semantic"]
-                )
-                evidence_contact_targets.append(
-                    targets["contact_target"].cpu().numpy()
-                )
-                evidence_contact_loss_masks.append(
-                    targets["contact_loss_mask"].cpu().numpy()
-                )
-                evidence_contact_confidences.append(
-                    targets["contact_confidence"].cpu().numpy()
-                )
-                evidence_contact_condition_masks.append(
-                    targets["contact_condition_mask"].cpu().numpy()
-                )
-                rows.append(
-                    score_heldout_window(
-                        window=window,
-                        split_seed=seed,
-                        checkpoint_step=step,
-                        checkpoint_sha256=receipt["checkpoint_artifact_hashes"]["whole_bundle_sha256"],
-                        action_prediction=prediction["action_prediction"],
-                        action_target=targets["action"].cpu().numpy(),
-                        action_dim_mask=targets["action_dim_mask"].cpu().numpy(),
-                        action_time_mask=targets["action_time_mask"].cpu().numpy(),
-                        action_denorm_scale=targets["action_denorm_scale"].cpu().numpy(),
-                        action_schema_contract=ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
-                        grip_active_future=None,
-                        contact_logits=prediction["contact_logits"],
-                        contact_hard_semantic=prediction["contact_hard_semantic"],
-                        contact_target=targets["contact_target"].cpu().numpy(),
-                        contact_loss_mask=targets["contact_loss_mask"].cpu().numpy(),
-                        contact_confidence=targets["contact_confidence"].cpu().numpy(),
-                        contact_condition_mask=targets["contact_condition_mask"].cpu().numpy(),
-                    )
-                )
-            step_digests[step] = {name: digest.hexdigest() for name, digest in digests.items()}
-            runtime.unload_checkpoint()
+            )
+            if row_index % 512 == 511:
+                step_digests[step] = {
+                    name: digest.hexdigest() for name, digest in digests.items()
+                }
     finally:
-        runtime.close()
+        target_reader.close()
+        cache_parent.rmdir()
     try:
         verify_artifact_tree_unchanged(base_model_snapshot)
     except HeldoutEvaluationError as exc:
@@ -398,6 +713,17 @@ def evaluate(args: argparse.Namespace) -> None:
         "base_model_artifact_tree": public_tree_receipt(base_model_snapshot),
         "fixed_window_manifest": {"path_record_only": str(args.window_manifest.absolute()), "sha256": windows_sha},
         "per_window_csv": {"path_record_only": str(csv_path.absolute()), "sha256": csv_sha, "row_count": len(rows)},
+        "prediction_evidence": {
+            "path_record_only": str(prediction_path.absolute()),
+            "sha256": prediction_sha,
+            "row_count": len(evidence_steps),
+            "format": PREDICTION_EVIDENCE_FORMAT,
+        },
+        "prediction_source_column_receipt": prediction_metadata[
+            "prediction_source_column_receipt"
+        ],
+        "metric_target_source_receipt": target_source_receipt,
+        "prediction_worker_exited_before_target_read": True,
         "route_output_evidence": {
             "path_record_only": str(route_evidence_path.absolute()),
             "sha256": route_evidence_sha,
@@ -430,7 +756,7 @@ def aggregate(args: argparse.Namespace) -> None:
     evidence = {}
     for path in args.result:
         result, _, _ = strict_json_file(path, name="causal held-out result")
-        validate_result_v3(result, verify_files=True)
+        validate_result_v3(result, verify_files=True, replay_predictions=False)
         key = f"{result['seed']}/{result['causal_route_id']}"
         if key in paths:
             raise CausalProductionError("duplicate causal aggregate seed/route")
@@ -448,7 +774,10 @@ def aggregate(args: argparse.Namespace) -> None:
         for route in CAUSAL_ROUTES
     }
     output = build_aggregate_v5(
-        result_path_by_seed_route=ordered_paths, evidence=evidence, verify_files=True
+        result_path_by_seed_route=ordered_paths,
+        evidence=evidence,
+        verify_files=True,
+        replay_predictions=True,
     )
     target = ensure_not_project_tmp(args.output, project_root=REPOSITORY_ROOT)
     digest = write_strict_json(target, output, overwrite=args.overwrite)
@@ -471,6 +800,15 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--device", default="cuda:0")
     run.add_argument("--inference-steps", type=int, default=10)
     run.add_argument("--overwrite", action="store_true")
+    predict = commands.add_parser("_predict-phase", help=argparse.SUPPRESS)
+    predict.add_argument("--causal-preflight-receipt", type=Path, required=True)
+    predict.add_argument("--hardened-preflight-receipt", type=Path, required=True)
+    predict.add_argument("--window-manifest", type=Path, required=True)
+    predict.add_argument("--checkpoint-manifest", type=Path, required=True)
+    predict.add_argument("--base-model", type=Path, required=True)
+    predict.add_argument("--output", type=Path, required=True)
+    predict.add_argument("--device", required=True)
+    predict.add_argument("--inference-steps", type=int, required=True)
     merge = commands.add_parser("aggregate")
     merge.add_argument("--result", type=Path, action="append", required=True)
     merge.add_argument("--output", type=Path, required=True)
@@ -480,7 +818,12 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
-    {"prepare-windows": prepare_windows, "evaluate": evaluate, "aggregate": aggregate}[
+    {
+        "prepare-windows": prepare_windows,
+        "evaluate": evaluate,
+        "_predict-phase": predict_phase,
+        "aggregate": aggregate,
+    }[
         args.command
     ](args)
 

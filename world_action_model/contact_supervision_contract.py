@@ -19,6 +19,28 @@ CONTACT_GROUPED_SUPERVISION_ZERO_SAFE_VERSION = (
 )
 
 
+def select_contact_supervision_inputs(
+    data_dict, *, emit_contact_condition_inputs: bool
+):
+    """Separate grouped-loss labels from optional legacy model conditions."""
+
+    if (
+        not emit_contact_condition_inputs
+        and data_dict.get("contact_condition") is not None
+    ):
+        raise ValueError(
+            "predicted contact routes reject oracle contact_condition at transform"
+        )
+    keys = ["contact_target", "contact_loss_mask", "contact_confidence"]
+    if emit_contact_condition_inputs:
+        keys.extend(["contact_condition", "contact_condition_mask"])
+    return {
+        key: torch.as_tensor(data_dict[key], dtype=torch.float32)
+        for key in keys
+        if key in data_dict and data_dict[key] is not None
+    }
+
+
 def grouped_contact_supervision_weights(mask, confidence=None) -> dict[str, torch.Tensor]:
     """Build the exact per-field weights consumed by grouped contact loss.
 

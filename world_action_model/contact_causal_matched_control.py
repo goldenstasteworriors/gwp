@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 from typing import Any
 
 import numpy as np
@@ -1396,9 +1397,11 @@ def validate_current_run_trace_prefix_receipt_v1(value: object) -> dict[str, Any
         or receipt["world_size"] <= 0
         or not 0 <= receipt["rank"] < receipt["world_size"]
         or receipt["through_checkpoint_step"] < 0
-        or receipt["record_count"] < 0
+        or receipt["record_count"] <= 0
     ):
-        raise CausalProductionError("current-run trace prefix bounds differ")
+        raise CausalProductionError(
+            "current-run trace prefix bounds differ or contain no live record"
+        )
     for name in ("run_id", "run_nonce"):
         if not isinstance(receipt[name], str) or len(receipt[name]) < 16:
             raise CausalProductionError("current-run trace prefix identity differs")
@@ -1411,9 +1414,15 @@ def validate_current_run_trace_prefix_receipt_v1(value: object) -> dict[str, Any
     if len(rows) != receipt["record_count"]:
         raise CausalProductionError("current-run trace prefix count differs")
     for key, digest in rows.items():
-        if not isinstance(key, str) or not key:
+        match = re.fullmatch(r"step([0-9]+)/micro([0-9]+)/rank([0-9]+)", key)
+        if match is None:
             raise CausalProductionError("current-run trace prefix key is invalid")
         _sha(digest, "current-run trace record")
+    covered_steps = [int(key.split("/", 1)[0][4:]) for key in rows]
+    if max(covered_steps) != receipt["through_checkpoint_step"]:
+        raise CausalProductionError(
+            "current-run trace prefix does not reach the checkpoint step"
+        )
     unsigned = dict(receipt)
     claimed = unsigned.pop("receipt_sha256")
     _sha(claimed, "current-run trace prefix receipt")

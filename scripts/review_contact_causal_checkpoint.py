@@ -180,6 +180,10 @@ def main() -> None:
         != gate["training_run_nonce_by_route"][route]
         or receipt["run_identity"]["external_acceptance_sha256"]
         != gate["external_acceptance_sha256_by_route"][route]
+        or receipt["precursor"]["receipt_bytes_sha256"]
+        != gate["artifact_fingerprints"]["precursor_receipt_bytes_sha256"]
+        or receipt["precursor"]["bundle_sha256"]
+        != gate["artifact_fingerprints"]["precursor_bundle_sha256"]
     ):
         raise CausalProductionError("checkpoint receipt differs from Robot gate")
 
@@ -312,6 +316,14 @@ def main() -> None:
     validate_collector_report_v3(report)
     if report != recomputed_report:
         raise CausalProductionError("current-run matched-control report replay differs")
+    if (
+        report_sha256 != receipt["evidence"]["matched_control_receipt_sha256"]
+        or report["trace_manifest_sha256"]
+        != receipt["evidence"]["trace_manifest_sha256"]
+    ):
+        raise CausalProductionError(
+            "current-run matched-control report is not bound by the receipt"
+        )
     trace_prefix = receipt["checkpoint_file"]["current_run_trace_prefix_receipt"]
     if (
         Path(trace_prefix["trace_path_record_only"]).absolute() != trace_paths[route]
@@ -370,6 +382,7 @@ def main() -> None:
         )
     _identity_set(
         new_identities,
+        gate["reviewed_by"],
         gate["training_run_id_by_route"],
         gate["training_run_nonce_by_route"],
         [

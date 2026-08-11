@@ -78,6 +78,94 @@ def _git_head(root: Path) -> str:
     ).stdout.strip()
 
 
+def _run_checkpoint_reviewer_cli(
+    *,
+    repository_root: Path,
+    receipt: Mapping[str, Any],
+    acceptance_seed: Mapping[str, Any],
+    causal: Mapping[str, Any],
+    precursor: Mapping[str, Any],
+    seed_artifact: Mapping[str, Any],
+    annotations: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    traces: Mapping[str, Any],
+    output_path: Path,
+) -> dict[str, Any]:
+    """Materialize one acceptance through the independent production CLI."""
+
+    checkpoint_dir = Path(receipt["output_path_record_only"])
+    internal_receipt = checkpoint_dir / "checkpoint_training_receipt.json"
+    _write_json(internal_receipt, receipt)
+    command = [
+        __import__("sys").executable,
+        "-B",
+        str(repository_root / "scripts/review_contact_causal_checkpoint.py"),
+        "--checkpoint-dir",
+        str(checkpoint_dir),
+        "--robot-gate",
+        str(causal["gate_path"]),
+        "--gate-reviewer-acceptance",
+        str(causal["gate_review_path"]),
+        "--route-training-acceptance",
+        str(causal["route_acceptances"][receipt["route"]["causal_route_id"]]["path"]),
+        "--precursor-receipt",
+        str(precursor["receipt_path"]),
+        "--precursor-checkpoint-dir",
+        str(precursor["checkpoint_dir"]),
+        "--hardened-preflight-receipt",
+        str(seed_artifact["hardened_preflight_path"]),
+        "--production-preflight-receipt",
+        str(causal["preflight_path"]),
+        "--training-data-receipt",
+        str(causal["training_data_path"]),
+        "--coverage-receipt",
+        str(seed_artifact["coverage"]["path"]),
+        "--sidecar-dir",
+        str(annotations["sidecar_dir"]),
+        "--t5-embedding-dir",
+        str(runtime["t5_embedding_dir"]),
+        "--matched-control-report",
+        str(traces["report_path"]),
+    ]
+    for route, path in traces["trace_path_by_route"].items():
+        command.extend([f"--trace-{route.replace('_', '-')}", str(path)])
+    command.extend(
+        [
+            "--output",
+            str(output_path),
+            "--reviewer-identity",
+            acceptance_seed["reviewer_identity"],
+            "--reviewer-attestation-nonce",
+            acceptance_seed["reviewer_attestation_nonce"],
+            "--acceptance-run-id",
+            acceptance_seed["acceptance_run_id"],
+            "--acceptance-run-nonce",
+            acceptance_seed["acceptance_run_nonce"],
+            "--evidence-valid-until-utc",
+            acceptance_seed["evidence_valid_until_utc"],
+            "--repository-root",
+            str(repository_root),
+        ]
+    )
+    subprocess.run(
+        command,
+        cwd=repository_root,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={
+            **os.environ,
+            "CUDA_VISIBLE_DEVICES": "",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+    )
+    value = json.loads(output_path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise AssertionError("checkpoint reviewer did not emit a JSON object")
+    return value
+
+
 def _build_hardware(fixture: Path, repository_root: Path) -> dict[str, Any]:
     from world_action_model.asymmetric_hardware_manifest import (
         calibration_capture_sha256,
@@ -269,6 +357,8 @@ def _build_dataset(fixture: Path, hardware: Mapping[str, Any]) -> dict[str, Any]
         "index": [],
         "episode_index": [],
         "frame_index": [],
+        "timestamp": [],
+        "task_index": [],
         "observation.state": [],
         "action": [],
     }
@@ -279,6 +369,8 @@ def _build_dataset(fixture: Path, hardware: Mapping[str, Any]) -> dict[str, Any]
             rows["index"].append(offset + frame)
             rows["episode_index"].append(episode)
             rows["frame_index"].append(frame)
+            rows["timestamp"].append(frame / 30.0)
+            rows["task_index"].append(0)
             rows["observation.state"].append(
                 [base + dimension * 0.0001 for dimension in range(25)]
             )
@@ -292,6 +384,8 @@ def _build_dataset(fixture: Path, hardware: Mapping[str, Any]) -> dict[str, Any]
             "index": pa.array(rows["index"], type=pa.int64()),
             "episode_index": pa.array(rows["episode_index"], type=pa.int64()),
             "frame_index": pa.array(rows["frame_index"], type=pa.int64()),
+            "timestamp": pa.array(rows["timestamp"], type=pa.float32()),
+            "task_index": pa.array(rows["task_index"], type=pa.int64()),
             "observation.state": pa.array(
                 rows["observation.state"], type=vector_type
             ),
@@ -304,17 +398,26 @@ def _build_dataset(fixture: Path, hardware: Mapping[str, Any]) -> dict[str, Any]
     _write_jsonl(
         episodes_path,
         [
-            {"episode_index": episode, "length": length}
+            {"episode_index": episode, "length": length, "tasks": ["synthetic"]}
             for episode, length in lengths.items()
         ],
     )
     _write_jsonl(meta_root / "tasks.jsonl", [{"task_index": 0, "task": "synthetic"}])
     info = {
+        "codebase_version": "v2.1",
+        "robot_type": "sonic_g1_asymmetric25",
         "dataset_id": SYNTHETIC_DATASET_ID,
         "action_schema_id": "sonic_g1_rh56dftp6_omnipicker1_v1",
         "fps": 30.0,
         "total_episodes": len(lengths),
         "total_frames": sum(lengths.values()),
+        "total_tasks": 1,
+        "total_videos": 0,
+        "total_chunks": 1,
+        "chunks_size": 1000,
+        "splits": {"train": "0:3"},
+        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
         "frame_clock": "dataset_native_frame_index",
         "timestamp_semantics": {
             "feature": hardware["manifest"]["timing"]["timestamp_feature"],
@@ -336,6 +439,11 @@ def _build_dataset(fixture: Path, hardware: Mapping[str, Any]) -> dict[str, Any]
                 "shape": [25],
                 "names": list(ASYMMETRIC_ACTION_NAMES),
             },
+            "timestamp": {"dtype": "float32", "shape": [1], "names": None},
+            "frame_index": {"dtype": "int64", "shape": [1], "names": None},
+            "episode_index": {"dtype": "int64", "shape": [1], "names": None},
+            "index": {"dtype": "int64", "shape": [1], "names": None},
+            "task_index": {"dtype": "int64", "shape": [1], "names": None},
         },
     }
     info_path = meta_root / "info.json"
@@ -1351,43 +1459,55 @@ def _build_current_causal_traces(
     records = {}
     paths = {}
     for route in CAUSAL_ROUTES:
-        record = build_trace_record(
-            route=route,
-            seed=seed,
-            global_step=0,
-            micro_step=0,
-            rank=0,
-            world_size=1,
-            run_id=f"current-training-run-{seed}-{route}",
-            run_nonce=f"current-training-nonce-{seed}-{route}",
-            stable_contract=stable,
-            route_local_contract=build_production_route_receipt(route),
-            ordered_sample_ids=[{"episode": 0, "frame": 0}],
-            raw_batch=[_synthetic_sha("current-raw-batch")],
-            augmentation_parameters=[{"crop": [0, 0, 1, 1]}],
-            visual_timestep=visual_timestep,
-            action_timestep=action_timestep,
-            visual_noise=visual_noise,
-            action_noise=action_noise,
-            contact_target=target,
-            contact_loss_mask=mask,
-            contact_confidence=confidence,
-            action_target=action,
-            action_loss_mask=action_mask,
-            state_input=state,
-            state_input_mask=None,
-            embodiment_id=embodiment,
-            prompt_t5=prompt,
-            pre_forward_rng=rng,
-            initial_parameter_tensors_sha256=precursor["parameter_tensor_sha256"],
-            optimizer_parameter_groups=live["optimizer_parameter_groups"],
-            optimizer_step0_state=live["optimizer_step0_state"],
-            scheduler_step0_state=live["scheduler_step0_state"],
-            precursor_receipt_bytes_sha256=precursor["receipt_bytes_sha256"],
-        )
-        records[route] = [record]
+        route_records = []
+        for checkpoint_step in (0, 100, 200):
+            route_records.append(
+                build_trace_record(
+                    route=route,
+                    seed=seed,
+                    global_step=checkpoint_step,
+                    micro_step=0,
+                    rank=0,
+                    world_size=1,
+                    run_id=f"current-training-run-{seed}-{route}",
+                    run_nonce=f"current-training-nonce-{seed}-{route}",
+                    stable_contract=stable,
+                    route_local_contract=build_production_route_receipt(route),
+                    ordered_sample_ids=[{"episode": 0, "frame": 0}],
+                    raw_batch=[_synthetic_sha("current-raw-batch")],
+                    augmentation_parameters=[{"crop": [0, 0, 1, 1]}],
+                    visual_timestep=visual_timestep,
+                    action_timestep=action_timestep,
+                    visual_noise=visual_noise,
+                    action_noise=action_noise,
+                    contact_target=target,
+                    contact_loss_mask=mask,
+                    contact_confidence=confidence,
+                    action_target=action,
+                    action_loss_mask=action_mask,
+                    state_input=state,
+                    state_input_mask=None,
+                    embodiment_id=embodiment,
+                    prompt_t5=prompt,
+                    pre_forward_rng=rng,
+                    initial_parameter_tensors_sha256=precursor[
+                        "parameter_tensor_sha256"
+                    ],
+                    optimizer_parameter_groups=live[
+                        "optimizer_parameter_groups"
+                    ],
+                    optimizer_step0_state=live["optimizer_step0_state"],
+                    scheduler_step0_state=live["scheduler_step0_state"],
+                    precursor_receipt_bytes_sha256=precursor[
+                        "receipt_bytes_sha256"
+                    ],
+                )
+            )
+        records[route] = route_records
         path = seed_root / f"current-{route}.jsonl"
-        write_trace_jsonl_exclusive(path, [record], project_root=repository_root)
+        write_trace_jsonl_exclusive(
+            path, route_records, project_root=repository_root
+        )
         paths[route] = path
     report = compare_causal_records(records, required_seed=seed)
     report_path = seed_root / "current-matched-control-report.json"
@@ -1735,6 +1855,7 @@ def build_synthetic_causal_evaluator_results(
     )
     from world_action_model.contact_causal_heldout_eval import (
         CAUSAL_EVALUATION_CONTRACT,
+        PREDICTION_EVIDENCE_FORMAT,
         ROUTE_OUTPUT_EVIDENCE_FORMAT,
         _array_stream_sha256,
         _recompute_route_packet_metrics,
@@ -1861,47 +1982,55 @@ def build_synthetic_causal_evaluator_results(
         causal["training_data_receipt_sha256"] = sha256_json(training_data)
         causal_sha = _write_json(causal_path, causal)
         window_rows = windows["windows"]
-        source_arrays = {}
-        for episode in SYNTHETIC_EPISODE_IDS:
-            with np.load(
-                Path(fixture["annotations"]["sidecar_dir"])
-                / f"episode_{episode:06d}.npz",
-                allow_pickle=False,
-            ) as archive:
-                source_arrays[episode] = {key: archive[key] for key in archive.files}
+        from world_action_model.contact_causal_eval_runtime import (
+            CausalMetricTargetReader,
+        )
+
+        target_cache = seed_root / ".synthetic_target_reader_cache"
+        target_cache.mkdir(mode=0o700)
+        target_reader = CausalMetricTargetReader(
+            preflight_receipt=hardened,
+            verified_private_cache_parent=str(target_cache),
+            verified_run_nonce=f"synthetic-target-reader-seed-{seed}",
+        )
+        try:
+            target_packets = [target_reader.load(row) for row in window_rows]
+            target_source_receipt = dict(target_reader.source_column_receipt)
+        finally:
+            target_reader.close()
+            target_cache.rmdir()
         target_once = np.stack(
-            [
-                source_arrays[row["episode_id"]]["contact_target"][row["frame_index"]]
-                for row in window_rows
-            ]
+            [packet["contact_target"].cpu().numpy() for packet in target_packets]
         ).astype(np.float32)
         mask_once = np.stack(
-            [
-                source_arrays[row["episode_id"]]["contact_loss_mask"][row["frame_index"]]
-                for row in window_rows
-            ]
+            [packet["contact_loss_mask"].cpu().numpy() for packet in target_packets]
         ).astype(np.float32)
         confidence_once = np.stack(
-            [
-                source_arrays[row["episode_id"]]["contact_confidence"][row["frame_index"]]
-                for row in window_rows
-            ]
+            [packet["contact_confidence"].cpu().numpy() for packet in target_packets]
         ).astype(np.float32)
         condition_once = np.stack(
-            [
-                source_arrays[row["episode_id"]]["contact_condition_mask"][row["frame_index"]]
-                for row in window_rows
-            ]
+            [packet["contact_condition_mask"].cpu().numpy() for packet in target_packets]
         ).astype(np.float32)
         row_count = len(window_rows) * len(CHECKPOINT_STEPS)
         evidence_steps = np.repeat(np.asarray(CHECKPOINT_STEPS, dtype=np.int64), 512)
         evidence_ids = [row["window_id"] for _ in CHECKPOINT_STEPS for row in window_rows]
         actions = np.zeros((row_count, 48, 32), dtype=np.float32)
-        action_targets = np.zeros_like(actions)
-        dim_masks = np.zeros((row_count, 32), dtype=np.bool_)
-        dim_masks[:, :25] = True
-        time_masks = np.ones((row_count, 48), dtype=np.bool_)
-        scales = np.ones((row_count, 32), dtype=np.float32)
+        action_target_once = np.stack(
+            [packet["action"].cpu().numpy() for packet in target_packets]
+        ).astype(np.float32)
+        dim_mask_once = np.stack(
+            [packet["action_dim_mask"].cpu().numpy() for packet in target_packets]
+        ).astype(np.bool_)
+        time_mask_once = np.stack(
+            [packet["action_time_mask"].cpu().numpy() for packet in target_packets]
+        ).astype(np.bool_)
+        scale_once = np.stack(
+            [packet["action_denorm_scale"].cpu().numpy() for packet in target_packets]
+        ).astype(np.float32)
+        action_targets = np.tile(action_target_once, (3, 1, 1))
+        dim_masks = np.tile(dim_mask_once, (3, 1))
+        time_masks = np.tile(time_mask_once, (3, 1))
+        scales = np.tile(scale_once, (3, 1))
         logits = np.zeros((row_count, 12, 22), dtype=np.float32)
         hard = np.zeros_like(logits)
         targets = np.tile(target_once, (3, 1, 1))
@@ -1917,7 +2046,13 @@ def build_synthetic_causal_evaluator_results(
                 receipt_path = route_root / f"receipt-step-{step}.json"
                 acceptance_path = route_root / f"acceptance-step-{step}.json"
                 _write_json(receipt_path, receipt)
-                _write_json(acceptance_path, acceptance)
+                if (
+                    not acceptance_path.is_file()
+                    or acceptance_path.read_bytes() != _canonical_bytes(acceptance)
+                ):
+                    raise AssertionError(
+                        "independent checkpoint reviewer acceptance bytes differ"
+                    )
                 receipts_and_acceptances[step] = (
                     receipt_path,
                     receipt,
@@ -1943,6 +2078,100 @@ def build_synthetic_causal_evaluator_results(
                 raw_ids = (bits.astype(np.uint32) * weights).sum(-1, dtype=np.uint32)
                 canonical_ids = np.where(raw_ids >= EQUAL_BIT_VALID_STATES, 0, raw_ids)
                 packets = unstructured_ids_to_code(canonical_ids.astype(np.uint16))
+            synthetic_environment = {
+                "python": "synthetic-cpu-audit-record",
+                "platform": "synthetic-cpu-audit-record",
+                "packages": {
+                    "numpy": np.__version__,
+                    "torch": "record-only",
+                    "diffusers": "record-only",
+                    "pandas": "record-only",
+                },
+                "cuda_record_only": {
+                    "torch_cuda_version": "record-only",
+                    "cudnn_version": 1,
+                    "device_count": 1,
+                },
+                "evaluation_device": "cuda:0",
+                "model_dtype": "bfloat16",
+                "inference_steps": 1,
+                "deterministic_algorithms": True,
+                "augmentation_enabled": False,
+                "eval_crop_mode": "center",
+                "batch_size": 1,
+            }
+            prediction_source_receipt = {
+                "reader_role": "prediction_inputs_only",
+                "arrow_schema_columns": [
+                    "index", "episode_index", "frame_index", "timestamp",
+                    "task_index", "observation.state",
+                ],
+                "removed_target_columns": ["action"],
+                "action_column_read": False,
+                "contact_sidecar_read": False,
+            }
+            prediction_metadata = {
+                "format": PREDICTION_EVIDENCE_FORMAT,
+                "matrix_id": MATRIX_ID,
+                "seed": seed,
+                "causal_route_id": route,
+                "causal_preflight_sha256": causal_sha,
+                "hardened_preflight_sha256": hardened_sha,
+                "checkpoint_manifest_sha256": checkpoint_manifest_sha,
+                "fixed_window_manifest_sha256": windows_sha,
+                "fixed_window_schedule_sha256": sha256_json(
+                    [
+                        {
+                            "window_id": row["window_id"],
+                            "global_index": row["global_index"],
+                            "action_noise_seed": row["action_noise_seed"],
+                        }
+                        for row in window_rows
+                    ]
+                ),
+                "checkpoint_bindings": {
+                    str(step): {
+                        "whole_bundle_sha256": checkpoint_evidence[
+                            (seed, route, step)
+                        ][0]["checkpoint_artifact_hashes"]["whole_bundle_sha256"],
+                        "weight_tensor_sha256": checkpoint_evidence[
+                            (seed, route, step)
+                        ][0]["checkpoint_artifact_hashes"]["weight_tensor_sha256"],
+                        "acceptance_sha256": sha256_json(
+                            checkpoint_evidence[(seed, route, step)][1]
+                        ),
+                    }
+                    for step in CHECKPOINT_STEPS
+                },
+                "base_model_artifact_tree": base_receipt,
+                "environment_receipt": synthetic_environment,
+                "evaluator_source_receipt_sha256": source_sha,
+                "prediction_source_column_receipt": prediction_source_receipt,
+                "target_columns_or_sidecars_read": False,
+                "row_count": row_count,
+            }
+            prediction_buffer = io.BytesIO()
+            np.savez(
+                prediction_buffer,
+                metadata_json=np.frombuffer(
+                    json.dumps(
+                        prediction_metadata,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8"),
+                    dtype=np.uint8,
+                ),
+                checkpoint_steps=evidence_steps,
+                window_ids=np.asarray(evidence_ids, dtype=np.str_),
+                action_predictions=actions,
+                semantic_aux_logits=logits,
+                contact_hard_semantics=hard,
+                route_packets=packets,
+            )
+            prediction_path = route_root / "predictions.npz"
+            prediction_sha = hashlib.sha256(prediction_buffer.getvalue()).hexdigest()
+            prediction_path.write_bytes(prediction_buffer.getvalue())
             evidence_path = route_root / "route-output.npz"
             evidence_sha = write_route_output_evidence(
                 evidence_path,
@@ -2105,6 +2334,15 @@ def build_synthetic_causal_evaluator_results(
                     "sha256": csv_sha,
                     "row_count": len(csv_rows),
                 },
+                "prediction_evidence": {
+                    "path_record_only": str(prediction_path.absolute()),
+                    "sha256": prediction_sha,
+                    "row_count": row_count,
+                    "format": PREDICTION_EVIDENCE_FORMAT,
+                },
+                "prediction_source_column_receipt": prediction_source_receipt,
+                "metric_target_source_receipt": target_source_receipt,
+                "prediction_worker_exited_before_target_read": True,
                 "route_output_evidence": {
                     "path_record_only": str(evidence_path.absolute()),
                     "sha256": evidence_sha,
@@ -2118,28 +2356,7 @@ def build_synthetic_causal_evaluator_results(
                 "action_metrics_contract_sha256": action_contract_sha,
                 "contact_aux_metrics_contract_sha256": contact_contract_sha,
                 "evaluation_contract": CAUSAL_EVALUATION_CONTRACT,
-                "environment_receipt": {
-                    "python": "synthetic-cpu-audit-record",
-                    "platform": "synthetic-cpu-audit-record",
-                    "packages": {
-                        "numpy": np.__version__,
-                        "torch": "record-only",
-                        "diffusers": "record-only",
-                        "pandas": "record-only",
-                    },
-                    "cuda_record_only": {
-                        "torch_cuda_version": "record-only",
-                        "cudnn_version": 1,
-                        "device_count": 1,
-                    },
-                    "evaluation_device": "cuda:0",
-                    "model_dtype": "bfloat16",
-                    "inference_steps": 1,
-                    "deterministic_algorithms": True,
-                    "augmentation_enabled": False,
-                    "eval_crop_mode": "center",
-                    "batch_size": 1,
-                },
+                "environment_receipt": synthetic_environment,
                 "checkpoint_steps": list(CHECKPOINT_STEPS),
                 "primary_checkpoint_step": 200,
                 "best_checkpoint_selection_allowed": False,
@@ -2314,6 +2531,8 @@ def build_synthetic_causal_admission_fixture(
     )
     precursor = None
     causal_by_seed = None
+    checkpoint_reviewer_cli_count = 0
+    checkpoint_reviewer_o_excl_rejected = False
     if checkpoint_evidence is not None:
         from world_action_model.contact_causal_matched_control import (
             build_current_run_trace_prefix_receipt_v1,
@@ -2536,6 +2755,48 @@ def build_synthetic_causal_admission_fixture(
                         reviewed_current_head_sha256=_git_head(root),
                         reviewed_source_tree_sha256=source_sha,
                     )
+                    reviewer_output = (
+                        fixture
+                        / f"seed-{seed}"
+                        / route
+                        / f"acceptance-step-{step}.json"
+                    )
+                    reviewer_output.parent.mkdir(parents=True, exist_ok=True)
+                    reviewed_acceptance = _run_checkpoint_reviewer_cli(
+                        repository_root=root,
+                        receipt=receipt,
+                        acceptance_seed=acceptance,
+                        causal=causal,
+                        precursor=precursor,
+                        seed_artifact=seed_artifacts[seed],
+                        annotations=annotations,
+                        runtime=runtime,
+                        traces=traces,
+                        output_path=reviewer_output,
+                    )
+                    acceptance.clear()
+                    acceptance.update(reviewed_acceptance)
+                    checkpoint_reviewer_cli_count += 1
+                    if not checkpoint_reviewer_o_excl_rejected:
+                        try:
+                            _run_checkpoint_reviewer_cli(
+                                repository_root=root,
+                                receipt=receipt,
+                                acceptance_seed=acceptance,
+                                causal=causal,
+                                precursor=precursor,
+                                seed_artifact=seed_artifacts[seed],
+                                annotations=annotations,
+                                runtime=runtime,
+                                traces=traces,
+                                output_path=reviewer_output,
+                            )
+                        except subprocess.CalledProcessError:
+                            checkpoint_reviewer_o_excl_rejected = True
+                        else:
+                            raise AssertionError(
+                                "checkpoint reviewer overwrote an acceptance"
+                            )
                     del fixture_root_for_acceptance
     return {
         "fixture_version": "contact-causal-synthetic-admission-fixture/v1",
@@ -2550,6 +2811,10 @@ def build_synthetic_causal_admission_fixture(
         "runtime": runtime,
         "precursor": precursor,
         "causal_by_seed": causal_by_seed,
+        "checkpoint_reviewer_cli_count": checkpoint_reviewer_cli_count,
+        "checkpoint_reviewer_o_excl_rejected": (
+            checkpoint_reviewer_o_excl_rejected
+        ),
     }
 
 
@@ -2657,6 +2922,12 @@ def run_serialized_full_evaluator_acceptance(
         "aggregate_sha256": _sha_bytes(_canonical_bytes(aggregate)),
         "verify_files": True,
         "bound_acceptance_replay_count": 27,
+        "checkpoint_reviewer_cli_count": fixture[
+            "checkpoint_reviewer_cli_count"
+        ],
+        "checkpoint_reviewer_o_excl_rejected": fixture[
+            "checkpoint_reviewer_o_excl_rejected"
+        ],
         "tampered_route_output_rejected": True,
         "tampered_csv_rejected": True,
         "tampered_packet_digest_rejected": True,

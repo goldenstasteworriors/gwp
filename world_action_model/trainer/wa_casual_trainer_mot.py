@@ -1351,10 +1351,9 @@ class CasualWATrainerMoT(Trainer):
                 batch_dict.get("contact_loss_mask"),
                 batch_dict.get("contact_confidence"),
             )
-        if self.contact_causal_route in {
-            ContactCausalRoute.AUX_ONLY_DIRECT_Q12.value,
-            ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST.value,
-        } and (contact_condition is not None or contact_condition_mask is not None):
+        if self.production_matrix_id and (
+            contact_condition is not None or contact_condition_mask is not None
+        ):
             raise ValueError(
                 f"route {self.contact_causal_route!r} rejects model-side contact/oracle inputs; "
                 "contact_target may enter only the grouped auxiliary loss"

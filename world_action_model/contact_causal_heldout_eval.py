@@ -9,6 +9,8 @@ import json
 import math
 import os
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any
 
 import numpy as np
@@ -83,6 +85,18 @@ CAUSAL_EVALUATION_CONTRACT = {
 
 ROUTE_OUTPUT_EVIDENCE_VERSION = "contact-causal-route-output-evidence/v1"
 ROUTE_OUTPUT_EVIDENCE_FORMAT = "numpy-npz-typed-no-pickle/v1"
+PREDICTION_EVIDENCE_FORMAT = "contact-causal-prediction-evidence-npz/v1"
+PREDICTION_EVIDENCE_KEYS = frozenset(
+    {
+        "metadata_json",
+        "checkpoint_steps",
+        "window_ids",
+        "action_predictions",
+        "semantic_aux_logits",
+        "contact_hard_semantics",
+        "route_packets",
+    }
+)
 ROUTE_OUTPUT_EVIDENCE_KEYS = frozenset(
     {
         "evidence_version",
@@ -584,6 +598,135 @@ def _route_output_artifact_entry(value: object) -> dict[str, Any]:
     return entry
 
 
+def _prediction_artifact_entry(value: object) -> dict[str, Any]:
+    entry = _exact(
+        value,
+        {"path_record_only", "sha256", "row_count", "format"},
+        "causal prediction evidence",
+    )
+    if (
+        not isinstance(entry["path_record_only"], str)
+        or not Path(entry["path_record_only"]).is_absolute()
+        or isinstance(entry["row_count"], bool)
+        or entry["row_count"] != 3 * 2 * 256
+        or entry["format"] != PREDICTION_EVIDENCE_FORMAT
+    ):
+        raise CausalProductionError("causal prediction evidence entry differs")
+    _sha(entry["sha256"], "causal prediction evidence")
+    return entry
+
+
+def _load_prediction_evidence(
+    entry: Mapping[str, Any], *, route: str
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    try:
+        payload = Path(entry["path_record_only"]).read_bytes()
+    except OSError as exc:
+        raise CausalProductionError("causal prediction evidence read failed") from exc
+    if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
+        raise CausalProductionError("causal prediction evidence bytes changed")
+    try:
+        with np.load(io.BytesIO(payload), allow_pickle=False) as archive:
+            if set(archive.files) != PREDICTION_EVIDENCE_KEYS:
+                raise CausalProductionError("causal prediction evidence schema differs")
+            arrays = {name: np.array(archive[name], copy=True) for name in archive.files}
+        metadata = json.loads(arrays.pop("metadata_json").tobytes().decode("utf-8"))
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CausalProductionError("causal prediction evidence is invalid") from exc
+    row_count = entry["row_count"]
+    packet_shape = (
+        (row_count, 0, 22)
+        if route == "aux_only_direct_q12"
+        else (row_count, 12, 22)
+    )
+    if (
+        not isinstance(metadata, dict)
+        or arrays["checkpoint_steps"].dtype != np.dtype("int64")
+        or arrays["checkpoint_steps"].shape != (row_count,)
+        or arrays["window_ids"].dtype.kind != "U"
+        or arrays["window_ids"].shape != (row_count,)
+        or arrays["action_predictions"].dtype != np.dtype("float32")
+        or arrays["action_predictions"].shape != (row_count, 48, MODEL_ACTION_DIM)
+        or arrays["semantic_aux_logits"].dtype != np.dtype("float32")
+        or arrays["semantic_aux_logits"].shape != (row_count, 12, 22)
+        or arrays["contact_hard_semantics"].dtype != np.dtype("float32")
+        or arrays["contact_hard_semantics"].shape != (row_count, 12, 22)
+        or arrays["route_packets"].dtype != np.dtype("float32")
+        or arrays["route_packets"].shape != packet_shape
+        or any(
+            not np.isfinite(array).all()
+            for name, array in arrays.items()
+            if name not in {"checkpoint_steps", "window_ids"}
+        )
+    ):
+        raise CausalProductionError("causal prediction typed arrays differ")
+    return metadata, arrays
+
+
+def _replay_prediction_evidence(
+    *,
+    result: Mapping[str, Any],
+    prediction_entry: Mapping[str, Any],
+    expected_metadata: Mapping[str, Any],
+    expected_arrays: Mapping[str, np.ndarray],
+) -> None:
+    """Run the three checkpoints again in an isolated target-free worker."""
+
+    original = Path(prediction_entry["path_record_only"])
+    replay = original.parent / (
+        ".independent_prediction_replay_" + prediction_entry["sha256"][:20] + ".npz"
+    )
+    if replay.exists() or replay.is_symlink():
+        raise CausalProductionError("independent prediction replay path already exists")
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve().parents[1] / "scripts/evaluate_contact_causal_heldout.py"),
+        "_predict-phase",
+        "--causal-preflight-receipt",
+        result["causal_preflight_receipt"]["path_record_only"],
+        "--hardened-preflight-receipt",
+        result["hardened_preflight_receipt"]["path_record_only"],
+        "--window-manifest",
+        result["fixed_window_manifest"]["path_record_only"],
+        "--checkpoint-manifest",
+        result["checkpoint_manifest"]["path_record_only"],
+        "--base-model",
+        result["base_model_artifact_tree"]["path_record_only"],
+        "--output",
+        str(replay),
+        "--device",
+        result["environment_receipt"]["evaluation_device"],
+        "--inference-steps",
+        str(result["environment_receipt"]["inference_steps"]),
+    ]
+    try:
+        subprocess.run(
+            command,
+            cwd=Path(__file__).resolve().parents[1],
+            env=dict(os.environ),
+            check=True,
+        )
+        replay_entry = {
+            "path_record_only": str(replay),
+            "sha256": hashlib.sha256(replay.read_bytes()).hexdigest(),
+            "row_count": prediction_entry["row_count"],
+            "format": PREDICTION_EVIDENCE_FORMAT,
+        }
+        metadata, arrays = _load_prediction_evidence(
+            replay_entry, route=result["causal_route_id"]
+        )
+        if metadata != expected_metadata or any(
+            not np.array_equal(arrays[name], expected_arrays[name])
+            for name in expected_arrays
+        ):
+            raise CausalProductionError(
+                "independent checkpoint prediction replay differs"
+            )
+    finally:
+        if replay.is_file() and not replay.is_symlink():
+            replay.unlink()
+
+
 def _tree_entry(value: object, name: str) -> dict[str, Any]:
     entry = _exact(
         value,
@@ -606,7 +749,10 @@ def _tree_entry(value: object, name: str) -> dict[str, Any]:
 
 
 def validate_result_v3(
-    value: object, *, verify_files: bool = True
+    value: object,
+    *,
+    verify_files: bool = True,
+    replay_predictions: bool = False,
 ) -> dict[str, Any]:
     result = _exact(
         value,
@@ -623,6 +769,10 @@ def validate_result_v3(
             "base_model_artifact_tree",
             "fixed_window_manifest",
             "per_window_csv",
+            "prediction_evidence",
+            "prediction_source_column_receipt",
+            "metric_target_source_receipt",
+            "prediction_worker_exited_before_target_read",
             "route_output_evidence",
             "evaluator_source_receipt_sha256",
             "precursor_receipt_bytes_sha256",
@@ -650,6 +800,7 @@ def validate_result_v3(
         or result["checkpoint_steps"] != list(CHECKPOINT_STEPS)
         or result["primary_checkpoint_step"] != 200
         or result["best_checkpoint_selection_allowed"] is not False
+        or result["prediction_worker_exited_before_target_read"] is not True
         or result["oracle_used"] is not False
         or result["benefit_claimed"] is not False
     ):
@@ -742,6 +893,48 @@ def validate_result_v3(
     ):
         raise CausalProductionError("causal per-window CSV identity/count differs")
     _sha(csv_entry["sha256"], "causal per-window CSV")
+    prediction_entry = _prediction_artifact_entry(result["prediction_evidence"])
+    prediction_source = _exact(
+        result["prediction_source_column_receipt"],
+        {
+            "reader_role", "arrow_schema_columns", "removed_target_columns",
+            "action_column_read", "contact_sidecar_read",
+        },
+        "causal prediction source-column receipt",
+    )
+    target_source = _exact(
+        result["metric_target_source_receipt"],
+        {
+            "reader_role", "arrow_schema_columns", "action_column_read",
+            "contact_sidecar_read", "model_loaded",
+        },
+        "causal metric-target source receipt",
+    )
+    prediction_columns = prediction_source["arrow_schema_columns"]
+    target_columns = target_source["arrow_schema_columns"]
+    if (
+        prediction_source["reader_role"] != "prediction_inputs_only"
+        or prediction_source["action_column_read"] is not False
+        or prediction_source["contact_sidecar_read"] is not False
+        or not isinstance(prediction_columns, list)
+        or not prediction_columns
+        or len(prediction_columns) != len(set(prediction_columns))
+        or any(
+            name == "action"
+            or name.startswith("action_")
+            or name.startswith("contact_")
+            for name in prediction_columns
+        )
+        or "action" not in prediction_source["removed_target_columns"]
+        or target_source["reader_role"]
+        != "post_prediction_metric_targets_only"
+        or target_source["action_column_read"] is not True
+        or target_source["contact_sidecar_read"] is not True
+        or target_source["model_loaded"] is not False
+        or not isinstance(target_columns, list)
+        or "action" not in target_columns
+    ):
+        raise CausalProductionError("causal two-phase source receipts differ")
     route_evidence_entry = _route_output_artifact_entry(
         result["route_output_evidence"]
     )
@@ -924,6 +1117,120 @@ def validate_result_v3(
     route_evidence = _load_route_output_evidence(
         route_evidence_entry, route=route
     )
+    prediction_metadata, prediction_arrays = _load_prediction_evidence(
+        prediction_entry, route=route
+    )
+    schedule = [
+        {
+            "window_id": window["window_id"],
+            "global_index": window["global_index"],
+            "action_noise_seed": window["action_noise_seed"],
+        }
+        for window in windows["windows"]
+    ]
+    checkpoint_bindings = {
+        str(step): {
+            "whole_bundle_sha256": accepted[step][0]["checkpoint_artifact_hashes"][
+                "whole_bundle_sha256"
+            ],
+            "weight_tensor_sha256": accepted[step][0]["checkpoint_artifact_hashes"][
+                "weight_tensor_sha256"
+            ],
+            "acceptance_sha256": sha256_json(accepted[step][1]),
+        }
+        for step in CHECKPOINT_STEPS
+    }
+    expected_prediction_metadata = {
+        "format": PREDICTION_EVIDENCE_FORMAT,
+        "matrix_id": MATRIX_ID,
+        "seed": result["seed"],
+        "causal_route_id": route,
+        "causal_preflight_sha256": causal_preflight_entry["sha256"],
+        "hardened_preflight_sha256": hardened_entry["sha256"],
+        "checkpoint_manifest_sha256": checkpoint_manifest_entry["sha256"],
+        "fixed_window_manifest_sha256": windows_entry["sha256"],
+        "fixed_window_schedule_sha256": sha256_json(schedule),
+        "checkpoint_bindings": checkpoint_bindings,
+        "base_model_artifact_tree": base_model_entry,
+        "environment_receipt": result["environment_receipt"],
+        "evaluator_source_receipt_sha256": result[
+            "evaluator_source_receipt_sha256"
+        ],
+        "prediction_source_column_receipt": prediction_source,
+        "target_columns_or_sidecars_read": False,
+        "row_count": prediction_entry["row_count"],
+    }
+    if prediction_metadata != expected_prediction_metadata:
+        raise CausalProductionError("causal prediction metadata binding differs")
+    for prediction_name, route_name in (
+        ("checkpoint_steps", "checkpoint_steps"),
+        ("window_ids", "window_ids"),
+        ("action_predictions", "action_predictions"),
+        ("semantic_aux_logits", "semantic_aux_logits"),
+        ("contact_hard_semantics", "contact_hard_semantics"),
+        ("route_packets", "route_packets"),
+    ):
+        if not np.array_equal(
+            prediction_arrays[prediction_name], route_evidence[route_name]
+        ):
+            raise CausalProductionError(
+                f"causal prediction/result array differs: {prediction_name}"
+            )
+    if replay_predictions:
+        _replay_prediction_evidence(
+            result=result,
+            prediction_entry=prediction_entry,
+            expected_metadata=expected_prediction_metadata,
+            expected_arrays=prediction_arrays,
+        )
+
+    target_cache = (
+        Path(route_evidence_entry["path_record_only"]).parent
+        / (".validate_metric_targets_" + prediction_entry["sha256"][:16])
+    )
+    target_cache.mkdir(mode=0o700, parents=False, exist_ok=False)
+    target_reader = None
+    try:
+        from world_action_model.contact_causal_eval_runtime import (
+            CausalMetricTargetReader,
+        )
+
+        target_reader = CausalMetricTargetReader(
+            preflight_receipt=hardened,
+            verified_private_cache_parent=str(target_cache),
+            verified_run_nonce=(
+                "causal-result-target-replay-" + prediction_entry["sha256"]
+            ),
+        )
+        if target_reader.source_column_receipt != target_source:
+            raise CausalProductionError("metric-target source receipt changed")
+        target_by_window = {
+            window["window_id"]: target_reader.load(window)
+            for window in windows["windows"]
+        }
+        for index, window_id in enumerate(route_evidence["window_ids"].tolist()):
+            target = target_by_window[window_id]
+            for evidence_name, target_name in (
+                ("action_targets", "action"),
+                ("action_dim_masks", "action_dim_mask"),
+                ("action_time_masks", "action_time_mask"),
+                ("action_denorm_scales", "action_denorm_scale"),
+                ("contact_targets", "contact_target"),
+                ("contact_loss_masks", "contact_loss_mask"),
+                ("contact_confidences", "contact_confidence"),
+                ("contact_condition_masks", "contact_condition_mask"),
+            ):
+                if not np.array_equal(
+                    route_evidence[evidence_name][index],
+                    target[target_name].cpu().numpy(),
+                ):
+                    raise CausalProductionError(
+                        f"result target differs from verified source: {evidence_name}"
+                    )
+    finally:
+        if target_reader is not None:
+            target_reader.close()
+        target_cache.rmdir()
     window_identities = {
         (
             window["window_id"], window["split"], window["episode_id"],
@@ -1086,6 +1393,7 @@ def validate_aggregate_v5(
     *,
     evidence: Mapping[tuple[int, str, int], tuple[Mapping[str, Any], Mapping[str, Any]]],
     verify_files: bool = True,
+    replay_predictions: bool = False,
 ) -> dict[str, Any]:
     if verify_files:
         try:
@@ -1120,7 +1428,9 @@ def validate_aggregate_v5(
         "causal held-out aggregate",
     )
     matrix_contract = validate_27_checkpoint_matrix(
-        evidence, verify_files=verify_files
+        evidence,
+        verify_files=verify_files,
+        verify_external_evidence=verify_files,
     )
     if (
         aggregate["aggregate_version"] != AGGREGATE_VERSION
@@ -1171,7 +1481,11 @@ def validate_aggregate_v5(
         )
         if digest != entry["sha256"]:
             raise CausalProductionError("causal aggregate result bytes changed")
-        validate_result_v3(result, verify_files=True)
+        validate_result_v3(
+            result,
+            verify_files=True,
+            replay_predictions=replay_predictions,
+        )
         seed_text, route = key.split("/", 1)
         if (
             result["seed"] != int(seed_text)
@@ -1271,6 +1585,7 @@ def build_aggregate_v5(
     result_path_by_seed_route: Mapping[str, str | Path],
     evidence: Mapping[tuple[int, str, int], tuple[Mapping[str, Any], Mapping[str, Any]]],
     verify_files: bool = True,
+    replay_predictions: bool = False,
 ) -> dict[str, Any]:
     try:
         from world_action_model.contact_asym25_heldout_eval import (
@@ -1282,7 +1597,9 @@ def build_aggregate_v5(
             "mature aggregate evaluator dependencies are unavailable"
         ) from exc
     matrix_contract = validate_27_checkpoint_matrix(
-        evidence, verify_files=verify_files
+        evidence,
+        verify_files=verify_files,
+        verify_external_evidence=verify_files,
     )
     expected_keys = [f"{seed}/{route}" for seed in SEEDS for route in CAUSAL_ROUTES]
     if list(result_path_by_seed_route) != expected_keys:
@@ -1291,7 +1608,11 @@ def build_aggregate_v5(
     rows_by_key = {}
     for key, path in result_path_by_seed_route.items():
         result, digest, _ = strict_json_file(path, name=f"causal held-out result {key}")
-        validate_result_v3(result, verify_files=True)
+        validate_result_v3(
+            result,
+            verify_files=True,
+            replay_predictions=False,
+        )
         entries[key] = {
             "path_record_only": str(Path(path).expanduser().absolute()),
             "sha256": digest,
@@ -1340,5 +1661,10 @@ def build_aggregate_v5(
         "allow_server_training": False,
         "benefit_claimed": False,
     }
-    validate_aggregate_v5(aggregate, evidence=evidence, verify_files=verify_files)
+    validate_aggregate_v5(
+        aggregate,
+        evidence=evidence,
+        verify_files=verify_files,
+        replay_predictions=replay_predictions,
+    )
     return aggregate

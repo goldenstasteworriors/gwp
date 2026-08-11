@@ -321,6 +321,9 @@ for dataset in config["dataloaders"]["train"]["data_or_config"]:
     )
 
 config["dataloaders"]["train"]["transform"]["matched_control_capture"] = True
+config["dataloaders"]["train"]["transform"][
+    "emit_contact_condition_inputs"
+] = False
 
 direct = route == "aux_only_direct_q12"
 config["models"]["transformer"].update(
