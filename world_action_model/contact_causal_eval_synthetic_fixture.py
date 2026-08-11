@@ -152,10 +152,9 @@ def _run_checkpoint_reviewer_cli(
             str(repository_root),
         ]
     )
-    subprocess.run(
+    completed = subprocess.run(
         command,
         cwd=repository_root,
-        check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -165,6 +164,11 @@ def _run_checkpoint_reviewer_cli(
             "PYTHONDONTWRITEBYTECODE": "1",
         },
     )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "independent checkpoint reviewer CLI failed: "
+            + completed.stderr.strip()
+        )
     value = json.loads(output_path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise AssertionError("checkpoint reviewer did not emit a JSON object")
@@ -2726,16 +2730,6 @@ def build_synthetic_causal_admission_fixture(
                         source_tree_sha256=source_sha,
                         matrix_manifest_sha256=matrix_sha,
                         precursor_bundle_sha256=precursor["bundle_sha256"],
-                        precursor_gate_path_record_only=str(
-                            precursor["gate_path"]
-                        ),
-                        precursor_gate_sha256=precursor["gate_sha256"],
-                        precursor_gate_reviewer_acceptance_path_record_only=str(
-                            precursor["gate_review_path"]
-                        ),
-                        precursor_gate_reviewer_acceptance_sha256=precursor[
-                            "gate_review_sha256"
-                        ],
                         base_weights_sha256=precursor["parameter_tensor_sha256"],
                         initial_parameter_tensor_sha256=precursor[
                             "parameter_tensor_sha256"
@@ -2833,6 +2827,16 @@ def build_synthetic_causal_admission_fixture(
                             precursor["checkpoint_dir"]
                         ),
                         precursor_bundle_sha256=precursor["bundle_sha256"],
+                        precursor_gate_path_record_only=str(
+                            precursor["gate_path"]
+                        ),
+                        precursor_gate_sha256=precursor["gate_sha256"],
+                        precursor_gate_reviewer_acceptance_path_record_only=str(
+                            precursor["gate_review_path"]
+                        ),
+                        precursor_gate_reviewer_acceptance_sha256=precursor[
+                            "gate_review_sha256"
+                        ],
                         hardened_preflight_path_record_only=str(
                             seed_artifacts[seed]["hardened_preflight_path"]
                         ),
