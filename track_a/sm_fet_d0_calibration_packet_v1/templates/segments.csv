@@ -1,0 +1,1 @@
+schema_version,dataset_id,episode_id,coverage_id,segment_id,onset_event_id,release_event_id,annotation_role,annotator_id,annotation_session_id,review_status,start_frame,end_frame,start_boundary,end_boundary,side,site,object_role,contact_mode,confidence,evidence_scope,label_origin,source_proposal_id,parent_segment_ids,notes

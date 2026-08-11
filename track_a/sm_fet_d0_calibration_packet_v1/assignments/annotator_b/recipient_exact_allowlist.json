@@ -1,0 +1,43 @@
+{
+  "allowlist_schema_version": "sm_fet_d0_recipient_allowlist_v1_fix1",
+  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix1",
+  "exact_files": [
+    "assignment_receipt.json",
+    "coverage.csv",
+    "event_edges_v1.csv",
+    "event_node_snapshots_v1.csv",
+    "events_v1.csv",
+    "identity.json",
+    "media_allowlist.csv",
+    "pose_keys_2d_v1.csv",
+    "recipient_exact_allowlist.json",
+    "recipient_manifest.json",
+    "segments.csv",
+    "session.json",
+    "task_manifest.csv"
+  ],
+  "mutable_after_assignment": [
+    "coverage.csv",
+    "event_edges_v1.csv",
+    "event_node_snapshots_v1.csv",
+    "events_v1.csv",
+    "pose_keys_2d_v1.csv",
+    "segments.csv"
+  ],
+  "immutable_after_assignment": [
+    "assignment_receipt.json",
+    "identity.json",
+    "media_allowlist.csv",
+    "recipient_exact_allowlist.json",
+    "recipient_manifest.json",
+    "session.json",
+    "task_manifest.csv"
+  ],
+  "forbidden_recipient_paths": [
+    "README.md",
+    "coordinator",
+    "selection_proposal_audit.md"
+  ],
+  "media_must_be_external": true,
+  "formal_packet_must_remain_separate": true
+}

@@ -1,0 +1,4 @@
+schema_version,task_id,dataset_id,episode_id,media_id,frame_clock,coverage_start_frame,coverage_end_frame,required_review,calibration_only,formal_blind_overlap
+sm_fet_d0_calibration_packet_v1_fix1,sm-fet-d0-cal-00,ego_human_pour_66,46,d0cal-media-00,raw_video_frame_30fps,0,324,full_episode,true,false
+sm_fet_d0_calibration_packet_v1_fix1,sm-fet-d0-cal-01,ego_human_pour_66,65,d0cal-media-01,raw_video_frame_30fps,0,384,full_episode,true,false
+sm_fet_d0_calibration_packet_v1_fix1,sm-fet-d0-cal-02,ego_human_pour_66,1,d0cal-media-02,raw_video_frame_30fps,0,599,full_episode,true,false
