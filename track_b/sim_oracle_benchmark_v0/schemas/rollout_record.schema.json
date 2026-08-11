@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-gigaai.local/schemas/wam-sim-oracle-rollout-record-v1.json",
+  "title": "WAM simulation oracle rollout summary record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "variant_id",
+    "variant_contract_sha256",
+    "variant_runtime_receipt",
+    "scenario_id",
+    "execution_manifest_sha256",
+    "control_fingerprint_sha256",
+    "native_gt_receipt",
+    "outcomes",
+    "events",
+    "risk_scores",
+    "field_metrics",
+    "field_metric_receipt"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "wam-sim-oracle-rollout-record/v1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "variant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "variant_contract_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "variant_runtime_receipt": {
+      "type": "object"
+    },
+    "scenario_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "execution_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "control_fingerprint_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "native_gt_receipt": {
+      "type": "object"
+    },
+    "outcomes": {
+      "type": "object"
+    },
+    "events": {
+      "type": "object"
+    },
+    "risk_scores": {
+      "type": "object"
+    },
+    "field_metrics": {
+      "type": "object"
+    },
+    "field_metric_receipt": {
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  }
+}

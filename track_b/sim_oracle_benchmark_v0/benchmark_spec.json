@@ -1,0 +1,428 @@
+{
+  "schema_version": "wam-sim-oracle-benchmark-spec/v1",
+  "benchmark_id": "g1-asym25-bimanual-pour-oracle-v0",
+  "status": "spec_only_no_go",
+  "supersedes": "../visibility_audit_v0/sim_scenario_spec.json",
+  "purpose": "Measure whether native simulator contact-transition truth is a sufficient action-visible bridge for asymmetric bimanual pouring before spending on weak labels or WAM training.",
+  "non_claims": [
+    "This specification is not evidence that transparent liquid or vessels reconstruct correctly from real RGB or depth.",
+    "A generated scenario manifest is not a simulated rollout and contains no physical result.",
+    "Inpainted, composited, diffusion-generated, reconstructed, or manually edited pixels are never ground truth."
+  ],
+  "units": {
+    "length": "m",
+    "angle": "degree",
+    "time": "s",
+    "viscosity": "mPa.s",
+    "volume": "mL",
+    "impulse": "N.s"
+  },
+  "timebase": {
+    "policy_hz": 20,
+    "required_physics_hz_min": 240,
+    "camera_to_state_tolerance_s": 0.005,
+    "action_timestamp_semantics": "sample-and-hold command timestamp aligned to the first physics state after command application",
+    "event_timestamp_semantics": "native physics crossing time, retained before resampling to policy_hz"
+  },
+  "embodiment_contract": {
+    "action_schema_id": "sonic_g1_rh56dftp6_omnipicker1_v1",
+    "action_dim": 25,
+    "wrist_representation_per_side": "local_delta_xyz_plus_rotation6d",
+    "left": {
+      "device": "Inspire Robots RH56DFTP",
+      "active_dof": 6,
+      "canonical_channels": [
+        "little",
+        "ring",
+        "middle",
+        "index",
+        "thumb_bend",
+        "thumb_rotate"
+      ],
+      "nominal_role": "target_stabilizer",
+      "required_native_contact_links": [
+        "palm",
+        "thumb",
+        "index",
+        "middle",
+        "ring",
+        "little"
+      ]
+    },
+    "right": {
+      "device": "AGIBOT OmniPicker",
+      "active_dof": 1,
+      "jaw_count": 2,
+      "canonical_channels": [
+        "aperture"
+      ],
+      "nominal_role": "source_transport_and_tilt",
+      "required_native_contact_links": [
+        "left_jaw",
+        "right_jaw"
+      ]
+    },
+    "canonical_hand_semantics": "open_fraction_0_closed_1_open",
+    "role_swap_is_ood": true,
+    "asset_rule": "Exact meshes, collision geometry, inertial properties, joint limits, transmissions, wrist frames, and calibration hashes are required. A driver source file or a generic two-jaw gripper is not an OmniPicker simulation asset."
+  },
+  "contact_grammar": {
+    "planner_shape": {
+      "segments_q": 12,
+      "transport_dim_per_segment": 22,
+      "time_bins": 16
+    },
+    "edges": [
+      "left_effector_to_target",
+      "left_effector_to_source",
+      "right_effector_to_source",
+      "right_effector_to_target",
+      "source_to_target",
+      "vessel_to_table"
+    ],
+    "object_roles": [
+      "source",
+      "target",
+      "tool",
+      "support_surface"
+    ],
+    "functional_sites": [
+      "source_body",
+      "source_rim",
+      "source_handle",
+      "target_body",
+      "target_rim",
+      "table"
+    ],
+    "contact_modes": [
+      "approach",
+      "first_contact",
+      "secure_grasp",
+      "stabilize",
+      "pour_onset",
+      "pouring",
+      "pour_offset",
+      "release",
+      "forbidden_collision"
+    ],
+    "native_event_rules": {
+      "first_contact": "first native positive normal impulse on an allowed effector-vessel pair after approach",
+      "secure_grasp": "bilateral jaw contact for OmniPicker or two non-collinear RH56 contact links, sustained for at least 0.10 s without vessel slip above 0.01 m",
+      "pour_onset": "first outward source-rim liquid flux above 0.5 mL/s sustained for at least 0.10 s",
+      "pour_offset": "outward source-rim flux below 0.5 mL/s for at least 0.20 s after pour_onset",
+      "release": "last allowed effector-vessel contact followed by at least 0.20 s separation",
+      "forbidden_collision": "forbidden pair impulse above 0.5 N.s or penetration above 0.002 m"
+    }
+  },
+  "factor_space": {
+    "in_domain": {
+      "source_vessel": [
+        "cylindrical_glass_clear_60mm",
+        "cylindrical_polypropylene_opaque_60mm"
+      ],
+      "target_vessel": [
+        "cylindrical_glass_clear_70mm",
+        "cylindrical_polypropylene_opaque_70mm"
+      ],
+      "liquid_appearance": [
+        "clear",
+        "dyed_visible"
+      ],
+      "viscosity_mpas": [
+        1,
+        10,
+        100,
+        1000
+      ],
+      "fill_fraction": [
+        0.2,
+        0.5,
+        0.8
+      ],
+      "peak_tilt_deg": [
+        45,
+        60,
+        75,
+        90,
+        105
+      ],
+      "rim_offset_radial_m": [
+        0.0,
+        0.005,
+        0.01,
+        0.015
+      ],
+      "rim_offset_direction_deg": [
+        0,
+        45,
+        90,
+        135,
+        180,
+        225,
+        270,
+        315
+      ],
+      "left_delay_s": [
+        0.0,
+        0.1,
+        0.25,
+        0.5
+      ],
+      "right_delay_s": [
+        0.0,
+        0.1,
+        0.25,
+        0.5
+      ],
+      "lighting": [
+        "front_diffuse",
+        "side_diffuse",
+        "mixed_lab"
+      ],
+      "camera_layout": [
+        "g1_head_plus_both_wrists"
+      ],
+      "background": [
+        "matte_gray",
+        "matte_blue",
+        "cluttered_lab"
+      ],
+      "role_assignment": [
+        "left_stabilize_right_pour"
+      ]
+    },
+    "ood_overrides": {
+      "container_geometry": {
+        "source_vessel": [
+          "square_glass_clear",
+          "narrow_neck_glass_clear"
+        ],
+        "target_vessel": [
+          "wide_shallow_glass_clear"
+        ]
+      },
+      "liquid_dynamics": {
+        "viscosity_mpas": [
+          300,
+          3000
+        ],
+        "fill_fraction": [
+          0.1,
+          0.9
+        ]
+      },
+      "optics": {
+        "liquid_appearance": [
+          "clear_low_contrast",
+          "unseen_dyed_hue"
+        ],
+        "lighting": [
+          "backlit",
+          "specular_low_contrast"
+        ],
+        "background": [
+          "mirror_like_table"
+        ]
+      },
+      "camera": {
+        "camera_layout": [
+          "head_pitch_plus_10deg",
+          "right_wrist_occluded"
+        ]
+      },
+      "control": {
+        "rim_offset_radial_m": [
+          0.02,
+          0.03
+        ],
+        "left_delay_s": [
+          0.75
+        ],
+        "right_delay_s": [
+          0.75
+        ],
+        "role_assignment": [
+          "left_pour_right_stabilize"
+        ]
+      }
+    },
+    "split_rule": "Every non-OOD record uses only in_domain values. Every ood_test condition declares exactly one primary OOD axis and at least one value from that axis; no OOD value may occur in sanity or id_test."
+  },
+  "design": {
+    "generator_seed": 330811,
+    "splits": {
+      "sanity": {
+        "conditions": 32,
+        "replicates_per_condition": 1
+      },
+      "id_test": {
+        "conditions": 40,
+        "replicates_per_condition": 4
+      },
+      "ood_test": {
+        "conditions": 20,
+        "replicates_per_condition": 4
+      }
+    },
+    "method": "deterministic balanced cyclic factor assignment; generator reports marginal counts and does not claim covering-array optimality",
+    "paired_rule": "Every benchmark variant must evaluate the exact same scenario_id and physics/render/policy seeds."
+  },
+  "native_ground_truth_contract": {
+    "required_channels": {
+      "container_boundary": "projection_from_native_geometry",
+      "source_rim": "projection_from_native_geometry",
+      "target_rim": "projection_from_native_geometry",
+      "liquid_surface": "projection_from_native_liquid_state",
+      "stream_occupancy": "projection_from_native_liquid_state",
+      "contact_points": "native_sim_contact",
+      "contact_pairs": "native_sim_contact",
+      "transition_events": "derived_from_native_contact_and_liquid_flux",
+      "liquid_volume": "native_liquid_state",
+      "collision_impulse": "native_sim_contact",
+      "rgb": "native_render_pass",
+      "depth": "native_render_pass",
+      "instance_segmentation": "native_render_pass"
+    },
+    "allowed_source_methods": [
+      "native_sim_state",
+      "native_sim_contact",
+      "native_liquid_state",
+      "native_render_pass",
+      "projection_from_native_geometry",
+      "projection_from_native_liquid_state",
+      "derived_from_native_contact_and_liquid_flux"
+    ],
+    "prohibited_source_terms": [
+      "inpaint",
+      "composite",
+      "diffusion",
+      "image_edit",
+      "manual_paint",
+      "pseudo_label",
+      "reconstruction_as_gt"
+    ],
+    "synchronization_rule": "RGB, depth, segmentation, contact, liquid, and camera matrices must share an immutable native state_id; camera-to-state skew must not exceed 0.005 s.",
+    "transparency_rule": "Refraction and transparency affect the native RGB pass only. Labels come from native physical state or same-state render IDs, never from an edited observation. Native simulator depth is an oracle sensor channel, not a claim about real transparent-depth validity."
+  },
+  "benchmark_variants": [
+    {
+      "id": "rgb_only",
+      "action_visible_inputs": [
+        "rgb",
+        "proprioception"
+      ],
+      "contact_supervision": "none",
+      "route": "strict_wam_without_contact_channel"
+    },
+    {
+      "id": "rgb_depth",
+      "action_visible_inputs": [
+        "rgb",
+        "native_depth",
+        "proprioception"
+      ],
+      "contact_supervision": "none",
+      "route": "depth_baseline"
+    },
+    {
+      "id": "no_contact_aux",
+      "action_visible_inputs": [
+        "rgb",
+        "proprioception"
+      ],
+      "contact_supervision": "training_only_auxiliary",
+      "route": "action_cannot_read_contact_planner"
+    },
+    {
+      "id": "direct_action",
+      "action_visible_inputs": [
+        "rgb",
+        "proprioception",
+        "unrestricted_visual_hidden"
+      ],
+      "contact_supervision": "none",
+      "route": "gwp_direct_action_control"
+    },
+    {
+      "id": "oracle_contact",
+      "action_visible_inputs": [
+        "proprioception",
+        "native_contact_grammar"
+      ],
+      "contact_supervision": "native_oracle",
+      "route": "strict_finite_contact_bottleneck"
+    },
+    {
+      "id": "predicted_contact",
+      "action_visible_inputs": [
+        "proprioception",
+        "rgb_predicted_contact_grammar"
+      ],
+      "contact_supervision": "native_oracle_training_target_only",
+      "route": "strict_finite_contact_bottleneck"
+    },
+    {
+      "id": "oracle_all_fields",
+      "action_visible_inputs": [
+        "proprioception",
+        "native_contact_grammar",
+        "native_boundary_rim_liquid_stream_fields"
+      ],
+      "contact_supervision": "native_oracle",
+      "route": "oracle_spatial_ceiling_not_deployable"
+    }
+  ],
+  "outcome_contract": {
+    "volume_balance": "initial_source_ml equals final_source_ml plus final_target_ml plus outside_ml within numerical tolerance",
+    "transfer_fraction": "final_target_ml divided by initial_source_ml",
+    "spill_fraction": "outside_ml divided by initial_source_ml",
+    "overflow_fraction": "volume crossing target rim after first entry divided by initial_source_ml; it may overlap outside_ml and is not added to mass balance",
+    "spill_positive": "spill_fraction > 0.02 or overflow_fraction > 0.01",
+    "collision_positive": "maximum forbidden contact impulse > 0.5 N.s or maximum penetration > 0.002 m",
+    "success": "transfer_fraction >= 0.8 and spill_fraction <= 0.02 and not collision_positive and stable_duration_s >= 1.0",
+    "correct_first_contact": "predicted side, edge, and functional site equal native truth and absolute time error <= 0.10 s"
+  },
+  "metrics": {
+    "primary": [
+      "ood_task_success_rate",
+      "ood_correct_first_contact_rate"
+    ],
+    "event": [
+      "first_contact_MAE_ms",
+      "pour_onset_MAE_ms",
+      "pour_offset_MAE_ms",
+      "release_MAE_ms",
+      "event_F1_at_100ms"
+    ],
+    "physical": [
+      "transfer_fraction",
+      "spill_fraction",
+      "overflow_fraction",
+      "collision_rate",
+      "mass_conservation_error"
+    ],
+    "field": [
+      "boundary_F1_at_2px",
+      "rim_chamfer_px",
+      "liquid_surface_F1_at_2px",
+      "stream_AUPRC",
+      "contact_AUPRC",
+      "temporal_jitter_px"
+    ],
+    "risk": [
+      "spill_AUROC",
+      "spill_AUPRC",
+      "collision_AUPRC",
+      "Brier_score"
+    ]
+  },
+  "gates": {
+    "execution_readiness": "All engine, asset, liquid, renderer, contact, camera, and calibration capability receipts must pass; spec_only_no_go must fail execution validation.",
+    "mass_conservation": "At most 1% of rollouts may have relative mass residual above 1%.",
+    "repeatability": "Within a fixed condition and variant, max minus min transfer_fraction across four seeds must not exceed 0.05.",
+    "oracle_sufficiency": "On ood_test, oracle_contact must exceed direct_action by at least 0.10 absolute task success and 0.15 absolute correct-first-contact.",
+    "predicted_recovery": "predicted_contact must recover at least 70% of both positive oracle_contact gains over direct_action.",
+    "field_value": "oracle_all_fields must improve OOD spill AUPRC by at least 0.05 absolute or reduce collision rate by at least 20% relative to rgb_only.",
+    "claim_boundary": "Passing a simulator gate supports only a controlled oracle ceiling. Real transparent reconstruction, real depth validity, and sim-to-real deployment require separate sensor-grounded evidence."
+  }
+}
