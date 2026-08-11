@@ -2859,6 +2859,18 @@ def run_serialized_full_evaluator_acceptance(
     giga_train_stub.TRANSFORMS = _ImportOnlyRegistry()
     sys.modules["giga_train"] = giga_train_stub
 
+    def _forbidden_optional_dependency(*_args, **_kwargs):
+        raise RuntimeError(
+            "an import-only optional dependency was invoked by the target path"
+        )
+
+    ftfy_stub = types.ModuleType("ftfy")
+    ftfy_stub.fix_text = _forbidden_optional_dependency
+    sys.modules["ftfy"] = ftfy_stub
+    decord_stub = types.ModuleType("decord")
+    decord_stub.VideoReader = _forbidden_optional_dependency
+    sys.modules["decord"] = decord_stub
+
     from world_action_model.contact_causal_heldout_eval import (
         build_aggregate_v5,
         validate_aggregate_v5,
@@ -2976,6 +2988,10 @@ def run_serialized_full_evaluator_acceptance(
         "giga_train_stub_scope": (
             "TRANSFORMS registration import only; actual transform methods executed"
         ),
+        "optional_import_stub_scope": {
+            "ftfy": "precomputed-T5 scorer path; invocation raises",
+            "decord": "skip_video_decoding target path; invocation raises",
+        },
     }
     _write_json(Path(output_path), report)
     return report
