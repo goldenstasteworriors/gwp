@@ -181,16 +181,22 @@ def _validate_finite_metric_tree(value: object, *, path: str = "metrics") -> Non
         return
     if isinstance(value, bool):
         return
-    lower = path.lower()
+    # Classify the numeric leaf itself.  Parent bundle names such as
+    # ``grammar_validity`` or ``field_accuracy`` must not force their raw
+    # ``query_count`` children into the unit interval.
+    leaf = path.rsplit(".", 1)[-1].lower()
+    is_count = leaf == "count" or leaf.endswith("_count")
     unit = any(
-        token in lower
+        token in leaf
         for token in (
             "accuracy", "fraction", "coverage", "precision", "recall",
             "f1", "validity", "utilization", "rate",
         )
-    )
+    ) and not is_count
     number = _finite(value, path, unit_interval=unit)
-    if any(token in lower for token in ("count", "sum", "mse", "mae", "nll", "brier", "entropy")) and number < 0:
+    if is_count and (number < 0 or not number.is_integer()):
+        raise CausalProductionError(f"{path} must be a non-negative integer count")
+    if any(token in leaf for token in ("sum", "mse", "mae", "nll", "brier", "entropy")) and number < 0:
         raise CausalProductionError(f"{path} must be non-negative")
 
 

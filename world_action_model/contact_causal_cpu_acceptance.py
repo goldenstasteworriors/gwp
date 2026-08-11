@@ -25,6 +25,7 @@ from world_action_model.contact_causal_heldout_eval import (
     _array_stream_sha256,
     _load_route_output_evidence,
     _recompute_route_packet_metrics,
+    _validate_finite_metric_tree,
     validate_aggregate_v5,
     validate_result_v3,
     validate_route_evaluator_output,
@@ -1229,6 +1230,34 @@ def _make_acceptance(receipt: dict[str, Any]) -> dict[str, Any]:
 
 
 def _route_outputs(workspace: Path) -> None:
+    _validate_finite_metric_tree(
+        {
+            "grammar_validity": {
+                "query_count": 12 * 512,
+                "validity": 1.0,
+            },
+            "field_accuracy": {
+                "supervised_query_count": 128,
+                "accuracy": 0.5,
+            },
+        },
+        path="contact_aux_metrics",
+    )
+    for invalid_metric in (
+        {"grammar_validity": {"query_count": -1}},
+        {"grammar_validity": {"query_count": 1.5}},
+        {"grammar_validity": {"validity": 1.00001}},
+        {"field_accuracy": {"accuracy": float("nan")}},
+    ):
+        try:
+            _validate_finite_metric_tree(
+                invalid_metric, path="contact_aux_metrics"
+            )
+        except CausalProductionError:
+            pass
+        else:
+            raise AssertionError("causal metric tree accepted invalid numeric domain")
+
     target_free = {key: object() for key in INFERENCE_PACKET_KEYS}
     target_free["window_id"] = "synthetic-target-free-window"
     validate_target_free_inference_packet(target_free)

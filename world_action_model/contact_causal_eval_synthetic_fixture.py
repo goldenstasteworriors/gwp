@@ -501,7 +501,10 @@ def _build_annotations_and_sidecars(
     config_path = annotation_root / "build-config.json"
     _write_json(config_path, config)
 
-    modes = ("exhaustive", "positive_only", "exhaustive")
+    # Every episode can appear alone as val/test under one production seed, so
+    # each must carry exhaustive negative supervision as well as a physical
+    # positive segment.
+    modes = ("exhaustive", "exhaustive", "exhaustive")
     coverage_by_role: dict[str, list[dict[str, Any]]] = {}
     segments_by_role: dict[str, list[dict[str, Any]]] = {}
     for role, annotator, suffix in (
