@@ -172,9 +172,27 @@ conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.
 After all seeds and transports pass their per-result checks, the final matrix
 checker must consume exactly nine results. It re-opens all 27 external
 checkpoint acceptances and rejects any reused training-run ID/nonce,
-reviewer-attestation nonce, acceptance-run ID/nonce or acceptance SHA. It also
+reviewer-attestation nonce, acceptance-run ID/nonce or acceptance SHA. These
+five identity namespaces are pairwise disjoint globally; an acceptance cannot
+alias a reviewer nonce to its own run identity or to the training run. It also
 re-applies the per-transport three-seed and per-seed three-transport contracts,
-including byte-identical initial weights within every matched seed.
+including byte-identical initial weights within every matched seed. Checkpoint
+training receipt v4 embeds the versioned cross-seed normalization schema. The
+checker canonicalizes the entire receipt and replaces only the exact listed
+checkpoint-artifact, run-identity and seed-derived JSON-pointer leaves. Dataset
+identity/source tree, hardware/capture, model/base/initial weights, training
+and evaluation code, optimizer/scheduler/precision, control config, schema and
+transport definitions are never normalized; unknown future fields therefore
+must match by default.
+
+Checkpoint bundle manifest v3 accepts one exact root layout only:
+`config.json` plus either the non-empty `diffusion_pytorch_model.bin` or the
+non-empty `diffusion_pytorch_model.safetensors`. The selected representation
+must match the reviewed `checkpoint_safe_serialization` training setting;
+config-only, mixed-format, nested, orphan and extra files are rejected. The
+trainer emits reviewed receipts only at steps 0, 100 and 200. Later ordinary
+checkpoints may still be saved by a long run, but cannot accidentally enter the
+production evidence chain.
 
 ```bash
 conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.py \

@@ -18,10 +18,59 @@ import stat
 from typing import Any
 
 
-BUNDLE_MANIFEST_VERSION = "contact-asym25-checkpoint-bundle/v2"
-TRAINING_RECEIPT_VERSION = "contact-asym25-checkpoint-training-receipt/v3"
+BUNDLE_MANIFEST_VERSION = "contact-asym25-checkpoint-bundle/v3"
+TRAINING_RECEIPT_VERSION = "contact-asym25-checkpoint-training-receipt/v4"
 ACCEPTANCE_VERSION = "contact-asym25-checkpoint-independent-acceptance/v2"
 PRODUCTION_STEPS = (0, 100, 200)
+CROSS_SEED_SCIENTIFIC_CONTRACT = {
+    "schema_version": "contact-asym25-cross-seed-scientific-contract/v1",
+    "comparison_semantics": (
+        "replace-only-the-listed-json-pointer-values-then-compare-the-entire-"
+        "checkpoint-training-receipt"
+    ),
+    "checkpoint_artifact_json_pointers": [
+        "/checkpoint_step",
+        "/checkpoint_bundle_manifest_sha256",
+        "/checkpoint_bundle_sha256",
+        "/parent_checkpoint_bundle_sha256",
+    ],
+    "run_identity_json_pointers": [
+        "/training_run_nonce",
+        "/training_run_id",
+        "/matched_control_receipt_sha256",
+        "/matched_control_external_acceptance_sha256",
+    ],
+    "seed_derived_json_pointers": [
+        "/split_seed",
+        "/production_preflight_receipt_sha256",
+        "/heldout_window_manifest_sha256",
+        "/training_gate_sha256",
+        "/current_training_data_receipt_sha256",
+        "/production_run_contract_sha256",
+        "/training_config_sha256",
+        "/training_config_receipt/seed",
+        "/train_window_receipt_sha256",
+        "/production_run_contract/preflight_receipt_sha256",
+        "/production_run_contract/train_window_receipt_sha256",
+        "/production_run_contract/training_config_sha256",
+        "/production_run_contract/training_config_receipt/seed",
+        "/production_run_contract/norm_stats_sha256",
+        "/current_training_data_receipt/base_training_data_receipt_sha256",
+        "/current_training_data_receipt/production_preflight_receipt_sha256",
+        "/current_training_data_receipt/heldout_window_manifest_sha256",
+        "/current_training_data_receipt/training_gate_sha256",
+        "/current_training_data_receipt/split_seed",
+        "/current_training_data_receipt/train_episode_ids",
+        "/current_training_data_receipt/validation_episode_ids",
+        "/current_training_data_receipt/heldout_episode_ids",
+        "/current_training_data_receipt/base_training_data_receipt/split_seed",
+        "/current_training_data_receipt/base_training_data_receipt/train_episode_ids",
+        "/current_training_data_receipt/base_training_data_receipt/validation_episode_ids",
+        "/current_training_data_receipt/base_training_data_receipt/heldout_episode_ids",
+        "/current_training_data_receipt/base_training_data_receipt/norm_stats_sha256",
+        "/current_training_data_receipt/base_training_data_receipt/training_gate_sha256",
+    ],
+}
 PRODUCTION_RUN_CONTRACT_KEYS = {
     "initial_weights_bundle_sha256",
     "base_model_bundle_sha256",
@@ -49,6 +98,10 @@ PRODUCTION_RUN_CONTRACT_KEYS = {
     "norm_stats_sha256",
 }
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_CHECKPOINT_WEIGHT_FILES = {
+    False: "diffusion_pytorch_model.bin",
+    True: "diffusion_pytorch_model.safetensors",
+}
 _EXCLUDED_EVIDENCE_FILES = frozenset(
     {
         "checkpoint_bundle_manifest.json",
@@ -71,6 +124,53 @@ def canonical_json_bytes(value: object) -> bytes:
 
 def sha256_json(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def canonicalize_cross_seed_scientific_contract(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Normalize only reviewed run/checkpoint/seed-local receipt leaves.
+
+    The whole receipt remains under comparison, so a future field is stable by
+    default.  Broad parent-object replacement is deliberately forbidden.
+    """
+
+    if value.get("cross_seed_scientific_contract") != CROSS_SEED_SCIENTIFIC_CONTRACT:
+        raise CheckpointAcceptanceError(
+            "checkpoint cross-seed scientific contract schema differs"
+        )
+    try:
+        normalized = json.loads(canonical_json_bytes(value).decode("utf-8"))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise CheckpointAcceptanceError(
+            "checkpoint receipt is not strict canonical JSON"
+        ) from exc
+    for category in (
+        "checkpoint_artifact_json_pointers",
+        "run_identity_json_pointers",
+        "seed_derived_json_pointers",
+    ):
+        pointers = CROSS_SEED_SCIENTIFIC_CONTRACT[category]
+        if not isinstance(pointers, list) or not pointers:
+            raise CheckpointAcceptanceError(
+                "cross-seed scientific normalization allowlist is empty"
+            )
+        for pointer in pointers:
+            parts = pointer.removeprefix("/").split("/")
+            cursor: Any = normalized
+            for part in parts[:-1]:
+                if not isinstance(cursor, dict) or part not in cursor:
+                    raise CheckpointAcceptanceError(
+                        f"cross-seed normalization path is absent: {pointer}"
+                    )
+                cursor = cursor[part]
+            leaf = parts[-1]
+            if not isinstance(cursor, dict) or leaf not in cursor:
+                raise CheckpointAcceptanceError(
+                    f"cross-seed normalization path is absent: {pointer}"
+                )
+            cursor[leaf] = f"__{category}:{pointer}__"
+    return normalized
 
 
 def _require_sha256(value: object, name: str) -> str:
@@ -193,12 +293,25 @@ def build_bundle_manifest(checkpoint_dir: str | Path) -> dict[str, Any]:
                 {"logical_path": relative, "sha256": digest, "size_bytes": size}
             )
     rows.sort(key=lambda row: row["logical_path"])
-    if not rows or not any(row["logical_path"] == "config.json" for row in rows):
-        raise CheckpointAcceptanceError("checkpoint bundle must contain config.json")
+    logical_paths = {row["logical_path"] for row in rows}
+    layouts = {
+        frozenset({"config.json", weight_name}): weight_name
+        for weight_name in _CHECKPOINT_WEIGHT_FILES.values()
+    }
+    try:
+        weight_file = layouts[frozenset(logical_paths)]
+    except KeyError as exc:
+        raise CheckpointAcceptanceError(
+            "checkpoint bundle must contain exactly config.json and one approved "
+            "complete weight file"
+        ) from exc
+    if any(row["size_bytes"] <= 0 for row in rows):
+        raise CheckpointAcceptanceError("checkpoint bundle files must be non-empty")
     core = {
         "files": rows,
         "file_count": len(rows),
         "total_size_bytes": sum(row["size_bytes"] for row in rows),
+        "weight_file": weight_file,
     }
     return {
         "manifest_version": BUNDLE_MANIFEST_VERSION,
@@ -217,6 +330,7 @@ def validate_bundle_manifest(
             "files",
             "file_count",
             "total_size_bytes",
+            "weight_file",
             "bundle_sha256",
         },
         "checkpoint bundle manifest",
@@ -234,6 +348,7 @@ def validate_training_receipt(value: object) -> dict[str, Any]:
         value,
         {
             "receipt_version",
+            "cross_seed_scientific_contract",
             "checkpoint_step",
             "checkpoint_bundle_manifest_sha256",
             "checkpoint_bundle_sha256",
@@ -277,6 +392,10 @@ def validate_training_receipt(value: object) -> dict[str, Any]:
     )
     if receipt["receipt_version"] != TRAINING_RECEIPT_VERSION:
         raise CheckpointAcceptanceError("checkpoint training receipt version mismatch")
+    if receipt["cross_seed_scientific_contract"] != CROSS_SEED_SCIENTIFIC_CONTRACT:
+        raise CheckpointAcceptanceError(
+            "checkpoint cross-seed scientific contract schema differs"
+        )
     for field in (
         "checkpoint_bundle_manifest_sha256",
         "checkpoint_bundle_sha256",
@@ -351,6 +470,7 @@ def validate_training_receipt(value: object) -> dict[str, Any]:
     if (
         not isinstance(training_config, dict)
         or not training_config
+        or not isinstance(training_config.get("checkpoint_safe_serialization"), bool)
         or isinstance(training_config.get("seed"), bool)
         or training_config.get("seed") != receipt["split_seed"]
         or sha256_json(training_config) != receipt["training_config_sha256"]
@@ -636,6 +756,17 @@ def validate_acceptance_claim(
     ):
         if not isinstance(acceptance[field], str) or len(acceptance[field]) < 16:
             raise CheckpointAcceptanceError(f"invalid independent {field}")
+    independent_identities = {
+        acceptance["reviewer_attestation_nonce"],
+        acceptance["acceptance_run_id"],
+        acceptance["acceptance_run_nonce"],
+        training_receipt["training_run_id"],
+        training_receipt["training_run_nonce"],
+    }
+    if len(independent_identities) != 5:
+        raise CheckpointAcceptanceError(
+            "reviewer, acceptance, and training identities must be pairwise distinct"
+        )
     report_path = acceptance["current_run_matched_report_path_record_only"]
     if not isinstance(report_path, str) or not Path(report_path).is_absolute():
         raise CheckpointAcceptanceError(
@@ -669,6 +800,11 @@ def validate_acceptance(
         training_receipt=training_receipt,
         training_receipt_sha256=training_receipt_sha256,
     )
+    expected_weight_file = _CHECKPOINT_WEIGHT_FILES[
+        training_receipt["training_config_receipt"][
+            "checkpoint_safe_serialization"
+        ]
+    ]
     if (
         acceptance["checkpoint_path_record_only"]
         != str(Path(checkpoint_dir).expanduser().absolute())
@@ -678,6 +814,7 @@ def validate_acceptance(
         != bundle_manifest["bundle_sha256"]
         or acceptance["checkpoint_training_receipt_sha256"]
         != training_receipt_sha256
+        or bundle_manifest.get("weight_file") != expected_weight_file
     ):
         raise CheckpointAcceptanceError("independent checkpoint acceptance binding differs")
     return acceptance

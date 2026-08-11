@@ -40,7 +40,9 @@ from world_action_model.contact_asym25_preflight import (
     validate_contact_sidecar_arrays,
 )
 from world_action_model.contact_asym25_checkpoint_acceptance import (
+    CROSS_SEED_SCIENTIFIC_CONTRACT,
     CheckpointAcceptanceError,
+    canonicalize_cross_seed_scientific_contract,
     strict_json_file as strict_checkpoint_json_file,
     validate_acceptance,
     validate_acceptance_claim,
@@ -2202,7 +2204,7 @@ def validate_three_seed_run_contracts(
     reviewer_nonces: set[str] = set()
     acceptance_run_nonces: set[str] = set()
     acceptance_run_ids: set[str] = set()
-    base_contracts: set[str] = set()
+    scientific_contracts: set[str] = set()
     for seed in EVALUATION_SEEDS:
         rows = evidence_by_seed[seed]
         if len(rows) != len(CHECKPOINT_STEPS):
@@ -2244,47 +2246,10 @@ def validate_three_seed_run_contracts(
             reviewer_nonces.add(acceptance["reviewer_attestation_nonce"])
             acceptance_run_nonces.add(acceptance["acceptance_run_nonce"])
             acceptance_run_ids.add(acceptance["acceptance_run_id"])
-            base_contracts.add(
+            scientific_contracts.add(
                 hashlib.sha256(
                     _canonical_json_bytes(
-                        {
-                            "experiment_family_id": receipt["experiment_family_id"],
-                            "variant_id": receipt["variant_id"],
-                            "transport_variant_id": receipt[
-                                "transport_variant_id"
-                            ],
-                            "initial_weights_bundle_sha256": receipt[
-                                "initial_weights_bundle_sha256"
-                            ],
-                            "base_model_bundle_sha256": receipt[
-                                "base_model_bundle_sha256"
-                            ],
-                            "training_code_receipt_sha256": receipt[
-                                "training_code_receipt_sha256"
-                            ],
-                            "dataset_source_tree_sha256": receipt[
-                                "dataset_source_tree_sha256"
-                            ],
-                            "runtime_environment_receipt_sha256": receipt[
-                                "runtime_environment_receipt_sha256"
-                            ],
-                            "optimizer_config_sha256": receipt[
-                                "optimizer_config_sha256"
-                            ],
-                            "scheduler_config_sha256": receipt[
-                                "scheduler_config_sha256"
-                            ],
-                            "stable_training_config_sha256": receipt[
-                                "stable_training_config_sha256"
-                            ],
-                            "training_precision": receipt["training_precision"],
-                            "contact_query_count": receipt["contact_query_count"],
-                            "contact_target_dim": receipt["contact_target_dim"],
-                            "contact_time_bins": receipt["contact_time_bins"],
-                            "action_schema_contract": receipt[
-                                "action_schema_contract"
-                            ],
-                        }
+                        canonicalize_cross_seed_scientific_contract(receipt)
                     )
                 ).hexdigest()
             )
@@ -2303,11 +2268,26 @@ def validate_three_seed_run_contracts(
         or len(acceptance_run_nonces)
         != len(EVALUATION_SEEDS) * len(CHECKPOINT_STEPS)
         or len(acceptance_run_ids) != len(EVALUATION_SEEDS) * len(CHECKPOINT_STEPS)
-        or len(base_contracts) != 1
+        or len(scientific_contracts) != 1
     ):
         raise HeldoutEvaluationError(
             "three seeds require globally distinct reviewer/acceptance/run identities "
-            "and one family/base contract"
+            "and one complete normalized scientific contract"
+        )
+    all_identities = (
+        {value[0] for value in run_contracts.values()}
+        | {value[1] for value in run_contracts.values()}
+        | reviewer_nonces
+        | acceptance_run_nonces
+        | acceptance_run_ids
+    )
+    expected_identity_count = (
+        2 * len(EVALUATION_SEEDS)
+        + 3 * len(EVALUATION_SEEDS) * len(CHECKPOINT_STEPS)
+    )
+    if len(all_identities) != expected_identity_count:
+        raise HeldoutEvaluationError(
+            "three-seed training and reviewer acceptance identity namespaces overlap"
         )
     return {
         "experiment_family_id": next(iter(run_contracts.values()))[2],
@@ -2326,7 +2306,8 @@ def validate_three_seed_run_contracts(
         "reviewer_attestation_nonces": sorted(reviewer_nonces),
         "acceptance_run_nonces": sorted(acceptance_run_nonces),
         "acceptance_run_ids": sorted(acceptance_run_ids),
-        "common_base_contract_sha256": next(iter(base_contracts)),
+        "cross_seed_scientific_contract": CROSS_SEED_SCIENTIFIC_CONTRACT,
+        "common_scientific_contract_sha256": next(iter(scientific_contracts)),
     }
 
 
@@ -2470,6 +2451,21 @@ def validate_nine_run_matrix(
     ):
         raise HeldoutEvaluationError(
             "nine-run matrix reuses training or reviewer acceptance identities"
+        )
+    all_identities = (
+        training_run_ids
+        | training_run_nonces
+        | reviewer_nonces
+        | acceptance_run_ids
+        | acceptance_run_nonces
+    )
+    expected_identity_count = (
+        2 * len(expected_keys)
+        + 3 * len(expected_keys) * len(CHECKPOINT_STEPS)
+    )
+    if len(all_identities) != expected_identity_count:
+        raise HeldoutEvaluationError(
+            "nine-run training and reviewer acceptance identity namespaces overlap"
         )
     family_ids = {
         contract["experiment_family_id"]

@@ -617,6 +617,7 @@ class CasualWATrainerMoT(Trainer):
                 f"production checkpoint directory was not written: {output_dir}"
             )
         from world_action_model.contact_asym25_checkpoint_acceptance import (
+            CROSS_SEED_SCIENTIFIC_CONTRACT,
             build_bundle_manifest,
             write_json_exclusive,
         )
@@ -647,7 +648,8 @@ class CasualWATrainerMoT(Trainer):
                 ) from exc
         current = self.current_training_data_receipt
         payload = {
-            "receipt_version": "contact-asym25-checkpoint-training-receipt/v3",
+            "receipt_version": "contact-asym25-checkpoint-training-receipt/v4",
+            "cross_seed_scientific_contract": CROSS_SEED_SCIENTIFIC_CONTRACT,
             "checkpoint_step": int(step),
             "checkpoint_bundle_manifest_sha256": bundle_manifest_file_sha256,
             "checkpoint_bundle_sha256": bundle_manifest["bundle_sha256"],
@@ -770,10 +772,14 @@ class CasualWATrainerMoT(Trainer):
         should_save = (
             self.cur_step % checkpoint_interval == 0 or self.cur_step == self.max_steps
         )
-        if should_save and self.current_training_data_receipt is not None:
+        is_production_evidence_step = (
+            self.current_training_data_receipt is not None
+            and self.cur_step in self.production_checkpoint_steps
+        )
+        if should_save and is_production_evidence_step:
             self._verify_production_training_source()
         super().save_checkpoint_step()
-        if should_save and self.current_training_data_receipt is not None:
+        if should_save and is_production_evidence_step:
             output_dir = self._production_checkpoint_dir(self.cur_step)
             self.accelerator.wait_for_everyone()
             self._write_production_checkpoint_receipt(output_dir, self.cur_step)

@@ -119,6 +119,10 @@ train-window contract. The structured training-config receipt retains the
 actual seed and its full hash; a second stable hash replaces only the seed with
 the literal `__CONTACT_ASYM25_SPLIT_SEED__`, so the nine-run aggregate can
 prove that different seeds introduce no hidden training-config changes. The
+checkpoint receipt additionally carries a versioned, HEAD-bound cross-seed
+normalization allowlist. The aggregate compares the complete canonical receipt
+after replacing only those exact seed/run/checkpoint-local leaves, so new
+scientific fields are stable by default rather than silently omitted. The
 required current-run identities are:
 
 ```bash
