@@ -189,6 +189,7 @@ CROSS_SEED_JSON_POINTERS = (
     "/checkpoint_file/current_run_trace_prefix_receipt/seed",
     "/checkpoint_file/current_run_trace_prefix_receipt/run_id",
     "/checkpoint_file/current_run_trace_prefix_receipt/run_nonce",
+    "/checkpoint_file/current_run_trace_prefix_receipt/record_sha256_by_key",
     "/checkpoint_file/current_run_trace_prefix_receipt/trace_path_record_only",
     "/checkpoint_file/current_run_trace_prefix_receipt/receipt_sha256",
 )
