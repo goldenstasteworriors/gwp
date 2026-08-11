@@ -386,7 +386,7 @@
   ],
   "missingness_masked": true,
   "model_action_dim": 32,
-  "norm_stats_sha256": "fd2ba8e76b9a5256d121e92624caf5f36f0e70966c76f72cc97dabbd17028f81",
+  "norm_stats_sha256": "eb12258aafa3485528623e3c0e313932518420f233a31a24e63c134e58986e4e",
   "physical_contact_truth": false,
   "report_version": "ego-action-grip-evidence/v2",
   "reviewed_at_utc": "2026-08-10T21:22:16Z",
