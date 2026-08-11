@@ -5,6 +5,7 @@
 - 实现：`world_action_model/sm_fet_minimal_r1d_schema.py`
 - 规范来源：`sm_fet_minimal_r1d_schema_contract_20260812.md`（`5019c182`）及优先级更高的 `sm_fet_minimal_r1d_freeze_addendum_20260812.md`（`c9ce174f`）
 - fix1 依据：`sm_fet_r1d_codec_independent_audit_20260812.md` 对 `dec1988` 的 P0=0/P1=8 独立审计
+- fix2 依据：`sm_fet_r1d_codec_fix1_independent_review_20260812.md` 对 `aa13981` 的 P0=0/P1=2 独立复审
 - 依赖：Python standard library only；CPU only
 
 ## 边界
@@ -37,7 +38,7 @@ profile bits   = UNDEFINED / NO-GO
 - fail-closed locator evidence boundary：unknown/missing/expired、non-unique support、completion/reconstruction 与 transparent missing-depth/normal/relation 不编码为 hard packet；
 - human shared semantic JSON 与 structured text 的 duplicate-preserving UTF-8 bytes parser、exact-key/string-enum/sort/duplicate/focus/EXHAUSTIVE/NULL/ontology-alias 校验、canonical JSON bytes 和 SHA-256；
 - 226-byte `public_execution_state_v1` 的 strict int64 clock、float32 finite/negative-zero、camera mode、quaternion sign/unit、held PAD/binding/part/uncertainty 与 hash 校验；quaternion/VERIFY tolerance及held enum来自 static-profile receipt 绑定的 immutable validation-policy artifact，调用方不能逐次放宽；
-- 六类 resource selector 的 exact little-endian target-key 回算、单constraint单resource唯一模板、physical actuator claim、同resource通用 target mutex、aperture恒mutex与explicit wrist compatibility；
+- 六类 resource selector 的 exact little-endian target-key 回算、单constraint单resource唯一模板、physical actuator claim、同resource通用 target mutex、aperture恒mutex与profile-bound wrist compatibility；
 - exact metric manifest/table/checksum、非末 cell 半开边界、固定 generator comparison；UV/depth/extent quantizer、vertical epsilon/angle tie、512-axis、roll seed/tie、正交右手FRAME、LINE/ARC/RASTER arc-length/tangent、fixed-normal PATH transport；
 - POINT/AXIS/FRAME partial-goal projection及profile-policy-bound VERIFY `HOLD_EXISTING` anchor oracle；
 - static profile、metric codebook、runtime resource、held public-state 四层 self-hashing receipt 校验，runtime receipt 不能替换 static profile hash。
@@ -72,7 +73,9 @@ held_public_state_receipt_v1:
 
 `sm_fet_r1d_public_state_validation_policy_v1` 使用 canonical binary64 hex 固定 quaternion、VERIFY position/axis/frame tolerance，使用strict int64固定public-state max age，并固定左右 held-binding enum；policy canonical JSON SHA-256 必须等于 static profile receipt 的 `public_state_validation_policy_sha256`。
 
-`sm_fet_r1d_resource_validation_context_v1` 固定controller/constant enums与actuator resource IDs；其canonical JSON hash同样必须由static profile receipt绑定。locator domain仍由当前冻结header严格给出，不进入该immutable enum artifact。
+`sm_fet_r1d_resource_validation_context_v1` 固定controller/constant enums、actuator resource IDs以及按bytewise target identity排序且无重复的有限`compatible_wrist_target_pairs`。该artifact经strict JSON/exact-key/content校验后成为只含tuple/frozenset的immutable `ResourceValidationContext`，其canonical JSON SHA-256必须等于static profile receipt的`resource_validation_context_sha256`。`validate_resource_compatibility()`不接受逐调用allowlist，因此同一profile/context bytes不能改变wrist mutex结论。locator domain仍由当前冻结header严格给出，不进入该immutable enum artifact。
+
+fix2同时删除了原`_snap_binary64_edge()`的8-ULP非零宽吸附带。Axis与roll对实际binary64 `atan2/asin`结果直接执行half-open `bisect_right`；严格低于/高于internal edge的representable结果不再被改写。Roll只对32个materialized decoded方向做exact tuple equality，以闭合构造性center/tie round-trip；该判定宽度为零，相邻float不会被吸附。Axis vertical分支仍严格按顺序计算`rho2=round64(round64(x*x)+round64(y*y))`，并以exact binary64 `0x1p-80`执行`rho2 <= epsilon2`。
 
 ## CPU conformance 结果
 
@@ -88,6 +91,8 @@ held_public_state_receipt_v1:
 - import-time constants：所有冻结整数、`bit_length(M)=97`、`gcd(65537,M)=1`、冻结 inverse 与 `96.99142134161319`。
 
 fix1 临时脚本累计执行 `195,279` 个检查/断言，规模不低于独立审计的 `165,247`；脚本与缓存在提交前删除。
+
+fix2另执行针对复审P1的完整CPU增量套件：profile-bound wrist table接受/拒绝/hash错配/直接构造伪造字段/无逐调用override；全部31个azimuth edge、15个elevation edge和31个roll edge的实际binary64邻点；`0x1p-80` vertical epsilon²等值及上下8个输入ULP；UV两个轴全部63个internal edge、depth全部31个internal edge、extent全部7个internal edge与RASTER全部4个internal vertex的上下1..8 ULP；512 axis与16,384 frame/roll center；固定seed `20260812`的37,000个production rank全链路。增量套件累计执行 `169,045` 个检查/断言，不低于复审规模；临时脚本与缓存在提交前删除。
 
 结论仅为：
 
