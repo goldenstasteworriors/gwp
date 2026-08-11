@@ -1439,17 +1439,6 @@ def validate_current_run_trace_prefix_receipt_v1(value: object) -> dict[str, Any
     if not path.is_absolute():
         raise CausalProductionError("current-run trace prefix path must be absolute")
     _sha(receipt["trace_prefix_bytes_sha256"], "current-run raw trace prefix")
-    try:
-        raw_payload, _, _ = read_verified_bytes(path)
-    except (OSError, ValueError) as exc:
-        raise CausalProductionError("cannot replay current-run raw trace prefix") from exc
-    prefix_size = receipt["trace_prefix_size_bytes"]
-    if (
-        len(raw_payload) < prefix_size
-        or hashlib.sha256(raw_payload[:prefix_size]).hexdigest()
-        != receipt["trace_prefix_bytes_sha256"]
-    ):
-        raise CausalProductionError("current-run raw trace prefix bytes changed")
     rows = receipt["record_sha256_by_key"]
     if not isinstance(rows, dict) or list(rows) != sorted(rows):
         raise CausalProductionError("current-run trace prefix manifest is not sorted")
@@ -1475,6 +1464,19 @@ def validate_current_run_trace_prefix_receipt_v1(value: object) -> dict[str, Any
 
 def replay_current_run_trace_prefix_v1(value: object) -> dict[str, Any]:
     receipt = validate_current_run_trace_prefix_receipt_v1(value)
+    try:
+        raw_payload, _, _ = read_verified_bytes(
+            receipt["trace_path_record_only"]
+        )
+    except (OSError, ValueError) as exc:
+        raise CausalProductionError("cannot replay current-run raw trace prefix") from exc
+    prefix_size = receipt["trace_prefix_size_bytes"]
+    if (
+        len(raw_payload) < prefix_size
+        or hashlib.sha256(raw_payload[:prefix_size]).hexdigest()
+        != receipt["trace_prefix_bytes_sha256"]
+    ):
+        raise CausalProductionError("current-run raw trace prefix bytes changed")
     records = load_trace_jsonl(
         receipt["trace_path_record_only"], route=receipt["causal_route_id"]
     )
