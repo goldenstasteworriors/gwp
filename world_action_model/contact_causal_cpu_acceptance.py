@@ -1321,6 +1321,10 @@ def _make_receipt(
         "trace_path_record_only": str(
             (checkpoint_path.parent / "synthetic-current-run-trace.jsonl").absolute()
         ),
+        "trace_prefix_size_bytes": 1,
+        "trace_prefix_bytes_sha256": _h(
+            f"synthetic-current-trace-prefix-bytes-{seed}-{route}-{step}"
+        ),
     }
     trace_prefix = {
         **trace_prefix_unsigned,
