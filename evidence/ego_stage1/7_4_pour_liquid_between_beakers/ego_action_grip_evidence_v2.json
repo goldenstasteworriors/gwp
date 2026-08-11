@@ -97,7 +97,7 @@
     19
   ],
   "grip_proxy_loss_weight_when_active": 0.25,
-  "hand_active_meta_sha256": "e1d2b6f05768ec1b4c797e527852dc6d9bb78d89c51f156ebd087a2cf80e142f",
+  "hand_active_meta_sha256": "7f03dc79decde45570e424265d2e0eb0ec03808ea2c57dfe475007beae492b4a",
   "hand_active_raw_hdf5_bundle_sha256": "f074948ce59928b90f3122b205693590e74a114c1f54172ff41e938fe84db6cb",
   "hand_active_semantics": "binary_tracker_validity_0_inactive_1_active",
   "hand_active_sidecar_bundle_sha256": "72fff6f1a17916cc76cb0057eb77350e56cd1b883bd69759fe93131efc023fe9",
@@ -386,7 +386,7 @@
   ],
   "missingness_masked": true,
   "model_action_dim": 32,
-  "norm_stats_sha256": "4510baf1dbbdfc7daf92846e377ed3f9d1ae486b10e02ec47ed92bcb477b1370",
+  "norm_stats_sha256": "fd2ba8e76b9a5256d121e92624caf5f36f0e70966c76f72cc97dabbd17028f81",
   "physical_contact_truth": false,
   "report_version": "ego-action-grip-evidence/v2",
   "reviewed_at_utc": "2026-08-10T21:22:16Z",
@@ -394,7 +394,7 @@
   "source_action_dim": 20,
   "source_evidence": {
     "path": "ego_action_grip_source_receipt_v1.json",
-    "sha256": "444f82a1241ce122191b14a5780bd06e6248a164549b96da356f548c6d275a4c"
+    "sha256": "321c3434e0374615ac19e88ff7da1ae2210757410b056977866d3d5fc64e7069"
   },
   "source_hand_status_semantics": "closure_fraction_0_open_1_closed",
   "source_receipt_sha256": "d4873e6c0670a07aed9d48e4fea064ce56b402a408fff241bf6c3d243278d552",
@@ -407,7 +407,7 @@
     "pair_mask_recorded": true,
     "validity": "active_at_target_minus_1_and_target"
   },
-  "wam_code_receipt_sha256": "0e70c8fc199756657ccef1ac082e597e374553d169592f64902365d695345ecb",
+  "wam_code_receipt_sha256": "f45e26e467c331a651b629846f503c4567cfdc2321f4c154d0189eaf60ce0385",
   "wrist_action_dimensions_unaffected": [
     0,
     1,
