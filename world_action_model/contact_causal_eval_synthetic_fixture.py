@@ -2873,6 +2873,13 @@ def run_serialized_full_evaluator_acceptance(
     decord_stub.__spec__ = ModuleSpec("decord", loader=None)
     decord_stub.VideoReader = _forbidden_optional_dependency
     sys.modules["decord"] = decord_stub
+    video_utils_stub = types.ModuleType("giga_datasets.video_utils")
+
+    def _forbidden_video_utils_attribute(_name):
+        return _forbidden_optional_dependency
+
+    video_utils_stub.__getattr__ = _forbidden_video_utils_attribute
+    sys.modules["giga_datasets"].video_utils = video_utils_stub
 
     from world_action_model.contact_causal_heldout_eval import (
         build_aggregate_v5,
@@ -2994,6 +3001,9 @@ def run_serialized_full_evaluator_acceptance(
         "optional_import_stub_scope": {
             "ftfy": "precomputed-T5 scorer path; invocation raises",
             "decord": "skip_video_decoding target path; invocation raises",
+            "giga_datasets.video_utils": (
+                "no video decode/write in target scorer; invocation raises"
+            ),
         },
     }
     _write_json(Path(output_path), report)
