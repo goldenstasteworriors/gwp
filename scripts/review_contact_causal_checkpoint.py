@@ -19,6 +19,24 @@ import sys
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _reject_project_bytecode_cache(root: Path) -> None:
+    """Prevent reviewed project imports from resolving through repository pyc."""
+
+    sys.dont_write_bytecode = True
+    for current, directory_names, file_names in os.walk(root, followlinks=False):
+        relative = Path(current).relative_to(root)
+        directory_names[:] = [
+            name
+            for name in directory_names
+            if not (relative == Path(".") and name in {".git", "outputs"})
+        ]
+        if "__pycache__" in directory_names or any(name.endswith(".pyc") for name in file_names):
+            raise RuntimeError("checkpoint reviewer forbids repository bytecode caches")
+
+
+_reject_project_bytecode_cache(REPOSITORY_ROOT)
 _REVIEWER_BOOTSTRAP_PATHS = (
     "configs/contact_causal_production_matrix.v1.json",
     "configs/giga_world_policy_0_5_ego_contact_pretrain.py",

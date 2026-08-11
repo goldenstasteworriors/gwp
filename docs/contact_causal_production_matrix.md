@@ -31,17 +31,23 @@ Forward/backward proxy FLOPs, peak memory, wall time, and latency live only in
 `diagnostic_not_admission`. They are finite diagnostics, are not compared for
 Go, and especially do not turn the direct route into a compute/backward-matched
 control. Admission equality is limited to exact live topology, gradient sets
-and counts, optimizer/scheduler schemas and states, and the versioned codec.
+and counts, optimizer/scheduler named schema and hyperparameters,
+sampling/noise, source code, and the versioned codec. Step-100/200 optimizer
+numeric values are route outcomes and are not required to be equal.
 
 The route-local and seed-derived differences are the exact JSON pointers in
 the matrix manifest. The canonical comparator replaces only those leaves and
 then compares the complete receipt. A new or unknown field is stable by
-default. Direct's inactive parameters must be exactly
-`contact_condition_encoder.bias` and `contact_condition_encoder.weight`; a
-prefix/subset claim is rejected. They may have no gradient, optimizer state,
-or drift. The strict routes may not declare unused parameters. Parameter and
-buffer schemas, optimizer groups, scheduler state, and active/observed sets
-are recomputed from the live model/optimizer objects.
+default. The architecture-derived common inactive set is exact for all routes;
+direct adds exactly `contact_condition_encoder.bias` and
+`contact_condition_encoder.weight`. A prefix/subset or shared extra omission
+is rejected. The direct-only pair may have no gradient or optimizer state.
+Parameter/buffer schemas, optimizer groups, scheduler schema, and
+active/observed/action-loss-gradient sets are recomputed from live objects and
+bound into the current-run trace attestation. The independent reviewer checks
+that attestation's structure, hashes, raw trace bytes, run identity, and
+monotonic checkpoint prefix; it does not claim to externally reconstruct the
+training history or equalize route-dependent optimizer numeric values.
 
 ## Route-neutral Ego precursor
 
@@ -179,7 +185,10 @@ domain checks without treating the equal-bit packet as semantic labels.
 Result v3 also snapshots every file in the base-model artifact tree and records
 the exact Python/package/CUDA/device/dtype/inference environment. Replay hashes
 the tree again; aggregate v5 requires the base-model tree and environment to be
-byte-identical across all nine runs.
+byte-identical across all nine runs. File-backed result and aggregate
+validation always launches a fresh target-free prediction worker and compares
+every prediction array; callers cannot disable replay while retaining
+`verify_files=true`.
 
 After building a reviewed checkpoint manifest v3, run one route/seed result:
 
@@ -214,16 +223,21 @@ weight files under the project output mount, validates the complete matrix and
 negative cases, and removes the temporary files before returning. It also
 compares 15 protected legacy files byte-for-byte with the op42 baseline. A
 second CPU subprocess uses the existing `labvla` environment and bypasses only
-three unrelated package `__init__` side-effect chains; its report names that
-stub scope and proves that the real WAM loader module was imported. It executes
+the explicitly reported package-`__init__` registration/optional-import side
+effects; its report names the complete stub scope and proves that the real WAM
+loader and FastLeRobotDataset modules were imported. It executes
 the real loader constructor plus `open()`/sample read, verified parquet/T5 and
-reviewed sidecar replay, and real collector batch record path. The harness only
-stubs package initializers unrelated to those target modules; no dependency is
-installed. A passing synthetic audit is
-implementation evidence only: it does not claim
-benefit, admit production data, or authorize server/5B training.
+reviewed sidecar replay, real collector batch record path, and the production
+prediction CLI with a safely loaded three-parameter tiny checkpoint. That
+prediction is explicitly marked `test_only_tiny_runtime=true`, is CPU/float32,
+uses the same target-free source projection, and is fully replayed. Production
+config rejects the tiny flag and production results require CUDA/bfloat16. No
+dependency is installed. A passing synthetic audit is implementation evidence
+only: it does not claim benefit, admit production data, prove the 5B runtime,
+or authorize server/5B training.
 
-The v3 trace comparator accepts exactly one trace file per new route argument:
+The v3 trace comparator accepts one trace file per rank; repeat each route
+argument for multi-rank runs:
 
 ```bash
 CUDA_VISIBLE_DEVICES='' conda run -n dit4dit python -B scripts/compare_contact_causal_matrix_hashes.py \
@@ -235,6 +249,18 @@ CUDA_VISIBLE_DEVICES='' conda run -n dit4dit python -B scripts/compare_contact_c
 ```
 
 换行位置：每个行尾反斜杠后换行；替换 seed、三个 trace 和 output 的项目盘绝对路径。输出使用 O_EXCL，已存在文件会拒绝；不要使用 `/tmp`。
+
+## Threat boundary
+
+Admission binds current committed HEAD, runtime source bytes, no-follow
+artifact reads, raw trace bytes, unique identities, and independent O_EXCL
+review artifacts. Repository bytecode caches are rejected before evaluator or
+checkpoint-reviewer project imports, and prediction subprocesses use a newly
+created empty pycache prefix. This is an integrity/reproducibility contract for
+cooperating processes under the project account. It is not a TEE, code-signing
+system, or defense against a same-UID actor that can modify a running process,
+its open file descriptors, or memory. External signatures/TEE attestation are
+outside op42's threat model.
 
 ## Current decision
 
