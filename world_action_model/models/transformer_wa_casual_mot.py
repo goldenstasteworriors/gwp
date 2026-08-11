@@ -2261,12 +2261,29 @@ class CasualWorldActionTransformer_MoT(
             raw_id = (bits.to(dtype=torch.int64) * weights).sum(dim=-1)
             if bool((raw_id >= EQUAL_BIT_VALID_STATES).any()):
                 raise RuntimeError("equal-bit cache contains an invalid raw id")
-        elif (
-            self.contact_causal_route is ContactCausalRoute.HARD_ST_SEMANTIC
-            and self.contact_causal_route_explicit
-        ):
+        else:
+            route_metadata = self._validated_contact_route_metadata()
+            finite_semantic_packet = bool(
+                route_metadata.get("action_visible_packet_finite_semantic_grammar", False)
+            )
+            if finite_semantic_packet and (
+                route_metadata.get("action_visible_packet")
+                != "canonical_contact_semantic_22d"
+                or self.contact_semantic_transport_mode not in {"hard_st", "hard_detached"}
+                or self.contact_schema_version != SEGMENT_SCHEMA_VERSION
+                or self.contact_target_dim != SEGMENT_TARGET_DIM
+                or self.contact_condition_dim != SEGMENT_TARGET_DIM
+            ):
+                raise RuntimeError("finite semantic route receipt contradicts model schema")
+            if not finite_semantic_packet:
+                return contact_packet_receipt(
+                    route_receipt=route_metadata,
+                    packet_bytes=self._canonical_packet_bytes(packet),
+                    packet_dtype=str(packet.dtype),
+                    packet_shape=tuple(packet.shape),
+                )
             if self.contact_time_bins != 16:
-                raise RuntimeError("hard semantic cache receipt requires B=16")
+                raise RuntimeError("finite hard semantic cache requires the B16 grammar")
             self._validate_hard_semantic_packet(packet)
 
         return contact_packet_receipt(

@@ -59,14 +59,21 @@ logits只作为 grouped contact auxiliary prediction和 ST 源，不直接进入
   prefix KV，不保存 raw logits、semantic 或 reference KV。
 - equal-bit cache 检查精确 `[B,Q,22]` shape、与 encoder 相同的 floating dtype/device、
   finite、前 16 维严格 `{0,1}`、后六维严格 IEEE-754 `+0`、little-endian raw ID `<48673`。
-- 显式 `hard_st_semantic` cache 直接验证完整 B16 hard grammar：canonical absent、presence、
-  side/site/role/mode one-hot、tau lattice、`start<=end`、censor/tau 一致和所有零为 `+0`；
-  不把 packet 当 logits 重新 transport。其每 query 接受域精确为 48,673 个状态。
+- route receipt 声明 finite semantic packet 的所有 resolved `hard_st/hard_detached` route
+  都直接验证同一完整 B16 hard grammar，包括 implicit/explicit hard-ST 和 hard-detached：
+  canonical absent、presence、side/site/role/mode one-hot、tau lattice、`start<=end`、
+  censor/tau 一致和所有零为 `+0`。不把 packet 当 logits 重新 transport；每 query 接受域
+  精确为 48,673 个状态。非 B16 finite hard cache fail closed，但普通 legacy forward 不变。
+- soft semantic receipt 明确不声明 finite grammar，连续 `0.25` 等有限 packet 仍可缓存；
+  direct 无 packet，equal-bit 继续使用独立 codec validator。
 - packet receipt 从已验证的 canonical packet bytes、dtype/shape 和重新生成的 route contract
   计算，并与 model-held receipt 比较；同时篡改 packet 和 cache 内 receipt 也会拒绝。
 - trainer 要求 top-level route 与 transformer resolved route 均显式且一致；三条 spec route
   的 grouped contact loss weight 必须 finite 且 `>0`，target、显式 mask 和真实正的有效
-  supervision count 都必须存在；全零 mask、NaN weight fail closed。legacy missingness 不变。
+  supervision count 都必须存在。loss 与 validator 共享 `contact_grouped_supervision_v1`：
+  presence、两个 censor 和两个 tau 分别计项，side/site/role/mode 仅在整组 mask 精确全 1
+  时各计一项，并跨全部 B/T/Q 前导维求和。全零或类别组仅开一维、NaN weight 均
+  fail closed；legacy missingness 不变。
 
 ## CPU audit 与 same-noise harness
 
@@ -93,8 +100,8 @@ audit 覆盖：
 6. `encode_action_tokens` 的 AST/参数没有 raw planner hidden/logits/reference/future route；
 7. legacy soft/hard-ST/hard-detached transport、action/contact forward bytes和 state_dict
    key 集兼容；
-8. matrix checkpoint/runtime 替换、cache grammar/receipt、trainer route mismatch、全零 mask、
-   NaN weight 等负例；
+8. matrix checkpoint/runtime 替换、implicit/explicit hard/detached cache grammar/receipt、
+   soft 连续 cache、trainer route mismatch、全零/partial-category mask、NaN weight 等负例；
 9. config receipt、每个 route receipt和完整 report使用 canonical JSON SHA-256，未使用
    Python `hash()`；顶层 `passed` 由全部命名 invariant 归约，不是固定常量；
 10. production runner exact set 和 gate protected paths 相对 baseline 为零 diff。报告明确

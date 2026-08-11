@@ -24,7 +24,7 @@ from world_action_model.contact_transition_schema import (
 )
 
 
-CONTACT_CAUSAL_ROUTE_CONTRACT_VERSION = "contact_causal_route_contract_v2"
+CONTACT_CAUSAL_ROUTE_CONTRACT_VERSION = "contact_causal_route_contract_v3"
 CONTACT_PACKET_RECEIPT_VERSION = "contact_action_packet_receipt_v1"
 SPEC_ONLY_IMPLEMENTATION_STATUS = "implemented_cpu_route_unadmitted"
 
@@ -292,6 +292,12 @@ def contact_route_metadata(
             time_bins=time_bins,
             num_queries=num_queries,
         )
+    finite_semantic_packet = bool(
+        not direct
+        and not equal_bit
+        and capacity is not None
+        and capacity.get("finite_capacity", False)
+    )
     payload = {
         "contract_version": CONTACT_CAUSAL_ROUTE_CONTRACT_VERSION,
         "implementation_status": SPEC_ONLY_IMPLEMENTATION_STATUS,
@@ -333,6 +339,7 @@ def contact_route_metadata(
             else "legacy_semantic_packet_kv_without_reference_aux_logits_output_only"
         ),
         "capacity": capacity,
+        "action_visible_packet_finite_semantic_grammar": finite_semantic_packet,
         "hard_semantic_grammar_version": (
             HARD_SEGMENT_GRAMMAR_VERSION
             if transport in {"hard_st", "hard_detached"}
