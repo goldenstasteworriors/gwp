@@ -10,6 +10,7 @@ import json
 import math
 from pathlib import Path
 import re
+import subprocess
 from typing import Any
 
 
@@ -50,6 +51,26 @@ SCENARIO_KEYS = {
     "ground_truth_contract_id",
 }
 SEED_KEYS = {"physics", "render", "policy"}
+REPO_ROOT = HERE.parents[1]
+EXECUTION_HEAD_LOGICAL_PATHS = (
+    "track_b/sim_oracle_benchmark_v0/benchmark_spec.json",
+    "track_b/sim_oracle_benchmark_v0/generate_scenarios.py",
+    "track_b/sim_oracle_benchmark_v0/validate_sim_oracle_manifest.py",
+    "track_b/sim_oracle_benchmark_v0/verify_sim_oracle_results.py",
+)
+EXECUTION_RECEIPT_KEYS = {
+    "benchmark_spec_sha256",
+    "execution_manifest_sha256",
+    "current_head_code_receipt",
+    "engine_id",
+    "engine_version",
+    "reviewers",
+    "evidence_bundle_path",
+    "evidence_bundle_sha256",
+    "capability_tests",
+    "approved_for_benchmark",
+    "approved_at_utc",
+}
 
 
 class ManifestError(ValueError):
@@ -78,11 +99,64 @@ def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def load_json_value(payload: str) -> Any:
-    return json.loads(
+    value = json.loads(
         payload,
         object_pairs_hook=_strict_json_object,
         parse_constant=_reject_nonfinite_json_constant,
     )
+    _reject_nonfinite_numbers(value)
+    return value
+
+
+def _reject_nonfinite_numbers(value: Any, path: str = "json") -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ManifestError(f"{path} contains a non-finite/overflow number")
+    if isinstance(value, dict):
+        for key, child in value.items():
+            _reject_nonfinite_numbers(child, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_nonfinite_numbers(child, f"{path}[{index}]")
+
+
+def _git_bytes(*arguments: str) -> bytes:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *arguments],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ManifestError("cannot verify simulator admission code against Git HEAD") from exc
+
+
+def current_head_code_receipt() -> dict[str, Any]:
+    commit = _git_bytes("rev-parse", "--verify", "HEAD^{commit}").decode("ascii").strip()
+    files = []
+    for logical_path in EXECUTION_HEAD_LOGICAL_PATHS:
+        runtime_path = REPO_ROOT / logical_path
+        head_payload = _git_bytes("cat-file", "blob", f"HEAD:{logical_path}")
+        runtime_payload = runtime_path.read_bytes()
+        head_sha256 = hashlib.sha256(head_payload).hexdigest()
+        runtime_sha256 = hashlib.sha256(runtime_payload).hexdigest()
+        require(
+            head_payload == runtime_payload,
+            f"execution admission code differs from HEAD: {logical_path}",
+        )
+        files.append(
+            {
+                "logical_path": logical_path,
+                "git_blob_sha1": _git_bytes(
+                    "rev-parse", "--verify", f"HEAD:{logical_path}"
+                ).decode("ascii").strip(),
+                "head_blob_sha256": head_sha256,
+                "head_blob_size_bytes": len(head_payload),
+                "runtime_sha256": runtime_sha256,
+                "runtime_size_bytes": len(runtime_payload),
+            }
+        )
+    return {"git_commit": commit, "files": files}
 
 
 def load_object(path: Path) -> dict[str, Any]:
@@ -435,9 +509,24 @@ def _validate_execution_binding(
 
     receipt = readiness.get("execution_receipt")
     require(isinstance(receipt, dict), "go readiness requires execution_receipt")
+    require_keys(
+        receipt,
+        required=EXECUTION_RECEIPT_KEYS,
+        allowed=EXECUTION_RECEIPT_KEYS,
+        path="readiness.execution_receipt",
+    )
     require(
         receipt.get("benchmark_spec_sha256") == manifest.get("benchmark_spec_sha256"),
         "readiness execution_receipt is bound to a different benchmark spec",
+    )
+    require(
+        receipt.get("execution_manifest_sha256") == sha256_file(_MANIFEST_PATH),
+        "readiness execution_receipt is bound to a different execution manifest",
+    )
+    expected_code_receipt = current_head_code_receipt()
+    require(
+        receipt.get("current_head_code_receipt") == expected_code_receipt,
+        "readiness execution_receipt does not bind current HEAD spec/validator bytes",
     )
     require(receipt.get("engine_id") == engine["id"], "readiness engine_id mismatch")
     require(receipt.get("engine_version") == engine["version"], "readiness engine_version mismatch")

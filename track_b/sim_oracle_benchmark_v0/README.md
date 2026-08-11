@@ -76,6 +76,8 @@ cd /home/ykj/project/WM/giga-world-policy
 
 `verify_sim_oracle_results.py` 只接受 execution-ready manifest；它会重新哈希 manifest、adapter、assets、calibration receipts、variant config/checkpoint bundle manifest、field prediction/evaluator 和每个 native GT artifact（相同 immutable path/size/mtime 在单次核验中只读一次），检查全矩阵 paired coverage 与相同 scenario 的 control/GT receipts，再重算 volume/mass/success/contact timing/risk 指标、汇总带 provenance 的 field metrics并计算 gate。当前不要运行它来制造结果。
 
+Execution admission 还要求外部 readiness receipt 精确绑定 execution manifest SHA-256，并逐字节核验当前 Git `HEAD` 中的 benchmark spec、generator、manifest validator 和 result verifier 与运行时文件一致。工作树中任一受绑代码有未提交改动，或 readiness 仍是当前 `no_go`/缺少 execution receipt，execution mode 都必须 fail closed；spec-only 仍不构成执行授权。
+
 审计 verifier 逻辑时，可以在 CPU 内存中构造完整的 1,904 条 synthetic paired records，并显式关闭 artifact 读取来做正反例测试；这种测试只证明 pairing、schema 和 gate 代码行为，不是 simulator rollout、物理证据或 benchmark 结果，不能写入 execution report。
 
 ## 代码与数据位置

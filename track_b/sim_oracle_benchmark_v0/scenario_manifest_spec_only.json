@@ -5,7 +5,7 @@
   "generation": {
     "generator": "generate_scenarios.py",
     "generator_seed": 330811,
-    "generator_sha256": "7d694ef5a77113ecd455be3009447f3d38c13bf2240400b9cd6fbf4c8dba8fd3",
+    "generator_sha256": "903daeb2ff2007c0e1c04eccd91a31c67513bbbfc772f55ac65d5a08a321878e",
     "method": "deterministic balanced cyclic factor assignment; generator reports marginal counts and does not claim covering-array optimality"
   },
   "scenarios": [

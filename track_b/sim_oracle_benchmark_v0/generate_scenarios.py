@@ -14,6 +14,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from validate_sim_oracle_manifest import load_object
+
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_SPEC = HERE / "benchmark_spec.json"
@@ -31,11 +33,7 @@ def _sha256_file(path: Path) -> str:
 
 
 def _load_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as stream:
-        value = json.load(stream)
-    if not isinstance(value, dict):
-        raise ValueError(f"{path} must contain a JSON object")
-    return value
+    return load_object(path)
 
 
 def _pick(values: list[Any], condition_index: int, factor_index: int, offset: int) -> Any:
