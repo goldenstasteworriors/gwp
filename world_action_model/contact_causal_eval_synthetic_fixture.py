@@ -12,6 +12,7 @@ import csv
 from copy import deepcopy
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
