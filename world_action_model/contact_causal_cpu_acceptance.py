@@ -1260,13 +1260,29 @@ def _make_receipt(
     checkpoint_sha = inspected["weight_file_sha256"]
     parameter_sha256 = parameter_topology["parameter_tensor_sha256"]
     buffer_sha256 = parameter_topology["buffer_tensor_sha256"]
-    trace_prefix = build_current_run_trace_prefix_receipt_v1(
-        [], route=route, seed=seed,
-        run_id=f"training-run-id-{run_label}",
-        run_nonce=f"training-run-nonce-{run_label}",
-        rank=0, world_size=1, through_checkpoint_step=step,
-        trace_path=checkpoint_path.parent / "synthetic-current-run-trace.jsonl",
-    )
+    trace_prefix_unsigned = {
+        "receipt_version": "contact-causal-current-run-trace-prefix/v1",
+        "causal_route_id": route,
+        "seed": seed,
+        "run_id": f"training-run-id-{run_label}",
+        "run_nonce": f"training-run-nonce-{run_label}",
+        "rank": 0,
+        "world_size": 1,
+        "through_checkpoint_step": step,
+        "record_count": 1,
+        "record_sha256_by_key": {
+            f"step{step}/micro0/rank0": _h(
+                f"synthetic-current-trace-{seed}-{route}-{step}"
+            )
+        },
+        "trace_path_record_only": str(
+            (checkpoint_path.parent / "synthetic-current-run-trace.jsonl").absolute()
+        ),
+    }
+    trace_prefix = {
+        **trace_prefix_unsigned,
+        "receipt_sha256": sha256_json(trace_prefix_unsigned),
+    }
     return {
         "receipt_version": "contact-asym25-checkpoint-training-receipt/v5",
         "matrix_schema_version": MATRIX_SCHEMA_VERSION,
