@@ -119,12 +119,12 @@
         "runtime_size_bytes": 45090
       },
       {
-        "git_blob_sha1": "23664364a6c394c843ceb13c79c03dc6c7bce96c",
-        "head_blob_sha256": "b1ad946076568b5a38e7c6e18499c7ab150ad27feb24ac352f86367595396a4f",
-        "head_blob_size_bytes": 38352,
+        "git_blob_sha1": "6d2938f13ab56ee00ac67647f97e3651fbaee7a4",
+        "head_blob_sha256": "675d94f69dd8ba940e5b8a4f76a02c93bf5ce2360fac74f13954026d38791191",
+        "head_blob_size_bytes": 39167,
         "logical_path": "world_action_model/trainer/wa_casual_trainer_mot.py",
-        "runtime_sha256": "b1ad946076568b5a38e7c6e18499c7ab150ad27feb24ac352f86367595396a4f",
-        "runtime_size_bytes": 38352
+        "runtime_sha256": "675d94f69dd8ba940e5b8a4f76a02c93bf5ce2360fac74f13954026d38791191",
+        "runtime_size_bytes": 39167
       },
       {
         "git_blob_sha1": "26990170ab83cd6dbd5b10d85ea0196c80de63ca",
@@ -191,8 +191,8 @@
         "runtime_size_bytes": 7851
       }
     ],
-    "git_commit": "74d2ffca3bb6286bb365a5dda0d79974a962190b",
+    "git_commit": "5c3027d9a697bb8e3293c5aafd1cbf670becd155",
     "repository_path_record_only": "/home/ykj/project/WM/gwp-agent-op30-integration"
   },
-  "wam_code_receipt_sha256": "7e53d0830f29a4e9cbd85cb00c7d58f9daa22804f1399788f710dbc84e7658d1"
+  "wam_code_receipt_sha256": "d447befad70db417757a1ab87b0d10179519f42c097a03708e6110325d518c1c"
 }
