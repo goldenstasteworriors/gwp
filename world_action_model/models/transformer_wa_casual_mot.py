@@ -1204,6 +1204,9 @@ class CasualWorldActionTransformer_MoT(
             )
         if not torch.isfinite(contact_logits).all():
             raise ValueError("equal-bit transport requires finite planner logits")
+        self._validated_equal_bit_mixing_matrix(
+            device=contact_logits.device, dtype=torch.float32
+        )
         mixed_logits = stable_equal_bit_mixed_logits(contact_logits)
         soft_bits = mixed_logits.sigmoid().to(dtype=contact_logits.dtype)
         raw_bits = (mixed_logits >= 0).to(dtype=contact_logits.dtype)
