@@ -1,4 +1,4 @@
 schema_version,task_id,media_id,media_filename,video_bytes,video_sha256,video_frames,video_duration_s,video_fps,video_width,video_height,video_codec,hash_status
-sm_fet_d0_calibration_packet_v1_fix1,sm-fet-d0-cal-00,d0cal-media-00,sm-fet-d0-cal-00.mp4,3422955,4e03396690a21bc81ce1a20904692cd5a477b312022a74fe13c62bff0902c692,324,10.800000,30.0,640,480,mpeg4,verified_from_ego_source_20260812
-sm_fet_d0_calibration_packet_v1_fix1,sm-fet-d0-cal-01,d0cal-media-01,sm-fet-d0-cal-01.mp4,3823238,061f0b24aee2396bde201cb0fbd884c16cca14ed35236af2b45b25631488cf2a,384,12.800000,30.0,640,480,mpeg4,verified_from_ego_source_20260812
-sm_fet_d0_calibration_packet_v1_fix1,sm-fet-d0-cal-02,d0cal-media-02,sm-fet-d0-cal-02.mp4,6595743,5582effa3a634b735a2441cc9087e3a52685192e80bf7d0c6225205885387fd0,599,19.966667,30.0,640,480,mpeg4,verified_from_ego_source_20260812
+sm_fet_d0_calibration_packet_v1_fix2,sm-fet-d0-cal-00,d0cal-media-00,sm-fet-d0-cal-00.mp4,3422955,4e03396690a21bc81ce1a20904692cd5a477b312022a74fe13c62bff0902c692,324,10.800000,30.0,640,480,mpeg4,verified_from_ego_source_20260812
+sm_fet_d0_calibration_packet_v1_fix2,sm-fet-d0-cal-01,d0cal-media-01,sm-fet-d0-cal-01.mp4,3823238,061f0b24aee2396bde201cb0fbd884c16cca14ed35236af2b45b25631488cf2a,384,12.800000,30.0,640,480,mpeg4,verified_from_ego_source_20260812
+sm_fet_d0_calibration_packet_v1_fix2,sm-fet-d0-cal-02,d0cal-media-02,sm-fet-d0-cal-02.mp4,6595743,5582effa3a634b735a2441cc9087e3a52685192e80bf7d0c6225205885387fd0,599,19.966667,30.0,640,480,mpeg4,verified_from_ego_source_20260812

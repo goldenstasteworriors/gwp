@@ -1,0 +1,18 @@
+{
+  "submission_receipt_schema_version": "sm_fet_d0_submission_receipt_v1_fix2",
+  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix2",
+  "packet_id": "sm-fet-d0-calibration-a-v1-fix2",
+  "annotation_role": "independent_a",
+  "annotator_id": "d0cal-annotator-a",
+  "annotation_session_id": "d0cal-session-a-20260812",
+  "assignment_receipt_sha256": "54e17f8254ca74357d016dabcf94c6e250fb3bc2eff152b920dac779aa16c8b3",
+  "submission_status": "not_submitted",
+  "annotation_started": false,
+  "submitted_at_utc": "",
+  "write_locked": false,
+  "identity_sha256": "",
+  "session_sha256": "",
+  "annotation_sha256": {},
+  "content_lock_sha256": "",
+  "resigned_by_role": ""
+}

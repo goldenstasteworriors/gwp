@@ -1,6 +1,6 @@
 {
-  "manifest_schema_version": "sm_fet_d0_csv_schema_manifest_v1",
-  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix1",
+  "manifest_schema_version": "sm_fet_d0_csv_schema_manifest_v1_fix2",
+  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix2",
   "frame_clock": "raw_video_frame_30fps",
   "csv_dialect": {
     "encoding": "utf-8",
@@ -14,13 +14,13 @@
       "kind": "immutable_manifest",
       "header": "schema_version,task_id,dataset_id,episode_id,media_id,frame_clock,coverage_start_frame,coverage_end_frame,required_review,calibration_only,formal_blind_overlap",
       "header_sha256": "187c27d002ff38334b6109dbe5c0a0e6b3df6fff3509f505f1841ab9e0765773",
-      "assignment_file_sha256": "d7de011067170c6babe2e871b45e17b63b342413d83fe3994584bde2592d2a30"
+      "assignment_file_sha256": "22de1250aef781ff6c09bc340f55af9c288e4330cf784a5ec1bc885a241a4706"
     },
     "media_allowlist.csv": {
       "kind": "immutable_manifest",
       "header": "schema_version,task_id,media_id,media_filename,video_bytes,video_sha256,video_frames,video_duration_s,video_fps,video_width,video_height,video_codec,hash_status",
       "header_sha256": "74920532b77c101abe82622005b6e0f33c72f6a69bea3699642cab4f14e59c5a",
-      "assignment_file_sha256": "5d66f614a1cefce668b68f1fd4a4559bafd64c817549521df7918fb9631b1532"
+      "assignment_file_sha256": "bcb9dd81e8a4800717c037ec1866a2d1ce3f76d7aca75bb3b9750c5ead1c3486"
     },
     "coverage.csv": {
       "kind": "mutable_annotation",
@@ -77,6 +77,19 @@
     "event_edges_v1.csv.contact_segment_id": "optional; when non-empty references segments.csv.segment_id in the same episode",
     "event_node_snapshots_v1.csv.event_id": "required; references events_v1.csv.event_id in the same episode",
     "event_edges_v1.csv.event_id": "required; references events_v1.csv.event_id in the same episode",
-    "pose_keys_2d_v1.csv.event_id": "required; references events_v1.csv.event_id in the same episode"
+    "pose_keys_2d_v1.csv.event_id": "required when a pose row is present; references events_v1.csv.event_id in the same episode"
+  },
+  "submission_contract": {
+    "required_coverage": "exactly one submitted EXHAUSTIVE full-episode row for each of the three assigned episodes",
+    "no_event_present": "allowed: a submitted EXHAUSTIVE coverage row may have zero rows for its episode in events, segments, nodes, edges, and pose",
+    "optional_tables": [
+      "segments.csv",
+      "events_v1.csv",
+      "event_node_snapshots_v1.csv",
+      "event_edges_v1.csv",
+      "pose_keys_2d_v1.csv"
+    ],
+    "row_terminal_status": "submitted",
+    "nonterminal_statuses_rejected": ["draft", "in_progress", "assigned_not_started"]
   }
 }

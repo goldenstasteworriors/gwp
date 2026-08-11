@@ -1,7 +1,7 @@
 {
-  "identity_schema_version": "sm_fet_d0_identity_v1_fix1",
-  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix1",
-  "packet_id": "sm-fet-d0-calibration-b-v1-fix1",
+  "identity_schema_version": "sm_fet_d0_identity_v1_fix2",
+  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix2",
+  "packet_id": "sm-fet-d0-calibration-b-v1-fix2",
   "annotator_id": "d0cal-annotator-b",
   "annotation_role": "independent_b",
   "identity_status": "assigned_by_coordinator"

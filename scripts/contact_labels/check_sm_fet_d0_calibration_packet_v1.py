@@ -2,13 +2,14 @@
 """Fail-closed structural checker for the SM-FET D0 calibration packet.
 
 This checker never creates labels, proposals, GT, media, or receipts.  It only
-validates the frozen fix1 packet contract with Python's standard library.
+validates the frozen fix2 packet contract with Python's standard library.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -18,19 +19,19 @@ import sys
 from typing import Any
 
 
-PACKET_VERSION = "sm_fet_d0_calibration_packet_v1_fix1"
-SCHEMA_MANIFEST_SHA256 = "dc628ba57638d3f08646f8bed931df0339970e44ec8edc7fd740a09ff191807c"
+PACKET_VERSION = "sm_fet_d0_calibration_packet_v1_fix2"
+SCHEMA_MANIFEST_SHA256 = "8f33609a7c320052781b930543e46d174ae31f0528dd02e03e610df73e9802b7"
 BLIND_EPISODES = {0, 9, 12, 34, 36, 38, 43, 50, 51, 53, 54, 58}
 CALIBRATION_EPISODES = [46, 65, 1]
 
 EXPECTED_ASSIGNMENT_ARTIFACTS = {
     "independent_a": {
-        "assignment_receipt.json": "a54717d743c35bff7ef04c8835c4d1707657e6228549479de3f0f006ec158cc9",
-        "recipient_manifest.json": "8e2af12a59bf4692a4c2d634dc0d9a988fdd28dda74116f1e3a93bee3b1f4901",
+        "assignment_receipt.json": "54e17f8254ca74357d016dabcf94c6e250fb3bc2eff152b920dac779aa16c8b3",
+        "recipient_manifest.json": "febc2298ab7f104b9089cc1ef2b10b7a30958ef2d011fbe6141f06deba4c7bfc",
     },
     "independent_b": {
-        "assignment_receipt.json": "ffc22581671000afa3c074a37fc053ea5a8325a20a6b834b24fe0833c04d27a7",
-        "recipient_manifest.json": "55af98eef95d40468c7b0dd875b883cc5d34666b0aab90d424de3bdda7ec047e",
+        "assignment_receipt.json": "543786f9e7be710113bf41027edf9f4631dcf500d1448eb1e91c7c61b3c4eae7",
+        "recipient_manifest.json": "67a712e1b5eb6a547665bea9f5cf00aae15d00faf0614f296e7e6f32e33d5ba1",
     },
 }
 
@@ -55,6 +56,8 @@ ANNOTATION_FILES = {
 }
 
 RECIPIENT_FILES = {
+    "ANNOTATION_HANDBOOK.md",
+    "TASK_ONTOLOGY.json",
     "assignment_receipt.json",
     "coverage.csv",
     "event_edges_v1.csv",
@@ -65,8 +68,10 @@ RECIPIENT_FILES = {
     "pose_keys_2d_v1.csv",
     "recipient_exact_allowlist.json",
     "recipient_manifest.json",
+    "schema_manifest.json",
     "segments.csv",
     "session.json",
+    "submission_receipt.json",
     "task_manifest.csv",
 }
 
@@ -74,11 +79,32 @@ SOURCE_TOP_LEVEL = {
     "README.md",
     "assignments",
     "coordinator",
+    "frozen_inputs",
     "media_allowlist.csv",
     "schema_manifest.json",
     "task_manifest.csv",
     "templates",
 }
+
+IMMUTABLE_FILES = {
+    "ANNOTATION_HANDBOOK.md",
+    "TASK_ONTOLOGY.json",
+    "assignment_receipt.json",
+    "media_allowlist.csv",
+    "recipient_exact_allowlist.json",
+    "recipient_manifest.json",
+    "schema_manifest.json",
+    "task_manifest.csv",
+}
+
+LIFECYCLE_FILES = {"identity.json", "session.json", "submission_receipt.json"}
+
+ASSIGNMENT_MODES = {
+    **{name: 0o400 for name in IMMUTABLE_FILES},
+    **{name: 0o600 for name in ANNOTATION_FILES | LIFECYCLE_FILES},
+}
+
+SUBMISSION_MODES = {name: 0o400 for name in RECIPIENT_FILES}
 
 FORBIDDEN_PACKET_SUFFIXES = {
     ".mp4", ".mov", ".avi", ".mkv", ".h5", ".hdf5", ".npz",
@@ -276,24 +302,89 @@ def validate_blank_annotations(root: Path, receipt: dict[str, Any] | None = None
             fail(f"blank annotation hash mismatch: {name}")
 
 
-def validate_recipient_manifest(root: Path, *, assignment_phase: bool) -> None:
+def validate_recipient_manifest(root: Path, *, phase: str) -> None:
     manifest = load_json(root / "recipient_manifest.json")
     hashes = manifest.get("files_sha256")
     if not isinstance(hashes, dict) or set(hashes) != RECIPIENT_FILES - {"recipient_manifest.json"}:
         fail("recipient manifest file set mismatch")
     for name, expected in hashes.items():
-        if not assignment_phase and name in ANNOTATION_FILES:
+        if phase == "submission" and name in ANNOTATION_FILES | LIFECYCLE_FILES:
             continue
         if sha256_path(root / name) != expected:
             fail(f"recipient manifest hash mismatch: {name}")
 
 
-def validate_packet_root(root: Path, schema_manifest_path: Path, *, assignment_phase: bool, check_acl: bool) -> dict[str, Any]:
+def parse_utc(value: Any, field: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        fail(f"{field} must be an ISO-8601 UTC timestamp ending in Z")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        fail(f"{field} is not a valid ISO-8601 timestamp")
+    return parsed
+
+
+def content_lock(receipt: dict[str, Any]) -> str:
+    payload = {key: value for key, value in receipt.items() if key != "content_lock_sha256"}
+    wire = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256_bytes(wire)
+
+
+def validate_terminal_lifecycle(identity: dict[str, Any], session: dict[str, Any], submission: dict[str, Any]) -> None:
+    if identity.get("identity_status") != "submitted" or session.get("session_status") != "submitted":
+        fail("identity and session must both be in submitted state")
+    if submission.get("submission_status") != "submitted" or submission.get("annotation_started") is not True:
+        fail("submission receipt must be submitted with annotation_started=true")
+    if submission.get("write_locked") is not True or submission.get("resigned_by_role") != "coordinator":
+        fail("submission receipt must be coordinator-resigned and write-locked")
+    opened = parse_utc(session.get("opened_at_utc"), "session.opened_at_utc")
+    closed = parse_utc(session.get("closed_at_utc"), "session.closed_at_utc")
+    submitted_at = parse_utc(submission.get("submitted_at_utc"), "submission.submitted_at_utc")
+    if not opened < closed or submitted_at != closed:
+        fail("submission lifecycle timestamps must satisfy opened < closed == submitted")
+
+
+def validate_allowlist_policy(allowlist: dict[str, Any]) -> None:
+    if set(allowlist.get("exact_files", [])) != RECIPIENT_FILES:
+        fail("recipient exact allowlist content mismatch")
+    roles = allowlist.get("file_roles")
+    expected_roles = {
+        "immutable_frozen_input": IMMUTABLE_FILES,
+        "mutable_annotation": ANNOTATION_FILES,
+        "mutable_lifecycle_metadata": LIFECYCLE_FILES,
+    }
+    if not isinstance(roles, dict) or set(roles) != set(expected_roles):
+        fail("recipient file-role policy set mismatch")
+    for role, expected in expected_roles.items():
+        if set(roles.get(role, [])) != expected:
+            fail(f"recipient file-role membership mismatch: {role}")
+    expected_modes = {
+        "assignment": {"immutable_frozen_input": "0400", "mutable_annotation": "0600", "mutable_lifecycle_metadata": "0600"},
+        "submission": {"immutable_frozen_input": "0400", "mutable_annotation": "0400", "mutable_lifecycle_metadata": "0400"},
+    }
+    if allowlist.get("phase_modes") != expected_modes:
+        fail("recipient phase mode policy mismatch")
+    expected_changes = {
+        "identity.json": ["identity_status"],
+        "session.json": ["session_status", "opened_at_utc", "closed_at_utc"],
+        "submission_receipt.json": [
+            "submission_status", "annotation_started", "submitted_at_utc", "write_locked",
+            "identity_sha256", "session_sha256", "annotation_sha256", "content_lock_sha256", "resigned_by_role",
+        ],
+    }
+    if allowlist.get("allowed_lifecycle_field_changes") != expected_changes:
+        fail("lifecycle field-change whitelist mismatch")
+
+
+def validate_packet_root(root: Path, schema_manifest_path: Path, *, phase: str, check_acl: bool) -> dict[str, Any]:
+    if phase not in {"assignment", "submission"}:
+        fail(f"unknown packet validation phase: {phase}")
     validate_directory(root, exact_mode=0o700 if check_acl else None)
     exact_children(root, RECIPIENT_FILES)
+    expected_modes = ASSIGNMENT_MODES if phase == "assignment" else SUBMISSION_MODES
     seen_inodes: set[tuple[int, int]] = set()
     for entry in root.iterdir():
-        validate_regular_file(entry, exact_mode=0o600 if check_acl else None)
+        validate_regular_file(entry, exact_mode=expected_modes[entry.name] if check_acl else None)
         if entry.suffix.lower() in FORBIDDEN_PACKET_SUFFIXES:
             fail(f"media/HDF5/image forbidden in packet: {entry}")
         inode = (entry.stat().st_dev, entry.stat().st_ino)
@@ -303,17 +394,37 @@ def validate_packet_root(root: Path, schema_manifest_path: Path, *, assignment_p
         text = validate_text_bytes(entry).decode("utf-8")
         if "/home/" in text or "file://" in text:
             fail(f"absolute source path leaked into recipient: {entry}")
-        if any(marker in text for marker in SELECTION_LEAK_MARKERS):
+        if entry.name not in {"ANNOTATION_HANDBOOK.md", "TASK_ONTOLOGY.json"} and any(marker in text for marker in SELECTION_LEAK_MARKERS):
             fail(f"episode-selection rationale leaked into recipient: {entry}")
     allowlist = load_json(root / "recipient_exact_allowlist.json")
-    if set(allowlist.get("exact_files", [])) != RECIPIENT_FILES:
-        fail("recipient exact allowlist content mismatch")
+    validate_allowlist_policy(allowlist)
     for forbidden in ("README.md", "coordinator", "selection_proposal_audit.md"):
         if forbidden not in set(allowlist.get("forbidden_recipient_paths", [])):
             fail(f"recipient denylist missing {forbidden}")
     receipt = load_json(root / "assignment_receipt.json")
     identity = load_json(root / "identity.json")
     session = load_json(root / "session.json")
+    submission = load_json(root / "submission_receipt.json")
+    identity_keys = {"identity_schema_version", "packet_schema_version", "packet_id", "annotator_id", "annotation_role", "identity_status"}
+    session_keys = {
+        "session_schema_version", "packet_schema_version", "packet_id", "annotation_session_id", "annotator_id",
+        "session_status", "opened_at_utc", "closed_at_utc", "protocol_sha256", "handbook_sha256",
+        "task_ontology_sha256", "task_manifest_sha256", "media_allowlist_sha256", "schema_manifest_sha256",
+    }
+    submission_keys = {
+        "submission_receipt_schema_version", "packet_schema_version", "packet_id", "annotation_role", "annotator_id",
+        "annotation_session_id", "assignment_receipt_sha256", "submission_status", "annotation_started",
+        "submitted_at_utc", "write_locked", "identity_sha256", "session_sha256", "annotation_sha256",
+        "content_lock_sha256", "resigned_by_role",
+    }
+    if set(identity) != identity_keys or set(session) != session_keys or set(submission) != submission_keys:
+        fail("lifecycle metadata key set violates the field-change whitelist")
+    if identity.get("identity_schema_version") != "sm_fet_d0_identity_v1_fix2" or identity.get("packet_schema_version") != PACKET_VERSION:
+        fail("identity schema version mismatch")
+    if session.get("session_schema_version") != "sm_fet_d0_session_v1_fix2" or session.get("packet_schema_version") != PACKET_VERSION:
+        fail("session schema version mismatch")
+    if submission.get("submission_receipt_schema_version") != "sm_fet_d0_submission_receipt_v1_fix2" or submission.get("packet_schema_version") != PACKET_VERSION:
+        fail("submission receipt schema version mismatch")
     if receipt.get("packet_schema_version") != PACKET_VERSION:
         fail("receipt packet schema mismatch")
     role = receipt.get("annotation_role")
@@ -325,37 +436,97 @@ def validate_packet_root(root: Path, schema_manifest_path: Path, *, assignment_p
             fail(f"coordinator-frozen assignment artifact mismatch: {name}")
     identity_tuple = (identity.get("packet_id"), identity.get("annotator_id"), identity.get("annotation_role"))
     receipt_tuple = (receipt.get("packet_id"), receipt.get("annotator_id"), receipt.get("annotation_role"))
-    if identity_tuple != receipt_tuple or identity.get("identity_status") != "assigned_by_coordinator":
+    expected_identity_status = "assigned_by_coordinator" if phase == "assignment" else "submitted"
+    if identity_tuple != receipt_tuple or identity.get("identity_status") != expected_identity_status:
         fail("identity/receipt binding mismatch")
     if session.get("packet_id") != receipt.get("packet_id") or session.get("annotator_id") != receipt.get("annotator_id"):
         fail("session/receipt binding mismatch")
-    if session.get("annotation_session_id") != receipt.get("annotation_session_id") or session.get("session_status") != "assigned_not_started":
+    expected_session_status = "assigned_not_started" if phase == "assignment" else "submitted"
+    if session.get("annotation_session_id") != receipt.get("annotation_session_id") or session.get("session_status") != expected_session_status:
         fail("session status/binding mismatch")
     if not all(receipt.get(key) is True for key in ("calibration_only", "non_gt")):
         fail("receipt must be calibration-only and non-GT")
-    if receipt.get("annotation_started") is not False or receipt.get("formal_blind_overlap") is not False:
+    if receipt.get("assignment_status") != "assigned_not_started" or receipt.get("annotation_started") is not False or receipt.get("formal_blind_overlap") is not False:
         fail("assignment must be unstarted and blind-disjoint")
     if receipt.get("selection_proposal_distributed") is not False or receipt.get("source_media_copied_into_packet") is not False:
         fail("proposal/media distribution boundary failed")
-    if sha256_path(schema_manifest_path) != receipt.get("schema_manifest_sha256"):
-        fail("receipt schema manifest hash mismatch")
+    if sha256_path(schema_manifest_path) != SCHEMA_MANIFEST_SHA256 or sha256_path(root / "schema_manifest.json") != SCHEMA_MANIFEST_SHA256:
+        fail("external/recipient schema manifest bytes do not match frozen checker")
+    if sha256_path(schema_manifest_path) != sha256_path(root / "schema_manifest.json"):
+        fail("external and recipient schema manifests differ")
+    frozen = receipt.get("frozen_inputs")
+    expected_frozen = {
+        "annotation_handbook": ("ANNOTATION_HANDBOOK.md", 40881, "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4"),
+        "task_ontology": ("TASK_ONTOLOGY.json", 770, "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a"),
+        "schema_manifest": ("schema_manifest.json", 7525, SCHEMA_MANIFEST_SHA256),
+    }
+    if not isinstance(frozen, dict) or set(frozen) != set(expected_frozen):
+        fail("assignment receipt frozen-input set mismatch")
+    for key, (path_name, byte_count, digest) in expected_frozen.items():
+        entry = frozen.get(key)
+        if entry != {"recipient_path": path_name, "bytes": byte_count, "sha256": digest}:
+            fail(f"assignment receipt frozen-input binding mismatch: {key}")
+        path = root / path_name
+        if path.stat().st_size != byte_count or sha256_path(path) != digest:
+            fail(f"recipient frozen-input bytes mismatch: {path_name}")
     immutable = {
         "task_manifest.csv": "task_manifest_sha256",
         "media_allowlist.csv": "media_allowlist_sha256",
-        "identity.json": "identity_sha256",
-        "session.json": "session_sha256",
         "recipient_exact_allowlist.json": "recipient_exact_allowlist_sha256",
     }
     for name, key in immutable.items():
         if sha256_path(root / name) != receipt.get(key):
             fail(f"receipt immutable hash mismatch: {name}")
+    expected_session_static = {
+        "packet_id": receipt.get("packet_id"),
+        "annotation_session_id": receipt.get("annotation_session_id"),
+        "annotator_id": receipt.get("annotator_id"),
+        "protocol_sha256": "c4f1f811f796e7c8604a0d0510229677693d6d1cc501b78f59f01cd4793e4a92",
+        "handbook_sha256": "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4",
+        "task_ontology_sha256": "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a",
+        "task_manifest_sha256": sha256_path(root / "task_manifest.csv"),
+        "media_allowlist_sha256": sha256_path(root / "media_allowlist.csv"),
+        "schema_manifest_sha256": sha256_path(root / "schema_manifest.json"),
+    }
+    for key, expected in expected_session_static.items():
+        if session.get(key) != expected:
+            fail(f"session immutable field changed outside whitelist: {key}")
     validate_task_media(root)
     for name in HEADERS:
         read_csv(root / name, HEADERS[name])
-    validate_recipient_manifest(root, assignment_phase=assignment_phase)
-    if assignment_phase:
+    validate_recipient_manifest(root, phase=phase)
+    baseline = receipt.get("lifecycle_baseline_sha256")
+    if not isinstance(baseline, dict) or set(baseline) != {"identity_json", "session_json"}:
+        fail("assignment receipt lifecycle baseline missing")
+    if phase == "assignment":
+        if baseline["identity_json"] != sha256_path(root / "identity.json") or baseline["session_json"] != sha256_path(root / "session.json"):
+            fail("assignment lifecycle baseline hash mismatch")
+        if session.get("opened_at_utc") or session.get("closed_at_utc"):
+            fail("assignment session timestamps must be blank")
+        if submission.get("submission_status") != "not_submitted" or submission.get("annotation_started") is not False:
+            fail("assignment submission receipt must be not_submitted/unstarted")
+        if submission.get("submitted_at_utc") or submission.get("write_locked") is not False:
+            fail("assignment submission receipt must be open and timestamp-free")
+        if any(submission.get(key) for key in ("identity_sha256", "session_sha256", "annotation_sha256", "content_lock_sha256", "resigned_by_role")):
+            fail("assignment submission receipt contains premature lock material")
         validate_blank_annotations(root, receipt)
-    return {"receipt": receipt, "identity": identity, "session": session, "inodes": seen_inodes}
+    else:
+        validate_terminal_lifecycle(identity, session, submission)
+        static_tuple = (submission.get("packet_id"), submission.get("annotator_id"), submission.get("annotation_role"), submission.get("annotation_session_id"))
+        expected_tuple = (receipt.get("packet_id"), receipt.get("annotator_id"), receipt.get("annotation_role"), receipt.get("annotation_session_id"))
+        if static_tuple != expected_tuple or submission.get("assignment_receipt_sha256") != sha256_path(root / "assignment_receipt.json"):
+            fail("submission receipt immutable assignment binding mismatch")
+        if submission.get("identity_sha256") != sha256_path(root / "identity.json") or submission.get("session_sha256") != sha256_path(root / "session.json"):
+            fail("submission receipt lifecycle hashes mismatch")
+        annotation_hashes = submission.get("annotation_sha256")
+        if not isinstance(annotation_hashes, dict) or set(annotation_hashes) != ANNOTATION_FILES:
+            fail("submission receipt annotation hash set mismatch")
+        for name in ANNOTATION_FILES:
+            if annotation_hashes[name] != sha256_path(root / name):
+                fail(f"submission receipt annotation hash mismatch: {name}")
+        if submission.get("content_lock_sha256") != content_lock(submission):
+            fail("submission receipt content lock mismatch")
+    return {"receipt": receipt, "identity": identity, "session": session, "submission": submission, "inodes": seen_inodes}
 
 
 def nested_or_equal(first: Path, second: Path) -> bool:
@@ -372,7 +543,7 @@ def validate_peer(first_root: Path, first: dict[str, Any], second_root: Path, se
             fail(f"A/B {field} must differ")
     if first["inodes"] & second["inodes"]:
         fail("A/B packet files must not share inodes/hardlinks")
-    for name in ("task_manifest.csv", "media_allowlist.csv", "recipient_exact_allowlist.json"):
+    for name in ("ANNOTATION_HANDBOOK.md", "TASK_ONTOLOGY.json", "schema_manifest.json", "task_manifest.csv", "media_allowlist.csv", "recipient_exact_allowlist.json"):
         if sha256_path(first_root / name) != sha256_path(second_root / name):
             fail(f"A/B immutable neutral input mismatch: {name}")
 
@@ -410,6 +581,8 @@ def row_identity(row: dict[str, str], identity: dict[str, Any], session: dict[st
         fail(f"row session mismatch in {filename}")
     if row.get("label_origin") != "human_independent_calibration":
         fail(f"label_origin must be human_independent_calibration in {filename}")
+    if row.get("review_status") != "submitted":
+        fail(f"review_status must be submitted in every submission row: {filename}")
 
 
 def validate_reference_rows(tables: dict[str, list[dict[str, str]]], identity: dict[str, Any], session: dict[str, Any], tasks: dict[int, dict[str, Any]]) -> None:
@@ -440,8 +613,8 @@ def validate_reference_rows(tables: dict[str, list[dict[str, str]]], identity: d
         end = integer(row["end_frame"], "coverage end")
         if start != 0 or end != tasks[episode]["frames"]:
             fail("each calibration coverage row must span the full assigned episode")
-        if row["frame_clock"] != "raw_video_frame_30fps" or row["coverage_mode"] not in {"EXHAUSTIVE", "POSITIVE_ONLY", "NOT_REVIEWED"}:
-            fail("coverage clock/mode invalid")
+        if row["frame_clock"] != "raw_video_frame_30fps" or row["coverage_mode"] != "EXHAUSTIVE":
+            fail("submitted D0 coverage must use full-episode EXHAUSTIVE mode")
     if set(coverage_by_episode) != set(tasks) or any(count != 1 for count in coverage_by_episode.values()):
         fail("submission requires exactly one full-episode coverage row per assigned episode")
     def same_episode(child: dict[str, str], parent: dict[str, str], relation: str) -> None:
@@ -484,6 +657,7 @@ def phase_source(source_root: Path) -> dict[str, Any]:
     validate_directory(source_root)
     exact_children(source_root, SOURCE_TOP_LEVEL)
     exact_children(source_root / "coordinator", {"assignment_index.json", "selection_proposal_audit.md"})
+    exact_children(source_root / "frozen_inputs", {"ANNOTATION_HANDBOOK.md", "TASK_ONTOLOGY.json"})
     exact_children(source_root / "templates", set(ANNOTATION_FILES) | {"identity.json", "session.json"})
     exact_children(source_root / "assignments", {"annotator_a", "annotator_b"})
     for path in source_root.rglob("*"):
@@ -492,6 +666,14 @@ def phase_source(source_root: Path) -> dict[str, Any]:
             if path.suffix.lower() in FORBIDDEN_PACKET_SUFFIXES:
                 fail(f"media/HDF5/image found inside source bundle: {path}")
     validate_schema_manifest(source_root)
+    frozen_source = {
+        "ANNOTATION_HANDBOOK.md": (40881, "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4"),
+        "TASK_ONTOLOGY.json": (770, "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a"),
+    }
+    for name, (byte_count, digest) in frozen_source.items():
+        path = source_root / "frozen_inputs" / name
+        if path.stat().st_size != byte_count or sha256_path(path) != digest:
+            fail(f"source frozen input bytes mismatch: {name}")
     assignment_index = load_json(source_root / "coordinator" / "assignment_index.json")
     if assignment_index.get("packet_schema_version") != PACKET_VERSION or assignment_index.get("schema_manifest_sha256") != SCHEMA_MANIFEST_SHA256:
         fail("coordinator assignment index schema binding mismatch")
@@ -507,6 +689,7 @@ def phase_source(source_root: Path) -> dict[str, Any]:
             "recipient_manifest_sha256": "recipient_manifest.json",
             "identity_sha256": "identity.json",
             "session_sha256": "session.json",
+            "submission_receipt_sha256": "submission_receipt.json",
         }
         for index_key, filename in checks.items():
             if values.get(index_key) != sha256_path(root / filename):
@@ -522,15 +705,15 @@ def phase_source(source_root: Path) -> dict[str, Any]:
         fail("source identity template must remain unassigned")
     if identity_template.get("identity_status") != "unassigned":
         fail("source identity template status mismatch")
-    for key in ("packet_id", "annotation_session_id", "annotator_id", "opened_at_utc", "closed_at_utc", "protocol_sha256", "task_manifest_sha256", "media_allowlist_sha256", "schema_manifest_sha256"):
+    for key in ("packet_id", "annotation_session_id", "annotator_id", "opened_at_utc", "closed_at_utc", "protocol_sha256", "handbook_sha256", "task_ontology_sha256", "task_manifest_sha256", "media_allowlist_sha256", "schema_manifest_sha256"):
         if session_template.get(key):
             fail(f"source session template field must remain blank: {key}")
     if session_template.get("session_status") != "unassigned":
         fail("source session template status mismatch")
     a_root = source_root / "assignments" / "annotator_a"
     b_root = source_root / "assignments" / "annotator_b"
-    a = validate_packet_root(a_root, source_root / "schema_manifest.json", assignment_phase=True, check_acl=True)
-    b = validate_packet_root(b_root, source_root / "schema_manifest.json", assignment_phase=True, check_acl=True)
+    a = validate_packet_root(a_root, source_root / "schema_manifest.json", phase="assignment", check_acl=True)
+    b = validate_packet_root(b_root, source_root / "schema_manifest.json", phase="assignment", check_acl=True)
     validate_peer(a_root, a, b_root, b)
     for root in (a_root, b_root):
         if any((root / name).exists() for name in ("README.md", "coordinator", "selection_proposal_audit.md")):
@@ -539,14 +722,14 @@ def phase_source(source_root: Path) -> dict[str, Any]:
 
 
 def phase_assignment(packet_root: Path, peer_root: Path, schema_manifest: Path) -> dict[str, Any]:
-    first = validate_packet_root(packet_root, schema_manifest, assignment_phase=True, check_acl=True)
-    peer = validate_packet_root(peer_root, schema_manifest, assignment_phase=True, check_acl=True)
+    first = validate_packet_root(packet_root, schema_manifest, phase="assignment", check_acl=True)
+    peer = validate_packet_root(peer_root, schema_manifest, phase="assignment", check_acl=True)
     validate_peer(packet_root, first, peer_root, peer)
     return {"packet_id": first["receipt"]["packet_id"], "peer_packet_id": peer["receipt"]["packet_id"], "blank_files": len(ANNOTATION_FILES)}
 
 
 def phase_submission(packet_root: Path, schema_manifest: Path) -> dict[str, Any]:
-    packet = validate_packet_root(packet_root, schema_manifest, assignment_phase=False, check_acl=True)
+    packet = validate_packet_root(packet_root, schema_manifest, phase="submission", check_acl=True)
     tasks = validate_task_media(packet_root)
     tables = {name: read_csv(packet_root / name, HEADERS[name]) for name in ANNOTATION_FILES}
     validate_reference_rows(tables, packet["identity"], packet["session"], tasks)
@@ -556,35 +739,67 @@ def phase_submission(packet_root: Path, schema_manifest: Path) -> dict[str, Any]
 def phase_self_test() -> dict[str, Any]:
     identity = {"annotator_id": "test-a", "annotation_role": "independent_a"}
     session = {"annotation_session_id": "test-session-a"}
-    common = {
-        "schema_version": PACKET_VERSION,
-        "dataset_id": "ego_human_pour_66",
-        "episode_id": "46",
-        "annotation_role": "independent_a",
-        "annotator_id": "test-a",
-        "annotation_session_id": "test-session-a",
-        "review_status": "submitted",
-        "label_origin": "human_independent_calibration",
-    }
+    def common(episode: int) -> dict[str, str]:
+        return {
+            "schema_version": PACKET_VERSION,
+            "dataset_id": "ego_human_pour_66",
+            "episode_id": str(episode),
+            "annotation_role": "independent_a",
+            "annotator_id": "test-a",
+            "annotation_session_id": "test-session-a",
+            "review_status": "submitted",
+            "label_origin": "human_independent_calibration",
+        }
+    tasks = {46: {"frames": 324}, 65: {"frames": 384}, 1: {"frames": 599}}
     tables = {name: [] for name in ANNOTATION_FILES}
-    tables["coverage.csv"] = [{**common, "coverage_id": "cov-46", "coverage_mode": "EXHAUSTIVE", "start_frame": "0", "end_frame": "324", "frame_clock": "raw_video_frame_30fps"}]
-    tables["events_v1.csv"] = [{**common, "coverage_id": "cov-46", "event_id": "evt-46-0"}]
-    tables["segments.csv"] = [{**common, "coverage_id": "cov-46", "segment_id": "seg-46-0", "onset_event_id": "evt-46-0", "release_event_id": "", "source_proposal_id": ""}]
-    tables["event_node_snapshots_v1.csv"] = [{**common, "event_id": "evt-46-0"}]
-    tables["event_edges_v1.csv"] = [{**common, "edge_id": "edge-46-0", "event_id": "evt-46-0", "contact_segment_id": "seg-46-0"}]
-    tables["pose_keys_2d_v1.csv"] = [{**common, "pose_key_id": "pose-46-0", "event_id": "evt-46-0"}]
-    tasks = {46: {"frames": 324}}
+    tables["coverage.csv"] = [
+        {**common(episode), "coverage_id": f"cov-{episode}", "coverage_mode": "EXHAUSTIVE", "start_frame": "0", "end_frame": str(values["frames"]), "frame_clock": "raw_video_frame_30fps"}
+        for episode, values in tasks.items()
+    ]
+    validate_reference_rows(tables, identity, session, tasks)
+    tables["events_v1.csv"] = [{**common(46), "coverage_id": "cov-46", "event_id": "evt-46-0"}]
+    tables["segments.csv"] = [{**common(46), "coverage_id": "cov-46", "segment_id": "seg-46-0", "onset_event_id": "evt-46-0", "release_event_id": "", "source_proposal_id": ""}]
+    tables["event_node_snapshots_v1.csv"] = [{**common(46), "event_id": "evt-46-0"}]
+    tables["event_edges_v1.csv"] = [{**common(46), "edge_id": "edge-46-0", "event_id": "evt-46-0", "contact_segment_id": "seg-46-0"}]
+    tables["pose_keys_2d_v1.csv"] = [{**common(46), "pose_key_id": "pose-46-0", "event_id": "evt-46-0"}]
     validate_reference_rows(tables, identity, session, tasks)
     broken = {name: [dict(row) for row in rows] for name, rows in tables.items()}
     broken["event_edges_v1.csv"][0]["contact_segment_id"] = "missing-segment"
-    negative_failed = False
-    try:
-        validate_reference_rows(broken, identity, session, tasks)
-    except CheckFailure:
-        negative_failed = True
-    if not negative_failed:
-        fail("negative self-test unexpectedly passed")
-    return {"positive_reference_case": "passed", "negative_dangling_reference_case": "rejected"}
+    draft = {name: [dict(row) for row in rows] for name, rows in tables.items()}
+    draft["coverage.csv"][0]["review_status"] = "draft"
+    positive_only = {name: [dict(row) for row in rows] for name, rows in tables.items()}
+    positive_only["coverage.csv"][0]["coverage_mode"] = "POSITIVE_ONLY"
+    negatives = {
+        "dangling_reference": lambda: validate_reference_rows(broken, identity, session, tasks),
+        "draft_row": lambda: validate_reference_rows(draft, identity, session, tasks),
+        "positive_only_coverage": lambda: validate_reference_rows(positive_only, identity, session, tasks),
+        "assigned_not_started_state": lambda: validate_terminal_lifecycle(
+            {"identity_status": "assigned_by_coordinator"},
+            {"session_status": "assigned_not_started", "opened_at_utc": "", "closed_at_utc": ""},
+            {"submission_status": "not_submitted", "annotation_started": False, "write_locked": False, "resigned_by_role": "", "submitted_at_utc": ""},
+        ),
+        "annotation_started_false": lambda: validate_terminal_lifecycle(
+            {"identity_status": "submitted"},
+            {"session_status": "submitted", "opened_at_utc": "2026-08-12T00:00:00Z", "closed_at_utc": "2026-08-12T01:00:00Z"},
+            {"submission_status": "submitted", "annotation_started": False, "write_locked": True, "resigned_by_role": "coordinator", "submitted_at_utc": "2026-08-12T01:00:00Z"},
+        ),
+    }
+    for name, attack in negatives.items():
+        try:
+            attack()
+        except CheckFailure:
+            continue
+        fail(f"negative self-test unexpectedly passed: {name}")
+    validate_terminal_lifecycle(
+        {"identity_status": "submitted"},
+        {"session_status": "submitted", "opened_at_utc": "2026-08-12T00:00:00Z", "closed_at_utc": "2026-08-12T01:00:00Z"},
+        {"submission_status": "submitted", "annotation_started": True, "write_locked": True, "resigned_by_role": "coordinator", "submitted_at_utc": "2026-08-12T01:00:00Z"},
+    )
+    return {
+        "positive_no_event_present_case": "passed",
+        "positive_reference_case": "passed",
+        "negative_attack_cases": sorted(negatives),
+    }
 
 
 def parse_args() -> argparse.Namespace:
