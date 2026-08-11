@@ -1,0 +1,30 @@
+{
+  "index_schema_version": "sm_fet_d0_assignment_index_v1_fix1",
+  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix1",
+  "schema_manifest_sha256": "dc628ba57638d3f08646f8bed931df0339970e44ec8edc7fd740a09ff191807c",
+  "recipients": {
+    "annotator_a": {
+      "packet_id": "sm-fet-d0-calibration-a-v1-fix1",
+      "annotation_role": "independent_a",
+      "annotator_id": "d0cal-annotator-a",
+      "annotation_session_id": "d0cal-session-a-20260812",
+      "assignment_receipt_sha256": "a54717d743c35bff7ef04c8835c4d1707657e6228549479de3f0f006ec158cc9",
+      "recipient_manifest_sha256": "8e2af12a59bf4692a4c2d634dc0d9a988fdd28dda74116f1e3a93bee3b1f4901",
+      "identity_sha256": "11b6c68429e6cea9242878c8ced99ed5315696859a520403d94ca70ed52d46dc",
+      "session_sha256": "f19275733f08a3e27f0b0a753d9201ebfa3c6c0b446b738f6105ac0851256ad8"
+    },
+    "annotator_b": {
+      "packet_id": "sm-fet-d0-calibration-b-v1-fix1",
+      "annotation_role": "independent_b",
+      "annotator_id": "d0cal-annotator-b",
+      "annotation_session_id": "d0cal-session-b-20260812",
+      "assignment_receipt_sha256": "ffc22581671000afa3c074a37fc053ea5a8325a20a6b834b24fe0833c04d27a7",
+      "recipient_manifest_sha256": "55af98eef95d40468c7b0dd875b883cc5d34666b0aab90d424de3bdda7ec047e",
+      "identity_sha256": "5eefae35164e1e9c07326d9262f57612c579f2eaddf395cdde0eedb59c5fd22a",
+      "session_sha256": "ee600a1ec0251448478c481b0bee4a80309a4f59f0113aa190463f8581c24604"
+    }
+  },
+  "required_packet_root_mode": "0700",
+  "required_packet_file_mode": "0600",
+  "git_mode_is_not_acl_evidence": true
+}

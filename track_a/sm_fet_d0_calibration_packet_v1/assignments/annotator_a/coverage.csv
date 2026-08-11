@@ -1,0 +1,1 @@
+schema_version,dataset_id,episode_id,coverage_id,annotation_role,annotator_id,annotation_session_id,review_status,coverage_mode,start_frame,end_frame,frame_clock,evidence_scope,label_origin,review_timestamp_utc,parent_coverage_ids,notes

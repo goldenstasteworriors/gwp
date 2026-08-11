@@ -1,0 +1,42 @@
+{
+  "receipt_schema_version": "sm_fet_d0_assignment_receipt_v1_fix1",
+  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix1",
+  "packet_id": "sm-fet-d0-calibration-a-v1-fix1",
+  "annotation_role": "independent_a",
+  "annotator_id": "d0cal-annotator-a",
+  "annotation_session_id": "d0cal-session-a-20260812",
+  "assignment_status": "assigned_not_started",
+  "calibration_only": true,
+  "non_gt": true,
+  "annotation_started": false,
+  "formal_blind_overlap": false,
+  "source_media_copied_into_packet": false,
+  "selection_proposal_distributed": false,
+  "protocol_sha256": "c4f1f811f796e7c8604a0d0510229677693d6d1cc501b78f59f01cd4793e4a92",
+  "handbook_sha256": "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4",
+  "schema_manifest_sha256": "dc628ba57638d3f08646f8bed931df0339970e44ec8edc7fd740a09ff191807c",
+  "task_manifest_sha256": "d7de011067170c6babe2e871b45e17b63b342413d83fe3994584bde2592d2a30",
+  "media_allowlist_sha256": "5d66f614a1cefce668b68f1fd4a4559bafd64c817549521df7918fb9631b1532",
+  "identity_sha256": "11b6c68429e6cea9242878c8ced99ed5315696859a520403d94ca70ed52d46dc",
+  "session_sha256": "f19275733f08a3e27f0b0a753d9201ebfa3c6c0b446b738f6105ac0851256ad8",
+  "recipient_exact_allowlist_sha256": "7ce8296d7e07bda81a7a5ffaa4ec071e7dd55f023c3c81fab75d5700ec3159a8",
+  "blank_annotation_sha256": {
+    "coverage.csv": "e6bd9eb229102a8999971286be463c338952214e6c3022f8225ce9ab7a3eb9c8",
+    "segments.csv": "d3b900c4a607a1afb87e77e2f491e453f7abb5acffa90663ea39b6283cda31ee",
+    "events_v1.csv": "b6bb7ad2526cf0119072dae7465c7cb8e686b6bb26cedb3015b3ad3a27130e8d",
+    "event_node_snapshots_v1.csv": "4026cdc8a83a2c0a04f39260dbd403d120140a3bb62757a2a71ce27f012ab1ad",
+    "event_edges_v1.csv": "b5af024dcc7305fc946a9b48a35bc795472e477a2ecf286130804472d7382993",
+    "pose_keys_2d_v1.csv": "85d138ee6d946f0035253dc839a5a1ae1af33e4bc2b4f806486a46c1b2ff583c"
+  },
+  "required_acl": {
+    "packet_root_mode": "0700",
+    "packet_file_mode": "0600",
+    "state_root_mode": "0700",
+    "media_root_mode": "0700",
+    "media_file_mode": "0400",
+    "symlink_allowed": false,
+    "hardlink_allowed": false,
+    "git_mode_is_not_acl_evidence": true,
+    "distribution_checker_required": true
+  }
+}

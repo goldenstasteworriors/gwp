@@ -9,7 +9,8 @@
 
 本目录只冻结 D0 非盲校准所需的小型 metadata 与空白 worksheet。它不包含 MP4、HDF5、截图、
 缩略图、timeline proposal、事件 proposal、旧标签、裁决或 GT，也不授权训练、模型实现或
-正式 blind 标注。四张 CSV 只有 header；任何 event、node、edge、pose 都必须由真实 A/B 在
+正式 blind 标注。六张 annotation CSV 只有 header；任何 coverage、contact、event、node、edge、
+pose 都必须由真实 A/B 在
 各自隔离副本中从原始 RGB 独立填写。
 
 ## 1. 与 formal packet 的硬边界
@@ -50,69 +51,59 @@ processed HDF5、HDF5-derived timeline 或绝对 source 路径。若后续冻结
 ontology、原速/慢速/逐 raw-video frame 上下文。永久禁止 hand status、hand active、depth、
 contact visualization、MANO/SMPL、tracker、模型/proposal、prescreen、旧 GT、另一方首轮结果。
 
-## 3. 三段选择（coordinator-only proposal audit）
+## 3. Coordinator proposal 隔离
 
-formal blind12 固定为：
+episode 选择理由和 selection bias 已移到
+`coordinator/selection_proposal_audit.md`。该文件不在 recipient exact allowlist 中；A/B 实际
+packet roots 也没有 README、`coordinator/` 或 selection audit。`task_manifest.csv` 只保留执行所需
+的中性 episode/media/clock binding，不含 event、边界、双手、遮挡、透明或 outcome hint。
 
-`0, 9, 12, 34, 36, 38, 43, 50, 51, 53, 54, 58`
-
-本次冻结为：
-
-| task | episode | coordinator-only 选择理由（proposal，不是标签） |
-|---|---:|---|
-| `sm-fet-d0-cal-00` | 46 | 单手、时序较短、彩色内容对比度较高，作为普通可见/较清楚边界候选；未见明显 regrasp 仅是采样审计印象，须由 A/B 自行判断 |
-| `sm-fet-d0-cal-01` | 65 | 原始 RGB 采样中可见两只手同时进入操作区，一手操作、一手靠近/稳定透明容器，手—杯—rim 互遮挡，覆盖双手 bundle、hand roster 与 occluded/missing 字段 |
-| `sm-fet-d0-cal-02` | 1 | 透明杯与低对比度/近无色液体使容器边缘、stream、meniscus、effect/outcome 的可见证据弱；与 46/65 的紫色高对比内容形成 visibility 差异 |
-
-选择只依据 coordinator 对原始 RGB 的只读时间采样、MP4 技术 metadata、formal blind episode
-清单和现有 proposal-level 规范审计；未读取或使用 `hand_status`、depth、contact visualization、
-模型输出、旧 GT 或人工标签。选择理由本身是 proposal，不能预填进四张 CSV，也不能在 D1
-blind 开始前作为 hint 分发。
-
-### Selection bias 记录
-
-- 这是 purposive calibration sampling，不是随机样本；三段被主动挑来放大清楚边界、双手
-  遮挡/roster 与透明液体可见性差异。
-- 三段都来自同一 human-pour 数据源，不能估计自然 prevalence、OOD、跨任务、跨人、跨 session、
-  跨容器或跨液体泛化。
-- 当前 66 段缺 authoritative subject/session/operator/object/liquid/batch provenance；episode ID
-  或颜色差异不能替代这些 group 字段。
-- coordinator 已看过 selection-level proposal cues，因此 coordinator 不能充当未来 D1 blind A/B；
-  D1 A/B 不得收到本 README、选择审计、D0 讨论纪要或任一 proposal。
-- calibration 不进入 blind agreement、validation/test、阈值调参或 GT；若协议重开，必须另选与
-  本三段及 blind12 都不重叠的新 calibration。
+未来 D1 blind A/B 不得收到本 README、coordinator selection audit、D0 讨论纪要、calibration
+CSV 或任一 proposal。D0 首轮 A/B 也必须先独立锁定全部三段，不能用选择理由预填 worksheet。
 
 ## 4. 文件与分发面
 
 Git 中的 coordinator source bundle 是：
 
-- `README.md`：本 runbook 与 coordinator-only selection audit；不得发给未来 D1 A/B；
+- `README.md`：通用 coordinator runbook，不在 recipient allowlist；
+- `coordinator/selection_proposal_audit.md`：唯一 episode-specific 选择审计，coordinator-only；
+- `coordinator/assignment_index.json`：从 coordinator 侧冻结两套 receipt/manifest/identity/session
+  SHA-256，避免 recipient 自行改写 manifest 与 receipt 后仍被接受；
 - `task_manifest.csv`：三段的中性任务绑定，无 selection stratum、event hint 或 semantic proposal；
 - `media_allowlist.csv`：仅中性媒体 ID、文件名、bytes、SHA-256、帧数、时长、fps、尺寸和 codec；
+- `schema_manifest.json`：冻结全部八张 CSV 的 exact ordered header、header SHA-256、schema version
+  与 assignment/blank file SHA-256；
+- `templates/coverage.csv`；
+- `templates/segments.csv`；
 - `templates/events_v1.csv`；
 - `templates/event_node_snapshots_v1.csv`；
 - `templates/event_edges_v1.csv`；
 - `templates/pose_keys_2d_v1.csv`；
 - `templates/identity.json`；
-- `templates/session.json`。
+- `templates/session.json`；
+- `assignments/annotator_a/` 与 `assignments/annotator_b/`：实际已赋值、彼此独立的 13-file
+  blank-before-assignment roots，含 receipt、recipient manifest、exact allowlist、identity/session、
+  两张 contact 表与四张 SM-FET 表。
 
-D0 分发时协调员分别建立 A、B 的 packet root 与 media root。annotator packet root 只允许平铺
-复制 `task_manifest.csv`、`media_allowlist.csv`、四张空白 CSV、已赋值的 `identity.json` 和
-`session.json`；指南/ontology 必须是双方相同、已 hash 的独立只读输入。media root 只允许
-`media_allowlist.csv` 指定的三个 MP4，且与 packet root、state root 两两不嵌套。
+D0 recipient packet root 的唯一合法文件集合由 `recipient_exact_allowlist.json` 冻结：两张中性
+manifest、`coverage.csv`、`segments.csv`、四张 SM-FET worksheet、identity、session、assignment
+receipt、recipient manifest 与 exact allowlist，共 13 文件。指南/ontology 必须是双方相同、已
+hash 的独立只读输入。media root 只允许 `media_allowlist.csv` 指定的三个 MP4，且与 packet root、
+state root 两两不嵌套；Git packet 自身不复制媒体。
 
-不得把本 README 的第 3 节、绝对 source 路径、整个仓库、source root、processed HDF5、formal
+不得把本 README、`coordinator/`、绝对 source 路径、整个仓库、source root、processed HDF5、formal
 coordinator/adjudication、另一方 packet 或 proposal audit 分发给 A/B。D0 是 non-blind，含义是
 两人首轮锁定后允许按流程共同讨论定义，不代表首轮 CSV 可以被 proposal 预填。
 
-ACL 最低要求：逐人 owner-only 目录；媒体与 immutable metadata 只读；四张 CSV 仅 owner 可写；
+ACL 最低要求：逐人 owner-only 目录；媒体与 immutable metadata 只读；六张 annotation CSV 仅 owner 可写；
 禁止 symlink/hard link；禁止云同步、截图、录屏和转发；记录授权人、recipient、开放/撤销时间、
 各文件 hash 和销毁确认。没有数据控制者授权/伦理或用途依据时 fail closed，不分发媒体。
 
 ## 5. 执行与 protocol-freeze 顺序
 
-1. **Coordinator preflight**：重算三个 MP4 SHA-256/帧数/时长/fps；验证与 blind12 零交集；
-   验证四张 CSV 只有 exact header、身份/session 未赋值、packet 内没有媒体/截图/HDF5。
+1. **Coordinator preflight**：运行 stdlib checker `--phase source`；另由 coordinator 的获批媒体
+   探测流程重算三个 MP4 SHA-256/帧数/时长/fps；验证与 blind12 零交集；验证六张 annotation CSV 只有 frozen exact header、source
+   identity/session template 未赋值、recipient A/B 已赋值且不同、packet 内没有媒体/截图/HDF5。
 2. **Assign**：给 A、B 分配真实且不同的 `annotator_id`、`annotation_session_id` 和 owner-only
    roots；保存 assignment receipt。A/B 得到同一 task/media bytes，不得看到 selection rationale。
 3. **Independent first pass**：A、B 各自完整完成全部三段后锁定提交 hash；不能边讨论边填，
@@ -128,19 +119,40 @@ ACL 最低要求：逐人 owner-only 目录；媒体与 immutable metadata 只�
 8. **Future D1 only after gates**：只有独立 checker/round-trip 满足当前冻结结构的全部 D0 条件，
    才能另行准备 D1。现有 formal contact 7-file packet 边界保持不变。
 
-## 6. Fail-closed checker 设计（本轮未实现）
+## 6. Fail-closed checker
 
-未来 checker 应按 phase 运行，任一未知、缺文件、多文件、hash 不符或语义不唯一都非零退出；
-禁止 warning-only 与 `--force` 绕过。
+已实现 `scripts/contact_labels/check_sm_fet_d0_calibration_packet_v1.py`。它只用 Python stdlib，
+不生成或修改 annotation、proposal、GT、receipt 或媒体。任一未知、缺文件、多文件、hash 不符、
+ACL 不足或引用不唯一都非零退出；没有 warning-only 或 `--force` 绕过。
+
+从仓库根目录执行 source 与 A/B assignment 检查：
+
+```bash
+python scripts/contact_labels/check_sm_fet_d0_calibration_packet_v1.py \
+  --phase source \
+  --source-root track_a/sm_fet_d0_calibration_packet_v1
+
+python scripts/contact_labels/check_sm_fet_d0_calibration_packet_v1.py \
+  --phase assignment \
+  --packet-root track_a/sm_fet_d0_calibration_packet_v1/assignments/annotator_a \
+  --peer-packet-root track_a/sm_fet_d0_calibration_packet_v1/assignments/annotator_b \
+  --schema-manifest track_a/sm_fet_d0_calibration_packet_v1/schema_manifest.json
+```
+
+以上代码块按展示位置换行；每个反斜杠后立即换行。若 Git checkout 后目录/文件权限不再是
+`0700/0600`，assignment 必须先失败；由 coordinator 在真实分发 root 恢复 ACL 后再重跑，不得
+通过关闭检查继续。
 
 ### `source-preflight`
 
-- exact allowlist：本目录只能出现本文列出的 9 个小文件；拒绝 MP4/HDF5/图片、额外 CSV、
+- exact allowlist：source、templates、coordinator 与两个 recipient root 各自使用写死集合；拒绝
+  MP4/HDF5/图片、额外 CSV、
   symlink、hard link、socket/device、重复 inode、NaN/Inf、JSON duplicate key；
 - canonical/base、packet version、三任务数、episode 唯一性与 blind12 disjoint 均精确匹配；
-- media allowlist 三行一一对应 task，重算 bytes/SHA-256/decoded frames/duration/fps/width/height/
-  codec；实际媒体只能位于 coordinator 指定的独立 media root；
-- 四张 CSV 必须只有 exact UTF-8 header 和 LF，零 data row；identity/session 必须保持 unassigned；
+- media allowlist 三行一一对应 task，并冻结已审计的 bytes/SHA-256/frames/duration/fps/size/codec
+  metadata；stdlib source phase 不解析视频容器，实际媒体 bytes/SHA 由 distribution phase 重算；
+- 六张 annotation CSV 必须只有 exact UTF-8 header 和 LF，零 data row；source identity/session
+  template 必须 unassigned；
 - 扫描 header 与所有文本，拒绝绝对 source/HDF5 路径、proposal value、GT/adjudicated value、
   timing hint 和受禁证据引用。
 
@@ -149,23 +161,29 @@ ACL 最低要求：逐人 owner-only 目录；媒体与 immutable metadata 只�
 - A/B packet exact allowlist、所有 immutable file hash 与 assignment receipt 一致；
 - A/B 的 annotator/session/packet root/state root 不同，task/media bytes 相同；路径不嵌套、无共享
   inode、权限为 owner-only，媒体只读；
-- 首轮前四张 CSV 仍为空；身份、session、role、protocol/header/media/task hashes 完整绑定；
-- recipient denylist 中不含 README 第 3 节、selection audit、D0 讨论、另一方内容、formal
+- 首轮前六张 CSV 仍为空；身份、session、role、protocol/header/media/task hashes 完整绑定；
+- recipient denylist 中不含 README、selection audit、D0 讨论、另一方内容、formal
   coordinator/adjudication、HDF5/depth/hand/contact proposal。
 
 ### `submission`
 
-- 每行 episode/task/annotator/session/role 与 receipt 一致，raw frame 落在 `[0,video_frames)`；
-- event ID/顺序/半开 support、boundary exact/interval/censor/unknown、review state、合法 transition、
-  verify-only outcome 与 `Q_episode` overflow 均可机械验证；
-- 每个实际 snapshot 对同一 event/role/frame 恰有四个 fixed-role rows；reference union、ABSENT/
-  UNKNOWN/MISSING、observability/geometry 约束完整；
-- 每 event edge order 只可 0/1；actor/primary/secondary/relation/contact-mode 引用闭合，第三条 edge
-  必须显式 overflow，不能截断；
-- pose 只作 auxiliary/probe；不可见 landmark 坐标必须空，可见 landmark 坐标须有限且在 `[0,1]`；
-  `entry/turn/exit/anchor` 与 event/frame/hand side 引用一致；
-- `label_origin` 只接受 human independent calibration；拒绝 proposal、model、adjudicated、GT 和
-  另一 annotator parent ID；拒绝任何被预填、跨副本相同的非空 annotation row/hash。
+- 每行 schema/episode/annotator/session/role 与 receipt 一致；每个 episode 恰有一条完整 raw-frame
+  coverage，范围与 task/media manifest 一致；
+- 六张表的 primary ID 非空且唯一，所有 foreign key 同 episode 闭合；
+- `label_origin` 只接受 `human_independent_calibration`，`source_proposal_id` 必须为空；拒绝
+  proposal、model、adjudicated 或 GT row。
+
+此外 checker 对 `events.coverage_id`、`segments.coverage_id`、segment onset/release event、
+node/edge/pose event 与 `edge.contact_segment_id` 做同 episode 唯一引用闭合。assignment phase
+要求所有 annotation 表为空；submission phase 才接受真实 human-independent calibration rows。
+
+### `distribution`
+
+在真实媒体分发前必须额外提供 packet/media/state roots。checker 要求三者两两不嵌套，root
+mode 精确 `0700`、packet files `0600`、media files `0400`、state 初始为空，并逐字节重算三个
+外部 MP4 的 bytes/SHA-256；任一 symlink、hardlink、共享 inode、额外媒体或 proposal 文件即失败。
+Git 只保存 executable bit，不能保存 `0700/0600/0400` 的完整 ACL，所以每次 checkout/复制后
+必须重新 chmod 并通过 `--phase assignment/distribution`；Git mode 永远不算 ACL 证据。
 
 ### `discussion-freeze`
 
@@ -176,19 +194,20 @@ ACL 最低要求：逐人 owner-only 目录；媒体与 immutable metadata 只�
 - D1 preflight 对每个未来 blind A/B root 执行 proposal/selection/calibration denylist，且正式
   contact packet 仍严格通过原有 7-file checker。
 
-checker 还必须实现 annotation→当前冻结 wire→annotation 的唯一 round-trip、reachable capacity/
-codebook/public-state receipt；在 index 所列 minimal-r1d CPU conformance 未通过前，任何 worksheet
-都不能宣称 D0 pass 或 action admission。
+本 checker 的授权范围只到结构、hash、ACL、引用与 assignment 空白态；它不判断 event 语义、
+不生成标签，也不实现 action wire。未来 D0 admission checker 仍必须另行实现 annotation→当前
+冻结 wire→annotation 的唯一 round-trip、reachable capacity/codebook/public-state receipt；在
+index 所列 minimal-r1d CPU conformance 未通过前，任何 worksheet 都不能宣称 D0 pass 或 action
+admission。
 
 ## 7. 人时预算
 
 本三段 D0 session 预计共 **3.25–4.0 人时**：coordinator preflight/分发/收件约 0.5；A、B
 独立首轮各约 0.75–1.0；锁定后的共同讨论约 0.75–1.0；一次修订、freeze receipt 与 ACL 撤销约
-0.5。若 episode 65 的双手 roster/遮挡或 episode 1 的透明液体 evidence 产生大量 field-level
-unknown，按上界执行；不得以赶 timebox 为由猜值。
+0.5。若校准难例产生大量 field-level unknown，按上界执行；不得以赶 timebox 为由猜值。
 
 ## 8. 一句话状态
 
-三段只用于在非盲讨论中暴露协议缺口；选择理由是 coordinator-only proposal，四张 CSV 保持
+三段只用于在非盲讨论中暴露协议缺口；选择理由是 coordinator-only proposal，六张 CSV 保持
 空白，不生成 GT，D1 必须在协议/实现/round-trip 全部冻结后用隔离且看不到 proposal 的 A/B
 另行开始。
