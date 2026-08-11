@@ -18,6 +18,7 @@ from world_action_model.contact_transition_schema import (
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
 )
+from world_action_model.contact_route_contract import ContactCausalRoute
 from world_action_model.matched_control_hashes import MatchedControlCollector
 from world_action_model.models import CasualWorldActionTransformer_MoT
 from world_action_model.trainer.wa_casual_trainer_pretrain import (
@@ -275,6 +276,14 @@ class CasualWATrainerMoT(Trainer):
         )
         self.require_contact_targets = bool(
             model_config.get("require_contact_targets", False)
+        )
+        transformer_config = model_config.get("transformer", {})
+        self.contact_causal_route = str(
+            model_config.get(
+                "contact_causal_route",
+                transformer_config.get("contact_causal_route", ""),
+            )
+            or ""
         )
         self.current_training_data_receipt = model_config.get(
             "current_training_data_receipt"
@@ -536,6 +545,35 @@ class CasualWATrainerMoT(Trainer):
                 "contact_condition_mode must be 'predicted' or 'oracle', got "
                 f"{self.contact_condition_mode!r}"
             )
+        if self.contact_causal_route in {
+            ContactCausalRoute.AUX_ONLY_DIRECT_Q12.value,
+            ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST.value,
+        }:
+            if self.contact_condition_mode != "predicted":
+                raise ValueError(
+                    f"route {self.contact_causal_route!r} rejects oracle conditioning"
+                )
+            if self.contact_loss_weight <= 0.0 or not self.require_contact_targets:
+                raise ValueError(
+                    f"route {self.contact_causal_route!r} requires a positive grouped "
+                    "contact auxiliary loss and required targets"
+                )
+            if self.contact_schema_version != SEGMENT_SCHEMA_VERSION:
+                raise ValueError(
+                    f"route {self.contact_causal_route!r} requires v1.1 segment targets"
+                )
+        self.contact_route_loss_receipt = {
+            "route": self.contact_causal_route or "legacy",
+            "action_loss": "flow_mse",
+            "visual_loss": "flow_mse",
+            "contact_aux_loss": (
+                "grouped_contact_segment_loss"
+                if self.contact_schema_version == SEGMENT_SCHEMA_VERSION
+                and self.contact_loss_weight > 0.0
+                else "disabled_or_legacy"
+            ),
+            "effect_or_counterfactual_physics_loss": False,
+        }
 
         vae_pretrained = model_config.get("vae_pretrained", os.path.join(pretrained, "vae"))
         vae_dtype = model_config.get("vae_dtype", torch.float32)
@@ -897,6 +935,14 @@ class CasualWATrainerMoT(Trainer):
         contact_target = batch_dict.get("contact_target")
         contact_condition = batch_dict.get("contact_condition")
         contact_condition_mask = batch_dict.get("contact_condition_mask")
+        if self.contact_causal_route in {
+            ContactCausalRoute.AUX_ONLY_DIRECT_Q12.value,
+            ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST.value,
+        } and (contact_condition is not None or contact_condition_mask is not None):
+            raise ValueError(
+                f"route {self.contact_causal_route!r} rejects model-side contact/oracle inputs; "
+                "contact_target may enter only the grouped auxiliary loss"
+            )
         if self.contact_condition_mode == "oracle":
             if contact_target is None:
                 raise ValueError(

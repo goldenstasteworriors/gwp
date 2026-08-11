@@ -7,6 +7,7 @@ inventing a finger site, object part, or 3-D surface normal.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 from typing import Mapping, Sequence
@@ -109,6 +110,146 @@ CONTACT_SEMANTIC_TRANSPORT_MODES = (
     "hard_st",
     "hard_detached",
 )
+
+
+EQUAL_BIT_CODEC_VERSION = "contact_equal_bit_unstructured_v1"
+EQUAL_BIT_VALID_STATES = 48_673
+EQUAL_BIT_NUM_BITS = 16
+EQUAL_BIT_CODE_WIDTH = SEGMENT_TARGET_DIM
+EQUAL_BIT_BIT_ORDER = "little_endian_lsb_first"
+EQUAL_BIT_MIXING_LAYOUT = "row_major_int8_twos_complement"
+# Receipt-bound fixed Rademacher matrix.  It was generated once from the
+# documented seed using SHA-256 counter blocks, checked to have row rank 16,
+# and is now a literal so library/RNG changes cannot alter the codec.
+EQUAL_BIT_MIXING_SEED = "contact-equal-bit-rademacher-v1"
+EQUAL_BIT_MIXING_MATRIX = (
+    (-1, 1, 1, 1, -1, 1, -1, 1, 1, -1, -1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, -1),
+    (-1, 1, 1, -1, -1, -1, 1, 1, 1, 1, 1, 1, -1, 1, 1, 1, 1, -1, -1, 1, -1, 1),
+    (1, 1, 1, -1, -1, -1, 1, -1, -1, -1, 1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1),
+    (1, -1, -1, -1, 1, 1, -1, 1, -1, 1, 1, 1, -1, -1, -1, -1, -1, -1, 1, 1, -1, 1),
+    (1, 1, 1, 1, 1, 1, -1, -1, -1, 1, 1, -1, 1, 1, -1, 1, 1, -1, -1, 1, 1, 1),
+    (1, 1, -1, -1, 1, -1, -1, 1, -1, 1, -1, -1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1),
+    (-1, 1, 1, 1, -1, 1, 1, -1, -1, -1, -1, -1, -1, -1, 1, 1, -1, 1, -1, -1, -1, -1),
+    (-1, 1, -1, -1, 1, -1, -1, -1, 1, 1, -1, 1, -1, -1, 1, -1, 1, 1, 1, 1, 1, -1),
+    (1, 1, 1, -1, 1, -1, -1, -1, -1, 1, 1, 1, -1, -1, -1, 1, -1, 1, 1, -1, -1, 1),
+    (-1, 1, 1, 1, 1, 1, -1, 1, -1, -1, -1, -1, -1, 1, -1, 1, -1, -1, 1, -1, 1, -1),
+    (-1, -1, 1, -1, -1, -1, -1, 1, 1, 1, -1, 1, -1, 1, 1, 1, -1, 1, 1, 1, 1, -1),
+    (1, 1, 1, 1, 1, 1, -1, 1, 1, -1, 1, -1, 1, 1, 1, -1, 1, 1, 1, 1, -1, 1),
+    (1, 1, -1, 1, 1, 1, 1, -1, 1, 1, -1, -1, -1, -1, -1, 1, -1, -1, -1, 1, 1, -1),
+    (1, -1, -1, 1, 1, -1, 1, 1, 1, 1, -1, -1, -1, -1, -1, 1, 1, 1, 1, -1, -1, -1),
+    (1, 1, 1, -1, 1, 1, 1, 1, 1, -1, -1, 1, 1, 1, -1, -1, 1, 1, 1, -1, -1, 1),
+    (-1, 1, 1, -1, 1, 1, -1, -1, 1, -1, -1, -1, -1, -1, -1, -1, 1, -1, 1, 1, -1, -1),
+)
+
+
+def _equal_bit_mixing_bytes() -> bytes:
+    return np.asarray(EQUAL_BIT_MIXING_MATRIX, dtype=np.int8).tobytes(order="C")
+
+
+EQUAL_BIT_MIXING_MATRIX_SHA256 = hashlib.sha256(
+    _equal_bit_mixing_bytes()
+).hexdigest()
+
+
+def unstructured_capacity_metadata(
+    K: int = EQUAL_BIT_VALID_STATES,
+    Q: int = 12,
+    width: int = EQUAL_BIT_CODE_WIDTH,
+) -> Mapping[str, int | float | str | bool | list[list[int]]]:
+    """Return the exact, machine-readable equal-bit codec receipt."""
+
+    K, Q, width = int(K), int(Q), int(width)
+    if K != EQUAL_BIT_VALID_STATES:
+        raise ValueError(
+            f"the v1 equal-bit codec fixes K={EQUAL_BIT_VALID_STATES}, got {K}"
+        )
+    if Q < 0:
+        raise ValueError(f"Q must be non-negative, got {Q}")
+    if width != EQUAL_BIT_CODE_WIDTH:
+        raise ValueError(
+            f"the v1 equal-bit codec fixes width={EQUAL_BIT_CODE_WIDTH}, got {width}"
+        )
+    matrix = np.asarray(EQUAL_BIT_MIXING_MATRIX, dtype=np.int8)
+    matrix_bytes = matrix.tobytes(order="C")
+    matrix_sha256 = hashlib.sha256(matrix_bytes).hexdigest()
+    if matrix.shape != (EQUAL_BIT_NUM_BITS, EQUAL_BIT_CODE_WIDTH):
+        raise RuntimeError("equal-bit mixing matrix shape differs from its codec contract")
+    if matrix_sha256 != EQUAL_BIT_MIXING_MATRIX_SHA256:
+        raise RuntimeError("equal-bit mixing matrix bytes differ from their fixed digest")
+    bits_per_query = math.log2(K)
+    return {
+        "codec_version": EQUAL_BIT_CODEC_VERSION,
+        "finite_capacity": True,
+        "valid_id_min": 0,
+        "valid_id_max": K - 1,
+        "invalid_id_min": K,
+        "invalid_id_max": 2**EQUAL_BIT_NUM_BITS - 1,
+        "invalid_id_canonical_value": 0,
+        "states_per_query": K,
+        "num_queries": Q,
+        "bits_per_query": bits_per_query,
+        "total_states": K**Q,
+        "total_bits": bits_per_query * Q,
+        "raw_bits": EQUAL_BIT_NUM_BITS,
+        "code_width": width,
+        "action_visible_bit_dimensions": EQUAL_BIT_NUM_BITS,
+        "canonical_positive_zero_dimensions": width - EQUAL_BIT_NUM_BITS,
+        "bit_order": EQUAL_BIT_BIT_ORDER,
+        "mixing_shape": [EQUAL_BIT_NUM_BITS, EQUAL_BIT_CODE_WIDTH],
+        "mixing_dtype": "int8",
+        "mixing_layout": EQUAL_BIT_MIXING_LAYOUT,
+        "mixing_seed_record_only": EQUAL_BIT_MIXING_SEED,
+        "mixing_matrix": matrix.astype(int).tolist(),
+        "mixing_matrix_bytes_hex": matrix_bytes.hex(),
+        "mixing_matrix_sha256": matrix_sha256,
+        "mixing_matrix_row_rank": EQUAL_BIT_NUM_BITS,
+    }
+
+
+def canonicalize_unstructured_ids(ids: np.ndarray | Sequence[int]) -> np.ndarray:
+    """Canonicalize every integer outside ``[0, 48672]`` to id zero."""
+
+    values = np.asarray(ids)
+    if values.dtype.kind not in {"i", "u"}:
+        raise TypeError("equal-bit ids must use an integer dtype")
+    wide = values.astype(np.int64, copy=False)
+    return np.where(
+        (wide >= 0) & (wide < EQUAL_BIT_VALID_STATES), wide, 0
+    ).astype(np.uint16)
+
+
+def unstructured_ids_to_code(ids: np.ndarray | Sequence[int]) -> np.ndarray:
+    """Decode canonical ids to 16 little-endian bits followed by six ``+0``s."""
+
+    canonical = canonicalize_unstructured_ids(ids)
+    shifts = np.arange(EQUAL_BIT_NUM_BITS, dtype=np.uint16)
+    bits = ((canonical[..., None] >> shifts) & 1).astype(np.float32)
+    code = np.zeros(canonical.shape + (EQUAL_BIT_CODE_WIDTH,), dtype=np.float32)
+    code[..., :EQUAL_BIT_NUM_BITS] = bits
+    return code
+
+
+def unstructured_code_to_ids(code: np.ndarray) -> np.ndarray:
+    """Encode a canonical v1 code, rejecting non-binary or non-zero padding."""
+
+    value = np.asarray(code)
+    if value.shape[-1] != EQUAL_BIT_CODE_WIDTH:
+        raise ValueError(
+            f"equal-bit code must end in width {EQUAL_BIT_CODE_WIDTH}, got {value.shape}"
+        )
+    if not np.isfinite(value).all():
+        raise ValueError("equal-bit code requires finite values")
+    if not np.logical_or(value[..., :EQUAL_BIT_NUM_BITS] == 0, value[..., :EQUAL_BIT_NUM_BITS] == 1).all():
+        raise ValueError("equal-bit code prefix must contain only zero/one")
+    if not (value[..., EQUAL_BIT_NUM_BITS:] == 0).all():
+        raise ValueError("equal-bit code suffix must be canonical zero")
+    weights = (1 << np.arange(EQUAL_BIT_NUM_BITS, dtype=np.uint32))
+    raw = (value[..., :EQUAL_BIT_NUM_BITS].astype(np.uint32) * weights).sum(
+        axis=-1, dtype=np.uint32
+    )
+    if (raw >= EQUAL_BIT_VALID_STATES).any():
+        raise ValueError("equal-bit code contains a non-canonical invalid id")
+    return raw.astype(np.uint16)
 
 
 def contact_transport_capacity_metadata(

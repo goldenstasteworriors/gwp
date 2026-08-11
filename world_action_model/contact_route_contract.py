@@ -1,0 +1,242 @@
+"""Fail-closed contracts for spec-only contact causal-route controls.
+
+The two new controls are implemented for CPU auditing only.  Nothing in this
+module changes the production matched-control runner admission set.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from enum import Enum
+from typing import Any, Mapping
+
+from world_action_model.contact_transition_schema import (
+    EQUAL_BIT_VALID_STATES,
+    SEGMENT_SCHEMA_VERSION,
+    SEGMENT_TARGET_DIM,
+    contact_transport_capacity_metadata,
+    unstructured_capacity_metadata,
+)
+
+
+CONTACT_CAUSAL_ROUTE_CONTRACT_VERSION = "contact_causal_route_contract_v1"
+SPEC_ONLY_IMPLEMENTATION_STATUS = "implemented_cpu_route_unadmitted"
+
+
+class ContactCausalRoute(str, Enum):
+    SOFT_SEMANTIC = "soft_semantic"
+    HARD_ST_SEMANTIC = "hard_st_semantic"
+    HARD_DETACHED_SEMANTIC = "hard_detached_semantic"
+    AUX_ONLY_DIRECT_Q12 = "aux_only_direct_q12"
+    EQUAL_BIT_UNSTRUCTURED_HARD_ST = "equal_bit_unstructured_hard_st"
+
+
+_SEMANTIC_ROUTE_BY_TRANSPORT = {
+    "soft": ContactCausalRoute.SOFT_SEMANTIC,
+    "hard_st": ContactCausalRoute.HARD_ST_SEMANTIC,
+    "hard_detached": ContactCausalRoute.HARD_DETACHED_SEMANTIC,
+}
+
+
+def canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def sha256_json(value: object) -> str:
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def resolve_contact_causal_route(
+    route: str | ContactCausalRoute | None,
+    *,
+    contact_semantic_bottleneck: bool,
+    contact_semantic_transport_mode: str,
+) -> ContactCausalRoute | None:
+    """Resolve an explicit route or map the unchanged legacy semantic route."""
+
+    if route is None or str(route).strip() == "":
+        if not contact_semantic_bottleneck:
+            return None
+        try:
+            return _SEMANTIC_ROUTE_BY_TRANSPORT[str(contact_semantic_transport_mode)]
+        except KeyError as exc:
+            raise ValueError(
+                "legacy semantic bottleneck has an unsupported transport mode"
+            ) from exc
+    try:
+        resolved = (
+            route
+            if isinstance(route, ContactCausalRoute)
+            else ContactCausalRoute(str(route))
+        )
+    except ValueError as exc:
+        expected = tuple(item.value for item in ContactCausalRoute)
+        raise ValueError(
+            f"unsupported contact_causal_route={route!r}; expected one of {expected}"
+        ) from exc
+    expected_transport = {
+        ContactCausalRoute.SOFT_SEMANTIC: "soft",
+        ContactCausalRoute.HARD_ST_SEMANTIC: "hard_st",
+        ContactCausalRoute.HARD_DETACHED_SEMANTIC: "hard_detached",
+        ContactCausalRoute.AUX_ONLY_DIRECT_Q12: "hard_st",
+        ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST: "hard_st",
+    }[resolved]
+    if str(contact_semantic_transport_mode) != expected_transport:
+        raise ValueError(
+            f"route {resolved.value!r} requires contact_semantic_transport_mode="
+            f"{expected_transport!r}, got {contact_semantic_transport_mode!r}"
+        )
+    return resolved
+
+
+def validate_contact_route_model_config(
+    route: ContactCausalRoute | None,
+    *,
+    num_contact_tokens: int,
+    contact_target_dim: int,
+    contact_condition_dim: int,
+    contact_bottleneck: bool,
+    contact_schema_version: str,
+    contact_semantic_bottleneck: bool,
+    contact_time_bins: int,
+) -> None:
+    """Reject contradictory legacy booleans before any forward execution."""
+
+    if route is None:
+        return
+    if contact_schema_version != SEGMENT_SCHEMA_VERSION:
+        raise ValueError(
+            f"causal routes require contact_schema_version={SEGMENT_SCHEMA_VERSION!r}"
+        )
+    if (
+        contact_target_dim != SEGMENT_TARGET_DIM
+        or contact_condition_dim != SEGMENT_TARGET_DIM
+    ):
+        raise ValueError(
+            f"causal routes require target/condition width {SEGMENT_TARGET_DIM}"
+        )
+    if num_contact_tokens <= 0:
+        raise ValueError("causal routes require num_contact_tokens > 0")
+
+    direct = route is ContactCausalRoute.AUX_ONLY_DIRECT_Q12
+    if direct:
+        if num_contact_tokens != 12:
+            raise ValueError("aux_only_direct_q12 requires exactly 12 planner queries")
+        if contact_bottleneck or contact_semantic_bottleneck:
+            raise ValueError(
+                "aux_only_direct_q12 requires both bottleneck booleans false; "
+                "the standalone planner remains enabled by the route enum"
+            )
+        return
+
+    if not contact_bottleneck or not contact_semantic_bottleneck:
+        raise ValueError(
+            f"route {route.value!r} requires contact_bottleneck=True and "
+            "contact_semantic_bottleneck=True"
+        )
+    if route is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST:
+        if num_contact_tokens != 12 or contact_time_bins != 16:
+            raise ValueError(
+                "equal_bit_unstructured_hard_st is receipt-bound to Q=12/B=16"
+            )
+
+
+def route_uses_standalone_planner(route: ContactCausalRoute | None) -> bool:
+    return route is not None
+
+
+def route_action_uses_packet(route: ContactCausalRoute | None) -> bool:
+    return route is not None and route is not ContactCausalRoute.AUX_ONLY_DIRECT_Q12
+
+
+def route_action_attends_reference(route: ContactCausalRoute | None) -> bool:
+    return route is None or route is ContactCausalRoute.AUX_ONLY_DIRECT_Q12
+
+
+def route_rejects_oracle(route: ContactCausalRoute | None) -> bool:
+    return route in {
+        ContactCausalRoute.AUX_ONLY_DIRECT_Q12,
+        ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST,
+    }
+
+
+def contact_route_metadata(
+    route: ContactCausalRoute,
+    *,
+    num_queries: int,
+    time_bins: int,
+) -> Mapping[str, Any]:
+    """Create a canonical route receipt and its SHA-256 (never Python hash)."""
+
+    direct = route is ContactCausalRoute.AUX_ONLY_DIRECT_Q12
+    equal_bit = route is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST
+    transport = {
+        ContactCausalRoute.SOFT_SEMANTIC: "soft",
+        ContactCausalRoute.HARD_ST_SEMANTIC: "hard_st",
+        ContactCausalRoute.HARD_DETACHED_SEMANTIC: "hard_detached",
+        ContactCausalRoute.AUX_ONLY_DIRECT_Q12: "hard_st",
+        ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST: "hard_st",
+    }[route]
+    if equal_bit:
+        capacity: Mapping[str, Any] | None = unstructured_capacity_metadata(
+            K=EQUAL_BIT_VALID_STATES,
+            Q=num_queries,
+            width=SEGMENT_TARGET_DIM,
+        )
+    elif direct:
+        capacity = None
+    else:
+        capacity = contact_transport_capacity_metadata(
+            mode=transport,
+            time_bins=time_bins,
+            num_queries=num_queries,
+        )
+    payload = {
+        "contract_version": CONTACT_CAUSAL_ROUTE_CONTRACT_VERSION,
+        "implementation_status": SPEC_ONLY_IMPLEMENTATION_STATUS,
+        "production_runner_admitted": False,
+        "route": route.value,
+        "planner_queries": num_queries,
+        "planner_transport_mode": transport,
+        "planner_parameters_and_forward_active": True,
+        "matches_planner_compute_not_action_visible_bit_capacity": direct,
+        "contact_aux_prediction_active": True,
+        "action_attends_reference": direct,
+        "action_visible_packet": (
+            "none_direct_reference"
+            if direct
+            else "canonical_equal_bit_16_plus_6_positive_zero"
+            if equal_bit
+            else "canonical_contact_semantic_22d"
+        ),
+        "action_readable_sources": (
+            ["state", "instruction_text", "noisy_action", "current_reference"]
+            if direct
+            else ["state", "instruction_text", "noisy_action", "route_packet"]
+        ),
+        "action_reads_raw_planner_logits": False,
+        "action_reads_planner_hidden": False,
+        "action_reads_contact_ground_truth": False,
+        "action_reads_future_reference": False,
+        "strict_image_cross_attention_policy": (
+            "reject_nonempty" if not direct else "legacy_direct_allowed"
+        ),
+        "oracle_policy": (
+            "reject" if route_rejects_oracle(route) else "semantic_field_merge_only"
+        ),
+        "cache_policy": (
+            "direct_reference_kv_without_planner_logits_hidden_or_semantics"
+            if direct
+            else "state_and_canonical_code_kv_without_reference_or_raw_planner_values"
+            if equal_bit
+            else "legacy_semantic_packet_kv_without_reference_aux_logits_output_only"
+        ),
+        "capacity": capacity,
+    }
+    return {**payload, "receipt_sha256": sha256_json(payload)}

@@ -4,8 +4,9 @@
 # Action stream (state + action) and visual stream (ref + future) use separate
 # transformer parameters with global self-attention across both streams.
 
+import hashlib
 import math
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -23,6 +24,9 @@ from diffusers.utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscal
 
 from world_action_model.contact_transition_schema import (
     CONTACT_SEMANTIC_TRANSPORT_MODES,
+    EQUAL_BIT_MIXING_MATRIX,
+    EQUAL_BIT_NUM_BITS,
+    EQUAL_BIT_VALID_STATES,
     SEGMENT_BINARY_FIELDS,
     SEGMENT_CATEGORICAL_FIELDS,
     SEGMENT_CONTINUOUS_FIELDS,
@@ -30,6 +34,16 @@ from world_action_model.contact_transition_schema import (
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
     contact_transport_capacity_metadata,
+)
+from world_action_model.contact_route_contract import (
+    ContactCausalRoute,
+    contact_route_metadata,
+    resolve_contact_causal_route,
+    route_action_attends_reference,
+    route_action_uses_packet,
+    route_rejects_oracle,
+    route_uses_standalone_planner,
+    validate_contact_route_model_config,
 )
 
 from .transformer_wa_casual import (
@@ -611,6 +625,7 @@ class CasualWorldActionTransformer_MoT(
         contact_planner_num_heads: int = 8,
         contact_semantic_transport_mode: str = "soft",
         contact_time_bins: int = 16,
+        contact_causal_route: Optional[str] = None,
         current_training_data_receipt: Optional[Dict[str, Any]] = None,
         current_training_data_receipt_sha256: Optional[str] = None,
         production_checkpoint_steps: Optional[Tuple[int, ...]] = None,
@@ -694,6 +709,14 @@ class CasualWorldActionTransformer_MoT(
         self.contact_semantic_bottleneck = bool(contact_semantic_bottleneck)
         self.contact_semantic_transport_mode = str(contact_semantic_transport_mode)
         self.contact_time_bins = int(contact_time_bins)
+        self.contact_causal_route = resolve_contact_causal_route(
+            contact_causal_route,
+            contact_semantic_bottleneck=self.contact_semantic_bottleneck,
+            contact_semantic_transport_mode=self.contact_semantic_transport_mode,
+        )
+        self.contact_causal_route_explicit = contact_causal_route is not None and str(
+            contact_causal_route
+        ).strip() != ""
         if self.num_contact_tokens < 0:
             raise ValueError("num_contact_tokens must be non-negative")
         if self.contact_target_dim < 0 or self.contact_condition_dim < 0:
@@ -713,6 +736,7 @@ class CasualWorldActionTransformer_MoT(
         if (
             self.contact_semantic_transport_mode != "soft"
             and not self.contact_semantic_bottleneck
+            and self.contact_causal_route is not ContactCausalRoute.AUX_ONLY_DIRECT_Q12
         ):
             raise ValueError(
                 "hard contact semantic transport requires "
@@ -743,6 +767,39 @@ class CasualWorldActionTransformer_MoT(
                     "action_expert_dim must be divisible by contact_planner_num_heads"
                 )
 
+        validate_contact_route_model_config(
+            self.contact_causal_route if self.contact_causal_route_explicit else None,
+            num_contact_tokens=self.num_contact_tokens,
+            contact_target_dim=self.contact_target_dim,
+            contact_condition_dim=self.contact_condition_dim,
+            contact_bottleneck=self.contact_bottleneck,
+            contact_schema_version=self.contact_schema_version,
+            contact_semantic_bottleneck=self.contact_semantic_bottleneck,
+            contact_time_bins=self.contact_time_bins,
+        )
+        self.contact_planner_enabled = self.contact_semantic_bottleneck or (
+            self.contact_causal_route_explicit
+            and route_uses_standalone_planner(self.contact_causal_route)
+        )
+        self.contact_action_uses_packet = self.contact_semantic_bottleneck or (
+            self.contact_causal_route_explicit
+            and route_action_uses_packet(self.contact_causal_route)
+        )
+        self.contact_action_attends_reference = (
+            route_action_attends_reference(self.contact_causal_route)
+            if self.contact_causal_route_explicit or self.contact_semantic_bottleneck
+            else not self.contact_bottleneck
+        )
+        self.contact_route_metadata = (
+            contact_route_metadata(
+                self.contact_causal_route,
+                num_queries=self.num_contact_tokens,
+                time_bins=self.contact_time_bins,
+            )
+            if self.contact_causal_route is not None
+            else None
+        )
+
         self.contact_transport_metadata = contact_transport_capacity_metadata(
             mode=self.contact_semantic_transport_mode,
             time_bins=self.contact_time_bins,
@@ -769,7 +826,7 @@ class CasualWorldActionTransformer_MoT(
                 if self.contact_target_dim
                 else None
             )
-            if self.contact_semantic_bottleneck:
+            if self.contact_planner_enabled:
                 self.contact_planner_ref_proj = nn.Linear(inner_dim, action_expert_dim)
                 self.contact_planner_text_proj = nn.Linear(text_dim, action_expert_dim)
                 self.contact_planner_attention = nn.MultiheadAttention(
@@ -801,6 +858,13 @@ class CasualWorldActionTransformer_MoT(
             self.contact_planner_norm1 = None
             self.contact_planner_ffn = None
             self.contact_planner_norm2 = None
+
+        if self.contact_causal_route is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST:
+            self.register_buffer(
+                "equal_bit_mixing_matrix",
+                torch.tensor(EQUAL_BIT_MIXING_MATRIX, dtype=torch.float32),
+                persistent=True,
+            )
 
     def _encode_state_tokens(self, state: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         if getattr(self.state_encoder, "uses_embodiment_id", False):
@@ -1093,26 +1157,85 @@ class CasualWorldActionTransformer_MoT(
             return hard.detach() + (semantic - semantic.detach())
         return hard.detach()
 
-    def plan_contact_semantic(
+    def transport_unstructured_contact_logits(
+        self, contact_logits: torch.Tensor
+    ) -> torch.Tensor:
+        """Map 22 logits to the exact 48,673-state equal-bit alphabet.
+
+        Sixteen fixed Rademacher projections produce little-endian hard bits.
+        Raw ids 48,673..65,535 all canonicalize to id zero.  The last six
+        action-visible dimensions are literal positive zero.  Forward values
+        are exact hard states; backward uses a finite sigmoid ST surrogate.
+        """
+
+        if self.contact_causal_route is not ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST:
+            raise RuntimeError("equal-bit transport is not enabled")
+        if contact_logits.shape[-1] != SEGMENT_TARGET_DIM:
+            raise ValueError(
+                f"expected {SEGMENT_TARGET_DIM}-D contact logits, got {contact_logits.shape[-1]}"
+            )
+        if not torch.isfinite(contact_logits).all():
+            raise ValueError("equal-bit transport requires finite planner logits")
+        matrix = self.equal_bit_mixing_matrix.to(
+            device=contact_logits.device, dtype=contact_logits.dtype
+        )
+        mixed_logits = F.linear(contact_logits, matrix) / math.sqrt(
+            float(SEGMENT_TARGET_DIM)
+        )
+        soft_bits = mixed_logits.sigmoid()
+        raw_bits = (soft_bits >= 0.5).to(dtype=contact_logits.dtype)
+        integer_weights = (2 ** torch.arange(
+            EQUAL_BIT_NUM_BITS, device=contact_logits.device, dtype=torch.int64
+        )).view(*([1] * (raw_bits.ndim - 1)), EQUAL_BIT_NUM_BITS)
+        raw_id = (
+            raw_bits.to(dtype=torch.int64) * integer_weights
+        ).sum(dim=-1)
+        canonical_id = torch.where(
+            raw_id < EQUAL_BIT_VALID_STATES,
+            raw_id,
+            torch.zeros_like(raw_id),
+        )
+        shifts = torch.arange(
+            EQUAL_BIT_NUM_BITS, device=contact_logits.device, dtype=torch.int64
+        ).view(*([1] * canonical_id.ndim), EQUAL_BIT_NUM_BITS)
+        canonical_bits = (
+            (canonical_id.unsqueeze(-1) >> shifts) & 1
+        ).to(dtype=contact_logits.dtype)
+        hard = torch.zeros(
+            *contact_logits.shape[:-1],
+            SEGMENT_TARGET_DIM,
+            device=contact_logits.device,
+            dtype=contact_logits.dtype,
+        )
+        hard[..., :EQUAL_BIT_NUM_BITS] = canonical_bits
+        hard = torch.where(hard == 0, torch.zeros_like(hard), hard)
+        soft_packet = torch.cat(
+            [
+                soft_bits,
+                torch.zeros(
+                    *soft_bits.shape[:-1],
+                    SEGMENT_TARGET_DIM - EQUAL_BIT_NUM_BITS,
+                    device=soft_bits.device,
+                    dtype=soft_bits.dtype,
+                ),
+            ],
+            dim=-1,
+        )
+        return hard.detach() + (soft_packet - soft_packet.detach())
+
+    def _plan_contact_logits(
         self,
         state: torch.Tensor,
         ref_visual_hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         embodiment_id: Optional[torch.Tensor] = None,
-        contact_condition: Optional[torch.Tensor] = None,
-        contact_condition_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Plan v1.1 segments and optionally merge field-masked oracle values.
+    ) -> torch.Tensor:
+        """Return raw auxiliary logits; planner hidden never leaves this method."""
 
-        The returned action-visible tensor is exactly 22-D.  Raw planner
-        hidden states never leave this method and are never appended to the
-        action stream.
-        """
-
-        if not self.contact_semantic_bottleneck:
-            raise RuntimeError("contact semantic planner is not enabled")
+        if not self.contact_planner_enabled:
+            raise RuntimeError("contact planner is not enabled")
         if ref_visual_hidden_states is None or ref_visual_hidden_states.shape[1] == 0:
-            raise ValueError("semantic contact planner requires reference visual tokens")
+            raise ValueError("contact planner requires reference visual tokens")
         state_states = self._encode_state_tokens(state, embodiment_id=embodiment_id)
         batch_size = state_states.shape[0]
         planner_query = self.contact_query_tokens.to(
@@ -1132,13 +1255,23 @@ class CasualWorldActionTransformer_MoT(
         planner_hidden = self.contact_planner_norm2(
             planner_hidden + self.contact_planner_ffn(planner_hidden)
         )
-        contact_logits = self.contact_decoder(planner_hidden)
+        return self.contact_decoder(planner_hidden)
+
+    def _transport_planned_semantic(
+        self,
+        contact_logits: torch.Tensor,
+        contact_condition: Optional[torch.Tensor],
+        contact_condition_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Activate and optionally oracle-merge semantic planner logits."""
+
+        batch_size = contact_logits.shape[0]
         predicted_semantic = self.activate_contact_segment_logits(contact_logits)
 
         if contact_condition is None:
-            return contact_logits, self.transport_contact_semantic(
-                predicted_semantic
-            )
+            if contact_condition_mask is not None:
+                raise ValueError("contact_condition_mask requires contact_condition")
+            return self.transport_contact_semantic(predicted_semantic)
         expected = (batch_size, self.num_contact_tokens, SEGMENT_TARGET_DIM)
         if tuple(contact_condition.shape) != expected:
             raise ValueError(
@@ -1150,6 +1283,8 @@ class CasualWorldActionTransformer_MoT(
         mask = contact_condition_mask.to(
             device=predicted_semantic.device, dtype=predicted_semantic.dtype
         )
+        if not torch.isfinite(mask).all():
+            raise ValueError("contact_condition_mask requires finite values")
         if mask.ndim == 2:
             mask = mask.unsqueeze(-1)
         if mask.shape not in {expected, expected[:2] + (1,)}:
@@ -1161,12 +1296,84 @@ class CasualWorldActionTransformer_MoT(
         oracle = contact_condition.to(
             device=predicted_semantic.device, dtype=predicted_semantic.dtype
         )
+        if not torch.isfinite(oracle).all():
+            raise ValueError("contact_condition requires finite values")
         predicted_for_merge = predicted_semantic
         if self.contact_semantic_transport_mode == "soft":
             # Preserve the f3ae3bf oracle teacher-forcing behavior bitwise.
             predicted_for_merge = predicted_for_merge.detach()
         semantic = mask * oracle + (1.0 - mask) * predicted_for_merge
-        return contact_logits, self.transport_contact_semantic(semantic)
+        return self.transport_contact_semantic(semantic)
+
+    def plan_contact_semantic(
+        self,
+        state: torch.Tensor,
+        ref_visual_hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        embodiment_id: Optional[torch.Tensor] = None,
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compatibility semantic planner; hard-ST numerics remain unchanged."""
+
+        if not self.contact_semantic_bottleneck:
+            raise RuntimeError("contact semantic planner is not enabled")
+        contact_logits = self._plan_contact_logits(
+            state,
+            ref_visual_hidden_states,
+            encoder_hidden_states,
+            embodiment_id=embodiment_id,
+        )
+        return contact_logits, self._transport_planned_semantic(
+            contact_logits, contact_condition, contact_condition_mask
+        )
+
+    def plan_contact_route(
+        self,
+        state: torch.Tensor,
+        ref_visual_hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        embodiment_id: Optional[torch.Tensor] = None,
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Return auxiliary logits and the sole optional action-visible packet."""
+
+        if route_rejects_oracle(self.contact_causal_route) and (
+            contact_condition is not None or contact_condition_mask is not None
+        ):
+            raise ValueError(
+                f"route {self.contact_causal_route.value!r} rejects oracle/condition inputs"
+            )
+        if self.contact_causal_route is ContactCausalRoute.AUX_ONLY_DIRECT_Q12:
+            logits = self._plan_contact_logits(
+                state,
+                ref_visual_hidden_states,
+                encoder_hidden_states,
+                embodiment_id=embodiment_id,
+            )
+            # Match the hard-semantic planner/decoder/transport forward, then
+            # discard the complete output before action token construction.
+            self.transport_contact_semantic(
+                self.activate_contact_segment_logits(logits)
+            )
+            return logits, None
+        if self.contact_causal_route is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST:
+            logits = self._plan_contact_logits(
+                state,
+                ref_visual_hidden_states,
+                encoder_hidden_states,
+                embodiment_id=embodiment_id,
+            )
+            return logits, self.transport_unstructured_contact_logits(logits)
+        return self.plan_contact_semantic(
+            state,
+            ref_visual_hidden_states,
+            encoder_hidden_states,
+            embodiment_id=embodiment_id,
+            contact_condition=contact_condition,
+            contact_condition_mask=contact_condition_mask,
+        )
 
     def encode_action_tokens(
         self,
@@ -1187,7 +1394,7 @@ class CasualWorldActionTransformer_MoT(
         state_states = self._encode_state_tokens(state, embodiment_id=embodiment_id)
         action_states = self._encode_action_tokens_only(action, embodiment_id=embodiment_id)
         contact_states = state_states.new_zeros(state_states.shape[0], 0, state_states.shape[-1])
-        if self.num_contact_tokens and self.contact_semantic_bottleneck:
+        if self.num_contact_tokens and self.contact_action_uses_packet:
             if contact_semantic is None:
                 raise ValueError(
                     "semantic bottleneck requires planned contact_semantic"
@@ -1209,7 +1416,7 @@ class CasualWorldActionTransformer_MoT(
                     device=state_states.device, dtype=state_states.dtype
                 )
             )
-        elif self.num_contact_tokens:
+        elif self.num_contact_tokens and not self.contact_planner_enabled:
             contact_states = self.contact_query_tokens.to(
                 device=state_states.device,
                 dtype=state_states.dtype,
@@ -1323,8 +1530,8 @@ class CasualWorldActionTransformer_MoT(
         )
         contact_logits = None
         contact_semantic = None
-        if self.contact_semantic_bottleneck:
-            contact_logits, contact_semantic = self.plan_contact_semantic(
+        if self.contact_planner_enabled:
+            contact_logits, contact_semantic = self.plan_contact_route(
                 state,
                 visual_hidden_states[:, :num_ref_tokens],
                 encoder_hidden_states,
@@ -1499,6 +1706,10 @@ class CasualWorldActionTransformer_MoT(
         embodiment_id: Optional[torch.Tensor] = None,
         contact_pred_override: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
+        if self.contact_action_uses_packet and encoder_hidden_states_image is not None:
+            raise ValueError(
+                "strict contact route rejects nonempty encoder_hidden_states_image"
+            )
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
             lora_scale = attention_kwargs.pop("scale", 1.0)
@@ -1578,7 +1789,7 @@ class CasualWorldActionTransformer_MoT(
             action_hidden_states.device,
             action_hidden_states.dtype,
             num_contact_tokens=num_contact_tokens,
-            action_attends_ref=not self.contact_bottleneck,
+            action_attends_ref=self.contact_action_attends_reference,
             state_attends_ref=not self.contact_semantic_bottleneck,
             contact_attends_ref=not self.contact_semantic_bottleneck,
         )
@@ -1802,9 +2013,9 @@ class CasualWorldActionTransformer_MoT(
         contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
         if ref_latents is None:
-            if self.contact_semantic_bottleneck:
+            if self.contact_planner_enabled:
                 raise ValueError(
-                    "semantic contact planner requires ref_latents in action-only training"
+                    "contact planner route requires ref_latents in action-only training"
                 )
             action_hidden_states, action_rotary_emb, num_state_tokens, num_contact_tokens, _ = self.encode_action_tokens(
                 state,
@@ -1921,6 +2132,48 @@ class CasualWorldActionTransformer_MoT(
     def reset_action_only_prefix_cache(self) -> None:
         self._action_only_prefix_cache = None
 
+    def _validate_contact_action_only_cache(self, cache: Mapping[str, Any]) -> None:
+        """Fail closed if route-specific cache contents are missing or excessive."""
+
+        if self.contact_route_metadata is not None and cache.get(
+            "contact_route_receipt_sha256"
+        ) != self.contact_route_metadata["receipt_sha256"]:
+            raise RuntimeError("action-only cache route receipt differs from the model")
+        if self.contact_causal_route is ContactCausalRoute.AUX_ONLY_DIRECT_Q12:
+            forbidden = {"contact_semantic", "contact_logits", "contact_code"}
+            if forbidden.intersection(cache):
+                raise RuntimeError("direct route cache contains forbidden planner values")
+        if self.contact_causal_route is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST:
+            if "contact_code" not in cache or {
+                "contact_semantic",
+                "contact_logits",
+            }.intersection(cache):
+                raise RuntimeError(
+                    "equal-bit cache must contain only the canonical contact code"
+                )
+            code = cache["contact_code"]
+            if (
+                not torch.isfinite(code).all()
+                or not torch.logical_or(
+                    code[..., :EQUAL_BIT_NUM_BITS] == 0,
+                    code[..., :EQUAL_BIT_NUM_BITS] == 1,
+                ).all()
+                or not (code[..., EQUAL_BIT_NUM_BITS:] == 0).all()
+            ):
+                raise RuntimeError("equal-bit cache contains a non-canonical code")
+            code_bytes = (
+                code.detach()
+                .to(device="cpu")
+                .contiguous()
+                .view(torch.uint8)
+                .numpy()
+                .tobytes()
+            )
+            if cache.get("contact_code_sha256") != hashlib.sha256(
+                code_bytes
+            ).hexdigest():
+                raise RuntimeError("equal-bit cache code digest differs")
+
     def _condition_time_only(
         self,
         embedder: WanTimeTextImageEmbedding,
@@ -1960,7 +2213,12 @@ class CasualWorldActionTransformer_MoT(
     ) -> Dict[str, Any]:
         cache = getattr(self, "_action_only_prefix_cache", None)
         if cache is not None:
+            self._validate_contact_action_only_cache(cache)
             return cache
+        if self.contact_action_uses_packet and encoder_hidden_states_image is not None:
+            raise ValueError(
+                "strict contact cache rejects nonempty encoder_hidden_states_image"
+            )
 
         if action_prefix_timestep.ndim == 2:
             ts_action_prefix_seq_len = action_prefix_timestep.shape[1]
@@ -2006,7 +2264,7 @@ class CasualWorldActionTransformer_MoT(
             device=action_prefix_hidden_states.device,
             dtype=action_prefix_hidden_states.dtype,
             num_contact_tokens=num_contact_tokens,
-            action_attends_ref=not self.contact_bottleneck,
+            action_attends_ref=self.contact_action_attends_reference,
             state_attends_ref=not self.contact_semantic_bottleneck,
             contact_attends_ref=not self.contact_semantic_bottleneck,
         )
@@ -2026,7 +2284,7 @@ class CasualWorldActionTransformer_MoT(
             )
             cached_key = block_cache["key"]
             cached_value = block_cache["value"]
-            if self.contact_bottleneck:
+            if not self.contact_action_attends_reference:
                 # Cached action queries must not regain a direct reference-token
                 # path. Contact keys already absorb the reference observation
                 # through the preceding prefix layers.
@@ -2044,11 +2302,33 @@ class CasualWorldActionTransformer_MoT(
             "encoder_action_hidden_states": encoder_action_hidden_states.detach(),
             "num_ref_tokens": int(visual_hidden_states.shape[1]),
         }
-        if contact_semantic is not None:
+        if self.contact_route_metadata is not None:
+            cache["contact_route_receipt_sha256"] = self.contact_route_metadata[
+                "receipt_sha256"
+            ]
+        if (
+            self.contact_causal_route
+            is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST
+            and contact_semantic is not None
+        ):
+            packet = contact_semantic.detach()
+            packet_bytes = (
+                packet.to(device="cpu").contiguous().view(torch.uint8).numpy().tobytes()
+            )
+            cache["contact_code"] = packet
+            cache["contact_code_sha256"] = hashlib.sha256(packet_bytes).hexdigest()
+        elif contact_semantic is not None:
             cache["contact_semantic"] = contact_semantic.detach()
-        if contact_logits is not None:
+        if (
+            contact_logits is not None
+            and self.contact_causal_route
+            is not ContactCausalRoute.AUX_ONLY_DIRECT_Q12
+            and self.contact_causal_route
+            is not ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST
+        ):
             cache["contact_logits"] = contact_logits.detach()
         self._action_only_prefix_cache = cache
+        self._validate_contact_action_only_cache(cache)
         return cache
 
     def forward_action_stack_with_prefix_cache(
@@ -2084,6 +2364,16 @@ class CasualWorldActionTransformer_MoT(
         contact_condition: Optional[torch.Tensor] = None,
         contact_condition_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.contact_action_uses_packet and encoder_hidden_states_image is not None:
+            raise ValueError(
+                "strict contact route rejects nonempty encoder_hidden_states_image"
+            )
+        if route_rejects_oracle(self.contact_causal_route) and (
+            contact_condition is not None or contact_condition_mask is not None
+        ):
+            raise ValueError(
+                f"route {self.contact_causal_route.value!r} rejects oracle/condition inputs"
+            )
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
             lora_scale = attention_kwargs.pop("scale", 1.0)
@@ -2100,14 +2390,16 @@ class CasualWorldActionTransformer_MoT(
 
         try:
             cache = getattr(self, "_action_only_prefix_cache", None)
+            if cache is not None:
+                self._validate_contact_action_only_cache(cache)
             contact_logits = None
             contact_semantic = None
             if cache is None:
                 visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, _ = (
                     self.encode_visual_tokens(ref_latents)
                 )
-                if self.contact_semantic_bottleneck:
-                    contact_logits, contact_semantic = self.plan_contact_semantic(
+                if self.contact_planner_enabled:
+                    contact_logits, contact_semantic = self.plan_contact_route(
                         state,
                         visual_hidden_states[:, :num_ref_tokens],
                         encoder_hidden_states,
@@ -2119,12 +2411,18 @@ class CasualWorldActionTransformer_MoT(
                 visual_hidden_states = None
                 visual_rotary_emb = None
                 num_ref_tokens = int(cache["num_ref_tokens"])
-                if self.contact_semantic_bottleneck:
-                    if "contact_semantic" not in cache:
+                if self.contact_action_uses_packet:
+                    packet_key = (
+                        "contact_code"
+                        if self.contact_causal_route
+                        is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST
+                        else "contact_semantic"
+                    )
+                    if packet_key not in cache:
                         raise RuntimeError(
-                            "semantic action-only cache is missing contact_semantic"
+                            f"strict action-only cache is missing {packet_key}"
                         )
-                    contact_semantic = cache["contact_semantic"]
+                    contact_semantic = cache[packet_key]
 
             (
                 action_hidden_states,
@@ -2234,10 +2532,14 @@ class CasualWorldActionTransformer_MoT(
             if not return_dict:
                 return action_pred
             output = {"action_pred": action_pred}
-            if "contact_logits" in cache:
+            if contact_logits is not None:
+                output["contact_pred"] = contact_logits
+            elif "contact_logits" in cache:
                 output["contact_pred"] = cache["contact_logits"]
             if "contact_semantic" in cache:
                 output["contact_semantic"] = cache["contact_semantic"]
+            if "contact_code" in cache:
+                output["contact_code"] = cache["contact_code"]
             return output
         finally:
             if USE_PEFT_BACKEND:
