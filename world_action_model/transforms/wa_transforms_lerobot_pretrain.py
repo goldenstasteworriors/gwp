@@ -68,6 +68,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         max_prompt_len=64,
         subtask_prob=0,
         matched_control_capture=False,
+        eval_crop_mode="legacy_random",
     ):
         if norm_path is None:
             raise ValueError("norm_path list is none")
@@ -242,6 +243,12 @@ class WALeRobotTransformsPretrain(WATransforms):
         self.subtask_prob = float(subtask_prob)
         self.image_augmentation = dict(image_augmentation or {})
         self.matched_control_capture = bool(matched_control_capture)
+        self.eval_crop_mode = str(eval_crop_mode)
+        if self.eval_crop_mode not in {"legacy_random", "center"}:
+            raise ValueError(
+                "eval_crop_mode must be 'legacy_random' or 'center', got "
+                f"{self.eval_crop_mode!r}"
+            )
         self._warned_unknown_robotype = False
 
     def _parse_robotype(self, robotype):
@@ -353,8 +360,12 @@ class WALeRobotTransformsPretrain(WATransforms):
             new_height = dst_height
             new_width = int(round(float(dst_height) / height * width))
         input_images = F.resize(input_images, (new_height, new_width), InterpolationMode.BILINEAR)
-        x1 = random.randint(0, new_width - dst_width)
-        y1 = random.randint(0, new_height - dst_height)
+        if not self.is_train and self.eval_crop_mode == "center":
+            x1 = (new_width - dst_width) // 2
+            y1 = (new_height - dst_height) // 2
+        else:
+            x1 = random.randint(0, new_width - dst_width)
+            y1 = random.randint(0, new_height - dst_height)
         if view_trace is not None:
             view_trace["resize_crop"] = {
                 "new_height": new_height,

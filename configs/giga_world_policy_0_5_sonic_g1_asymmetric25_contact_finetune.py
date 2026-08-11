@@ -7,6 +7,7 @@ gate template intentionally makes the default path a hard No-Go.
 
 import copy
 import os
+from pathlib import Path
 
 from world_action_model.contact_asym25_preflight import (
     ContactAsym25PreflightError,
@@ -18,6 +19,15 @@ from world_action_model.contact_transition_schema import (
     contact_transport_capacity_metadata,
 )
 from world_action_model.ego_action_schema import EGO_HAND_STATUS_SEMANTICS
+from world_action_model.contact_asym25_heldout_eval import (
+    build_current_training_data_receipt,
+    build_training_code_receipt,
+    load_and_replay_preflight_receipt,
+    load_completed_group_split,
+    load_fixed_window_manifest,
+    public_tree_receipt,
+    snapshot_artifact_tree,
+)
 
 
 _FIXED_ENV = {
@@ -42,6 +52,48 @@ for _name, _expected in _FIXED_ENV.items():
 # external review gates must be explicit and fingerprint-bound.
 preflight_receipt = preflight_from_environment()
 
+_persisted_preflight_path = os.environ.get(
+    "GWP_CONTACT_ASYM25_PREFLIGHT_RECEIPT", ""
+).strip()
+_heldout_window_path = os.environ.get(
+    "GWP_CONTACT_HELDOUT_WINDOW_MANIFEST", ""
+).strip()
+if not _persisted_preflight_path or not _heldout_window_path:
+    raise ContactAsym25PreflightError(
+        "production training requires GWP_CONTACT_ASYM25_PREFLIGHT_RECEIPT and "
+        "GWP_CONTACT_HELDOUT_WINDOW_MANIFEST"
+    )
+_persisted_preflight, _persisted_preflight_sha256 = (
+    load_and_replay_preflight_receipt(_persisted_preflight_path)
+)
+if _persisted_preflight != preflight_receipt:
+    raise ContactAsym25PreflightError(
+        "persisted preflight receipt differs from the config-import replay"
+    )
+_, _split_assignments = load_completed_group_split(
+    preflight_receipt["split_manifest_path"],
+    expected_sha256=preflight_receipt["split_manifest_sha256"],
+    expected_episode_lengths=preflight_receipt["episode_lengths"],
+)
+_heldout_window_manifest, _heldout_window_sha256 = load_fixed_window_manifest(
+    _heldout_window_path,
+    preflight_receipt=preflight_receipt,
+    preflight_receipt_sha256=_persisted_preflight_sha256,
+    split_assignments=_split_assignments,
+)
+_repository_root = Path(__file__).resolve().parents[1]
+_training_code_receipt = build_training_code_receipt(_repository_root)
+_dataset_source_tree = snapshot_artifact_tree(preflight_receipt["data_root"])
+current_training_data_receipt, current_training_data_receipt_sha256 = (
+    build_current_training_data_receipt(
+        preflight_receipt=preflight_receipt,
+        preflight_receipt_sha256=_persisted_preflight_sha256,
+        heldout_window_manifest_sha256=_heldout_window_sha256,
+        training_code_receipt=_training_code_receipt,
+        dataset_source_tree_receipt=public_tree_receipt(_dataset_source_tree),
+    )
+)
+
 from configs.giga_world_policy_0_5_sonic_g1_asymmetric25_finetune import (  # noqa: E402
     config as base_config,
 )
@@ -59,6 +111,14 @@ for dataset_config in config["dataloaders"]["train"]["data_or_config"]:
             "base dataloader data_path differs from the preflighted asymmetric25 root"
         )
     dataset_config.update(
+        episodes=preflight_receipt["train_episode_ids"],
+        force_cache_sync=True,
+        production_episode_filter_receipt=preflight_receipt[
+            "training_data_receipt"
+        ],
+        production_episode_filter_receipt_sha256=preflight_receipt[
+            "training_data_receipt_sha256"
+        ],
         contact_sidecar_dir=os.environ["GWP_CONTACT_SIDECAR_DIR"],
         contact_sidecar_pattern="episode_{episode_index:06d}.npz",
         contact_sidecar_cache_size=int(
@@ -100,6 +160,19 @@ config["models"].update(
     contact_schema_version=SEGMENT_SCHEMA_VERSION,
     contact_condition_mode="predicted",
     require_contact_targets=True,
+    current_training_data_receipt=current_training_data_receipt,
+    current_training_data_receipt_sha256=current_training_data_receipt_sha256,
+    current_training_source_snapshot=_dataset_source_tree,
+    production_checkpoint_steps=[0, 100, 200],
+)
+
+if int(config["train"].get("max_steps", 0)) < 200:
+    raise ContactAsym25PreflightError(
+        "production held-out contract requires max_steps >= 200"
+    )
+config["train"].update(
+    checkpoint_interval=100,
+    checkpoint_total_limit=-1,
 )
 
 config["contact_asym25_integration"] = {
@@ -107,6 +180,13 @@ config["contact_asym25_integration"] = {
     "training_gate_path": str(
         os.path.realpath(os.environ["GWP_CONTACT_ASYM25_TRAINING_GATE"])
     ),
+    "split_seed": preflight_receipt["split_seed"],
+    "train_episode_ids": preflight_receipt["train_episode_ids"],
+    "validation_episode_ids": preflight_receipt["validation_episode_ids"],
+    "heldout_episode_ids": preflight_receipt["heldout_episode_ids"],
+    "heldout_window_manifest": str(Path(_heldout_window_path).resolve()),
+    "heldout_window_manifest_sha256": _heldout_window_sha256,
+    "current_training_data_receipt_sha256": current_training_data_receipt_sha256,
     "action_visible_route": (
         "state/ref/text planner -> canonical hard 22D -> 22-to-1024 encoder -> "
         "action; action has no direct reference or raw-planner-hidden route"

@@ -22,6 +22,10 @@ from world_action_model.ego_hand_active_sidecar import (
     EGO_HAND_ACTIVE_SEMANTICS,
     load_hand_active_npz,
 )
+from world_action_model.production_split_contract import (
+    require_train_episode,
+    validate_production_episode_filter_receipt,
+)
 from world_action_model.verified_io import read_verified_bytes, strict_json_loads
 
 _SUBTASK_MARKER_RE = re.compile(r"\bsubtask\s*:\s*", flags=re.IGNORECASE)
@@ -88,6 +92,8 @@ class WAMLeRobotDataset(BaseDataset):
         verified_training_run_nonce: str | None = None,
         matched_control_identity: bool = False,
         matched_control_dataset_id: str | None = None,
+        production_episode_filter_receipt: dict | None = None,
+        production_episode_filter_receipt_sha256: str | None = None,
         meta_name: str | None = None,
         robotype: str | None = None,
         **kwargs,
@@ -256,6 +262,26 @@ class WAMLeRobotDataset(BaseDataset):
                 )
             if metadata_dataset_id:
                 self.matched_control_dataset_id = metadata_dataset_id
+        self.production_episode_filter_receipt = None
+        self.production_episode_filter_receipt_sha256 = None
+        self.production_allowed_episode_ids = None
+        if (production_episode_filter_receipt is None) != (
+            production_episode_filter_receipt_sha256 is None
+        ):
+            raise ValueError(
+                "production episode filtering requires both receipt and receipt SHA"
+            )
+        if production_episode_filter_receipt is not None:
+            receipt, digest, allowed_ids = (
+                validate_production_episode_filter_receipt(
+                    production_episode_filter_receipt,
+                    production_episode_filter_receipt_sha256,
+                    kwargs.get("episodes"),
+                )
+            )
+            self.production_episode_filter_receipt = receipt
+            self.production_episode_filter_receipt_sha256 = digest
+            self.production_allowed_episode_ids = allowed_ids
         if self.contact_sidecar_require_reviewed_v1_1:
             if not self.contact_sidecar_strict or self.contact_sidecar_dir is None:
                 raise ValueError(
@@ -443,6 +469,25 @@ class WAMLeRobotDataset(BaseDataset):
                 verified_training_run_nonce=self.verified_training_run_nonce,
                 **fast_kwargs,
             )
+            if self.production_allowed_episode_ids is not None:
+                actual_episodes = getattr(self.dataset, "episodes", None)
+                if (
+                    actual_episodes is None
+                    or list(actual_episodes)
+                    != self.production_episode_filter_receipt["train_episode_ids"]
+                ):
+                    raise ValueError(
+                        "FastLeRobotDataset did not retain the exact production train filter"
+                    )
+                info = getattr(self.dataset.meta, "info", None)
+                if (
+                    not isinstance(info, dict)
+                    or info.get("dataset_id")
+                    != self.production_episode_filter_receipt["dataset_id"]
+                ):
+                    raise ValueError(
+                        "production episode filter receipt dataset_id differs from runtime data"
+                    )
             if self.data_size is not None:
                 assert self.data_size == len(self.dataset)
             else:
@@ -665,11 +710,17 @@ class WAMLeRobotDataset(BaseDataset):
 
     def _get_data(self, index: int) -> dict:
         data_dict = self.dataset[index]
+        if self.production_allowed_episode_ids is not None:
+            require_train_episode(
+                data_dict.get("episode_index"), self.production_allowed_episode_ids
+            )
         data_dict['robotype'] = self.robotype
         data_dict['data_path'] = self.data_path
         if self.matched_control_identity:
             data_dict['matched_control_dataset_id'] = self.matched_control_dataset_id
-            data_dict['matched_control_global_index'] = int(index)
+            data_dict['matched_control_global_index'] = self._scalar_int(
+                data_dict.get("index", index), "authoritative global index"
+            )
         if self.meta_name is not None:
             assert self.meta_name not in data_dict
             data_dict[self.meta_name] = self.dataset.meta

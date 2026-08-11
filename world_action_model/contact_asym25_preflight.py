@@ -16,7 +16,6 @@ from pathlib import Path
 import re
 
 import numpy as np
-import pandas as pd
 
 from scripts.contact_labels.contact_label_io_v1_1 import (
     COVERAGE_FIELDS,
@@ -48,6 +47,8 @@ from world_action_model.contact_transition_schema import (
 
 
 TRAINING_GATE_VERSION = "contact-asym25-training-gate/v1"
+PREFLIGHT_RECEIPT_VERSION = "contact-asym25-production-preflight-receipt/v1"
+TRAINING_DATA_RECEIPT_VERSION = "contact-asym25-training-data-receipt/v1"
 REVIEWED_BUILDER_ID = "scripts/contact_labels/build_contact_segment_sidecars_v1_1.py"
 REQUIRED_SIDECAR_KEYS = (
     "contact_target",
@@ -78,6 +79,7 @@ REQUIRED_ENV_PATHS = (
     "GWP_CONTACT_BUILD_CONFIG",
     "GWP_CONTACT_SPLIT_MANIFEST",
     "GWP_CONTACT_ASYM25_TRAINING_GATE",
+    "GWP_SPLIT_SEED",
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -256,7 +258,7 @@ def _validate_split_manifest(
     inventory: Mapping[int, object],
     inventory_rows: Mapping[int, Mapping[str, str]],
     split_policy: Mapping,
-) -> None:
+) -> dict[int, dict[str, list[int]]]:
     expected_header = [
         "episode_id",
         "length_frames",
@@ -337,6 +339,17 @@ def _validate_split_manifest(
             raise ContactAsym25PreflightError(
                 f"{seed} must contain non-empty train, val, and test splits"
             )
+    return {
+        int(seed.removeprefix("seed_").removesuffix("_split")): {
+            split: sorted(
+                episode
+                for episode, row in split_rows.items()
+                if row[seed] == split
+            )
+            for split in ("train", "val", "test")
+        }
+        for seed in seed_columns
+    }
 
 
 def validate_reviewed_sidecar_bundle(
@@ -400,7 +413,9 @@ def validate_reviewed_sidecar_bundle(
         raise ContactAsym25PreflightError("build config strategy_claim_allowed is false")
     inventory = load_inventory(inventory_csv)
     inventory_rows = _validate_group_metadata(inventory_csv)
-    _validate_split_manifest(split_manifest, inventory, inventory_rows, split_policy)
+    split_episode_ids = _validate_split_manifest(
+        split_manifest, inventory, inventory_rows, split_policy
+    )
     coverages = load_coverages(coverage_csv, inventory, config)
     segments = load_segments(segments_csv, inventory, coverages, config)
     if len(segments) != int(meta["unique_physical_segments"]):
@@ -497,6 +512,7 @@ def validate_reviewed_sidecar_bundle(
         "episode_lengths": {
             int(episode): int(item.length_frames) for episode, item in inventory.items()
         },
+        "split_episode_ids": split_episode_ids,
         "dataset_id": config["dataset_id"],
         "meta": meta,
     }
@@ -734,6 +750,8 @@ def _dataset_episode_lengths(data_root: Path) -> tuple[dict[int, int], str]:
             episodes_dir.glob("*.parquet")
         )
         if parquet_paths:
+            import pandas as pd
+
             metadata_files = parquet_paths
             for path in parquet_paths:
                 rows.extend(pd.read_parquet(path).to_dict(orient="records"))
@@ -783,11 +801,20 @@ def validate_contact_asym25_training_preflight(
     build_config_path: str | Path,
     split_manifest: str | Path,
     training_gate_path: str | Path,
+    split_seed: int,
 ) -> dict:
     data_root = Path(data_root).resolve()
     norm_stats_path = Path(norm_stats_path).resolve()
     hardware_manifest_path = Path(hardware_manifest_path).resolve()
     calibration_capture_path = Path(calibration_capture_path).resolve()
+    if isinstance(split_seed, bool) or not isinstance(split_seed, int) or split_seed not in {
+        6666,
+        7777,
+        8888,
+    }:
+        raise ContactAsym25PreflightError(
+            "production split_seed must be one of 6666, 7777, 8888"
+        )
     info_path = data_root / "meta" / "info.json"
     info = _load_json(info_path, "asymmetric25 dataset info")
     manifest = load_hardware_manifest(hardware_manifest_path, mode="training")
@@ -910,7 +937,66 @@ def validate_contact_asym25_training_preflight(
         gate_path=gate_path,
         dataset_id=dataset_id,
     )
+    selected_split = sidecar["split_episode_ids"].get(split_seed)
+    if (
+        not isinstance(selected_split, Mapping)
+        or set(selected_split) != {"train", "val", "test"}
+        or any(not selected_split[name] for name in ("train", "val", "test"))
+    ):
+        raise ContactAsym25PreflightError(
+            f"production split seed {split_seed} is missing a non-empty train/val/test set"
+        )
+    if (
+        set(selected_split["train"]) & set(selected_split["val"])
+        or set(selected_split["train"]) & set(selected_split["test"])
+        or set(selected_split["val"]) & set(selected_split["test"])
+        or set(selected_split["train"])
+        | set(selected_split["val"])
+        | set(selected_split["test"])
+        != set(dataset_episode_lengths)
+    ):
+        raise ContactAsym25PreflightError(
+            "selected production split is overlapping or incomplete"
+        )
+    training_data_receipt = {
+        "receipt_version": TRAINING_DATA_RECEIPT_VERSION,
+        "dataset_id": dataset_id,
+        "action_schema_id": ASYMMETRIC_SCHEMA_ID,
+        "split_seed": split_seed,
+        "train_episode_ids": list(selected_split["train"]),
+        "validation_episode_ids": list(selected_split["val"]),
+        "heldout_episode_ids": list(selected_split["test"]),
+        "dataset_info_sha256": dataset_info_digest,
+        "episode_metadata_sha256": episode_metadata_digest,
+        "norm_stats_sha256": expected["norm_stats_sha256"],
+        "sidecar_bundle_sha256": sidecar["sidecar_bundle_sha256"],
+        "split_manifest_sha256": sidecar["split_manifest_sha256"],
+        "training_gate_sha256": sha256_file(gate_path),
+        "preflight_code_sha256": sha256_file(Path(__file__).resolve()),
+    }
+    training_data_receipt_sha256 = hashlib.sha256(
+        json.dumps(
+            training_data_receipt,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    artifact_paths = {
+        "data_root": str(data_root),
+        "norm_stats": str(norm_stats_path),
+        "hardware_manifest": str(hardware_manifest_path),
+        "calibration_capture": str(calibration_capture_path),
+        "sidecar_dir": str(Path(sidecar_dir).resolve()),
+        "coverage_csv": str(Path(coverage_csv).resolve()),
+        "segments_csv": str(Path(segments_csv).resolve()),
+        "inventory_csv": str(Path(inventory_csv).resolve()),
+        "build_config": str(Path(build_config_path).resolve()),
+        "split_manifest": str(Path(split_manifest).resolve()),
+        "training_gate": str(gate_path),
+    }
     return {
+        "receipt_version": PREFLIGHT_RECEIPT_VERSION,
         "status": "artifact_consistency_passed_with_explicit_external_gates",
         "scientific_gate_claimed": False,
         "action_schema_id": ASYMMETRIC_SCHEMA_ID,
@@ -919,9 +1005,27 @@ def validate_contact_asym25_training_preflight(
         "num_contact_tokens": 12,
         "transport_mode": "hard_st",
         "time_bins": 16,
+        "split_seed": split_seed,
+        "train_episode_ids": list(selected_split["train"]),
+        "validation_episode_ids": list(selected_split["val"]),
+        "heldout_episode_ids": list(selected_split["test"]),
+        "training_data_receipt": training_data_receipt,
+        "training_data_receipt_sha256": training_data_receipt_sha256,
+        "dataset_id": dataset_id,
+        "dataset_fps": dataset_fps,
+        "horizon_frames": 48,
+        "episode_lengths": {
+            str(episode): int(length)
+            for episode, length in sorted(dataset_episode_lengths.items())
+        },
         "data_root": str(data_root),
         "norm_stats_path": str(norm_stats_path),
         "sidecar_dir": str(Path(sidecar_dir).resolve()),
+        "split_manifest_path": str(Path(split_manifest).resolve()),
+        "training_gate_path": str(gate_path),
+        "training_gate_sha256": sha256_file(gate_path),
+        "preflight_code_sha256": sha256_file(Path(__file__).resolve()),
+        "artifact_paths": artifact_paths,
         "episode_npz_sha256": sidecar["episode_npz_sha256"],
         "evidence_report_sha256": evidence_digests,
         **expected,
@@ -932,8 +1036,14 @@ def preflight_from_environment() -> dict:
     missing = [name for name in REQUIRED_ENV_PATHS if not os.environ.get(name, "").strip()]
     if missing:
         raise ContactAsym25PreflightError(
-            f"missing required contact-asym25 preflight environment paths: {missing}"
+            f"missing required contact-asym25 preflight environment inputs: {missing}"
         )
+    split_seed_text = os.environ["GWP_SPLIT_SEED"]
+    if split_seed_text not in {"6666", "7777", "8888"}:
+        raise ContactAsym25PreflightError(
+            "GWP_SPLIT_SEED must be one of 6666, 7777, 8888"
+        )
+    split_seed = int(split_seed_text)
     return validate_contact_asym25_training_preflight(
         data_root=os.environ["GWP_SONIC_DATA_PATH"],
         norm_stats_path=os.environ["GWP_NORM_STATS_PATH"],
@@ -946,4 +1056,5 @@ def preflight_from_environment() -> dict:
         build_config_path=os.environ["GWP_CONTACT_BUILD_CONFIG"],
         split_manifest=os.environ["GWP_CONTACT_SPLIT_MANIFEST"],
         training_gate_path=os.environ["GWP_CONTACT_ASYM25_TRAINING_GATE"],
+        split_seed=split_seed,
     )
