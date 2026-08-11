@@ -109,8 +109,8 @@ LeRobot loader and every grip generation/runtime path. The source receipt also
 binds the installed LeRobot dataset implementation bytes/version as a separate
 runtime dependency; its absolute import path is record-only.
 
-The WAM code receipt below was refreshed after the op35-fix1 production-evidence
-integration at commit `89874a08a654d3ae2a2e5dcd41421fe73002f131`. This was a
+The WAM code receipt below was refreshed after the op39 causal-route integration
+at commit `2523abe78497d7491313ead75dbca72f05b81520`. This was a
 code-only re-sign: the 66 NPZ files, HDF5 hashes, normalization arrays, sample
 counts, semantics review, and scientific limitations were not regenerated or
 changed.
@@ -121,10 +121,10 @@ dataset_source_receipt_sha256: d4873e6c0670a07aed9d48e4fea064ce56b402a408fff241b
 raw_hdf5_bundle_sha256: f074948ce59928b90f3122b205693590e74a114c1f54172ff41e938fe84db6cb
 final_hdf5_bundle_sha256: 334a8aeb66d90853bbbba2af044153b624018d008b45515fe0840dc4858448ed
 hand_active_sidecar_bundle_sha256: 72fff6f1a17916cc76cb0057eb77350e56cd1b883bd69759fe93131efc023fe9
-hand_active_meta_sha256: 7f03dc79decde45570e424265d2e0eb0ec03808ea2c57dfe475007beae492b4a
-norm_v3_sha256: eb12258aafa3485528623e3c0e313932518420f233a31a24e63c134e58986e4e
-wam_code_receipt_sha256: f45e26e467c331a651b629846f503c4567cfdc2321f4c154d0189eaf60ce0385
+hand_active_meta_sha256: 1300a98e8f14e92243e862d6e17a8cdb2b7c1cf95f386b8b11bf05e23ca6b8c9
+norm_v3_sha256: 5433190cc3b6090ef6be6bcdfc932d45d4dffbd23e9086da4cd6bc5b6e5488da
+wam_code_receipt_sha256: cbb01d029bf8caeaa267ec7f5e48c98b1b27357d6f36202ae1138b36a57aba0b
 lerobot_runtime_source_sha256: bb4b1f7cb2dca6b440f846b35670eba2ddb39434db0f03591a53fef6f022a9f8
-source_receipt_sha256: 321c3434e0374615ac19e88ff7da1ae2210757410b056977866d3d5fc64e7069
-reviewed_report_sha256: 4447145941370fc8491d09edecb7e461ec9e8a98a9a2be62d9c42b9b39a2ac54
+source_receipt_sha256: a7364041a56913d724f28fb47f9e223311bcb88a6fad56d725566806f1f8cf4d
+reviewed_report_sha256: aa29d555838b79a3e99aeabb7ab845d0847c14a2a37bae3740c68d414207161e
 ```

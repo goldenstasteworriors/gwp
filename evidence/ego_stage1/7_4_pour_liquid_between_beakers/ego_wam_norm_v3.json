@@ -718,7 +718,7 @@
     "fps": 20.0,
     "frame_clock": "processed_action_20hz",
     "grip_normalization_contract": "dimensions_18_19_use_only_corresponding_active_tracker_frames;inactive_proxy_values_excluded",
-    "hand_active_meta_sha256": "7f03dc79decde45570e424265d2e0eb0ec03808ea2c57dfe475007beae492b4a",
+    "hand_active_meta_sha256": "1300a98e8f14e92243e862d6e17a8cdb2b7c1cf95f386b8b11bf05e23ca6b8c9",
     "hand_active_raw_hdf5_bundle_sha256": "f074948ce59928b90f3122b205693590e74a114c1f54172ff41e938fe84db6cb",
     "hand_active_semantics": "binary_tracker_validity_0_inactive_1_active",
     "hand_active_sidecar_bundle_sha256": "72fff6f1a17916cc76cb0057eb77350e56cd1b883bd69759fe93131efc023fe9",
@@ -1072,7 +1072,7 @@
     "source_hand_status_semantics": "closure_fraction_0_open_1_closed",
     "state_samples": 20013,
     "target_hand_status_semantics": "open_fraction_0_closed_1_open",
-    "wam_code_receipt_sha256": "f45e26e467c331a651b629846f503c4567cfdc2321f4c154d0189eaf60ce0385"
+    "wam_code_receipt_sha256": "cbb01d029bf8caeaa267ec7f5e48c98b1b27357d6f36202ae1138b36a57aba0b"
   },
   "norm_stats": {
     "action": {
