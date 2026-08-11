@@ -23,6 +23,8 @@ from world_action_model.contact_route_contract import (
     validate_spec_only_trainer_route_config,
 )
 from world_action_model.contact_supervision_contract import (
+    CONTACT_GROUPED_SUPERVISION_RULE_VERSION,
+    grouped_contact_supervision_weights,
     validate_positive_contact_supervision,
 )
 from world_action_model.matched_control_hashes import MatchedControlCollector
@@ -136,6 +138,7 @@ def grouped_contact_segment_loss(
     target, mask, confidence = apply_contact_query_assignment(
         prediction, target, mask, confidence, matcher
     )
+    supervision_weights = grouped_contact_supervision_weights(mask, confidence)
     components = []
     active_components = []
 
@@ -151,7 +154,7 @@ def grouped_contact_segment_loss(
             target[..., field_slice].float(),
             reduction="none",
         )
-        weights = (mask[..., field_slice] * confidence[..., field_slice]).float()
+        weights = supervision_weights[field]
         component, active = weighted_mean(values, weights)
         components.append(component)
         active_components.append(active)
@@ -161,10 +164,7 @@ def grouped_contact_segment_loss(
         field_target = target[..., field_slice].float()
         # Categorical supervision is valid only when the complete one-hot
         # group is known.  Partial category masks are treated as unknown.
-        field_weight = (
-            mask[..., field_slice].amin(dim=-1)
-            * confidence[..., field_slice].amin(dim=-1)
-        ).float()
+        field_weight = supervision_weights[field]
         values = -(field_target * F.log_softmax(
             prediction[..., field_slice].float(), dim=-1
         )).sum(dim=-1)
@@ -179,7 +179,7 @@ def grouped_contact_segment_loss(
             target[..., field_slice].float(),
             reduction="none",
         )
-        weights = (mask[..., field_slice] * confidence[..., field_slice]).float()
+        weights = supervision_weights[field]
         component, active = weighted_mean(values, weights)
         components.append(component)
         active_components.append(active)
@@ -590,6 +590,11 @@ class CasualWATrainerMoT(Trainer):
                 else "disabled_or_legacy"
             ),
             "effect_or_counterfactual_physics_loss": False,
+            "contact_supervision_rule_version": (
+                CONTACT_GROUPED_SUPERVISION_RULE_VERSION
+                if self.contact_schema_version == SEGMENT_SCHEMA_VERSION
+                else None
+            ),
         }
 
         vae_pretrained = model_config.get("vae_pretrained", os.path.join(pretrained, "vae"))

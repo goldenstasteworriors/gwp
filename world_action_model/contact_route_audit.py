@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from world_action_model.contact_route_contract import (
     ContactCausalRoute,
@@ -32,6 +33,9 @@ from world_action_model.contact_transition_schema import (
     EQUAL_BIT_MIXING_MATRIX_SHA256,
     EQUAL_BIT_NUM_BITS,
     EQUAL_BIT_VALID_STATES,
+    SEGMENT_BINARY_FIELDS,
+    SEGMENT_CATEGORICAL_FIELDS,
+    SEGMENT_CONTINUOUS_FIELDS,
     SEGMENT_FIELD_SLICES,
     SEGMENT_TARGET_DIM,
     canonicalize_unstructured_ids,
@@ -48,11 +52,14 @@ from world_action_model.models.transformer_wa_casual_mot import (
     build_mot_attention_mask,
 )
 from world_action_model.contact_supervision_contract import (
+    CONTACT_GROUPED_SUPERVISION_RULE_VERSION,
+    effective_contact_supervision_count,
+    grouped_contact_supervision_weights,
     validate_positive_contact_supervision,
 )
 
 
-AUDIT_VERSION = "contact_causal_route_cpu_audit_v2"
+AUDIT_VERSION = "contact_causal_route_cpu_audit_v3"
 AUDIT_SEED = 38_202_608_11
 CLAMP_TOLERANCE = 1e-6
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -120,7 +127,9 @@ def _tiny_model(route: ContactCausalRoute, *, transport: str = "hard_st"):
     )
 
 
-def _legacy_semantic_model(transport: str, explicit_route: bool):
+def _legacy_semantic_model(
+    transport: str, explicit_route: bool, *, time_bins: int = 16
+):
     route_by_transport = {
         "soft": ContactCausalRoute.SOFT_SEMANTIC.value,
         "hard_st": ContactCausalRoute.HARD_ST_SEMANTIC.value,
@@ -151,7 +160,7 @@ def _legacy_semantic_model(transport: str, explicit_route: bool):
         contact_schema_version="contact_segment_v1_1",
         contact_semantic_bottleneck=True,
         contact_semantic_transport_mode=transport,
-        contact_time_bins=16,
+        contact_time_bins=time_bins,
         **kwargs,
     )
 
@@ -367,6 +376,173 @@ def _cache_domain_audit(
     return checks
 
 
+def _semantic_cache_resolution_audit(
+    inputs: dict[str, torch.Tensor],
+) -> dict[str, dict[str, Any]]:
+    """Exercise hard grammar validation for implicit and detached routes."""
+
+    cases = (
+        ("implicit_hard_st", "hard_st", False),
+        ("implicit_hard_detached", "hard_detached", False),
+        ("explicit_hard_detached", "hard_detached", True),
+    )
+    result: dict[str, dict[str, Any]] = {}
+    canonical_packet = _semantic_packets()[1]
+    for index, (name, transport, explicit) in enumerate(cases):
+        torch.manual_seed(AUDIT_SEED + 350 + index)
+        model = _legacy_semantic_model(transport, explicit_route=explicit).eval()
+        model._enable_action_only_prefix_cache = True
+        model.reset_action_only_prefix_cache()
+        _bind_fixed_packet(
+            model,
+            canonical_packet,
+            torch.zeros(1, 12, SEGMENT_TARGET_DIM),
+        )
+        call_kwargs = dict(
+            action_only=True,
+            no_video_tokens=True,
+            ref_latents=inputs["ref_latents"],
+            noisy_latents=None,
+            timestep=torch.zeros(1, 6),
+            encoder_hidden_states=inputs["encoder_hidden_states"],
+            state=inputs["state"],
+            action=inputs["action"],
+            embodiment_id=inputs["embodiment_id"],
+            return_dict=True,
+        )
+        with torch.no_grad():
+            first = model(**call_kwargs)["action_pred"]
+            second = model(**call_kwargs)["action_pred"]
+        cache = model._action_only_prefix_cache
+        model._validate_contact_action_only_cache(cache)
+        if "contact_semantic" not in cache or "contact_packet_receipt" not in cache:
+            raise AssertionError(f"{name} did not cache a canonical semantic packet")
+        if not torch.equal(cache["contact_semantic"], canonical_packet):
+            raise AssertionError(f"{name} cache changed canonical packet bytes")
+        invalid = cache["contact_semantic"].clone()
+        invalid[0, 0, SEGMENT_FIELD_SLICES["start_tau"]] = 0.25
+        probe = dict(cache)
+        probe["contact_semantic"] = invalid
+        probe["contact_packet_receipt"] = contact_packet_receipt(
+            route_receipt=model.contact_route_metadata,
+            packet_bytes=model._canonical_packet_bytes(invalid),
+            packet_dtype=str(invalid.dtype),
+            packet_shape=tuple(invalid.shape),
+        )
+        try:
+            model._validate_contact_action_only_cache(probe)
+        except RuntimeError:
+            continuous_0_25_rejected = True
+        else:
+            raise AssertionError(f"{name} accepted off-lattice continuous value 0.25")
+        result[name] = {
+            "resolved_route": model.contact_causal_route.value,
+            "route_explicit": model.contact_causal_route_explicit,
+            "transport": model.contact_semantic_transport_mode,
+            "receipt_declares_finite_semantic_packet": bool(
+                model.contact_route_metadata[
+                    "action_visible_packet_finite_semantic_grammar"
+                ]
+            ),
+            "canonical_packet_cached_and_accepted": True,
+            "cached_reuse_action_bitwise_equal": bool(torch.equal(first, second)),
+            "continuous_0_25_rejected": continuous_0_25_rejected,
+        }
+    return result
+
+
+def _soft_cache_continuous_audit(
+    inputs: dict[str, torch.Tensor],
+) -> dict[str, Any]:
+    """Prove that the continuous soft semantic cache remains continuous."""
+
+    torch.manual_seed(AUDIT_SEED + 359)
+    model = _legacy_semantic_model("soft", explicit_route=False).eval()
+    model._enable_action_only_prefix_cache = True
+    model.reset_action_only_prefix_cache()
+    continuous_packet = torch.full((1, 12, SEGMENT_TARGET_DIM), 0.25)
+    _bind_fixed_packet(
+        model,
+        continuous_packet,
+        torch.zeros(1, 12, SEGMENT_TARGET_DIM),
+    )
+    call_kwargs = dict(
+        action_only=True,
+        no_video_tokens=True,
+        ref_latents=inputs["ref_latents"],
+        noisy_latents=None,
+        timestep=torch.zeros(1, 6),
+        encoder_hidden_states=inputs["encoder_hidden_states"],
+        state=inputs["state"],
+        action=inputs["action"],
+        embodiment_id=inputs["embodiment_id"],
+        return_dict=True,
+    )
+    with torch.no_grad():
+        first = model(**call_kwargs)["action_pred"]
+        second = model(**call_kwargs)["action_pred"]
+    cache = model._action_only_prefix_cache
+    model._validate_contact_action_only_cache(cache)
+    if not torch.equal(cache["contact_semantic"], continuous_packet):
+        raise AssertionError("soft cache changed its continuous semantic packet")
+    return {
+        "resolved_route": model.contact_causal_route.value,
+        "route_explicit": model.contact_causal_route_explicit,
+        "receipt_declares_finite_semantic_packet": bool(
+            model.contact_route_metadata[
+                "action_visible_packet_finite_semantic_grammar"
+            ]
+        ),
+        "continuous_0_25_cached_and_accepted": True,
+        "cached_reuse_action_bitwise_equal": bool(torch.equal(first, second)),
+    }
+
+
+def _non_b16_hard_cache_fail_closed_audit(
+    inputs: dict[str, torch.Tensor],
+) -> dict[str, Any]:
+    model = _legacy_semantic_model(
+        "hard_st", explicit_route=False, time_bins=8
+    ).eval()
+    model._enable_action_only_prefix_cache = True
+    model.reset_action_only_prefix_cache()
+    _bind_fixed_packet(
+        model,
+        _semantic_packets()[1],
+        torch.zeros(1, 12, SEGMENT_TARGET_DIM),
+    )
+    try:
+        with torch.no_grad():
+            model(
+                action_only=True,
+                no_video_tokens=True,
+                ref_latents=inputs["ref_latents"],
+                noisy_latents=None,
+                timestep=torch.zeros(1, 6),
+                encoder_hidden_states=inputs["encoder_hidden_states"],
+                state=inputs["state"],
+                action=inputs["action"],
+                embodiment_id=inputs["embodiment_id"],
+                return_dict=True,
+            )
+    except RuntimeError:
+        rejected = True
+    else:
+        raise AssertionError("implicit finite hard B8 cache bypassed the B16 grammar")
+    return {
+        "resolved_route": model.contact_causal_route.value,
+        "route_explicit": model.contact_causal_route_explicit,
+        "time_bins": model.contact_time_bins,
+        "receipt_declares_finite_semantic_packet": bool(
+            model.contact_route_metadata[
+                "action_visible_packet_finite_semantic_grammar"
+            ]
+        ),
+        "cache_rejected": rejected,
+        "cache_only_negative_does_not_invoke_ordinary_forward": True,
+    }
+
+
 def _matrix_checkpoint_audit() -> dict[str, bool]:
     model = _tiny_model(ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST)
     state = model.state_dict()
@@ -461,10 +637,138 @@ def _trainer_fail_closed_audit() -> dict[str, bool | int]:
         checks["all_zero_mask_rejected"] = True
     else:
         raise AssertionError("all-zero contact mask was audited as positive")
-    checks["positive_mask_count"] = validate_positive_contact_supervision(
-        target, torch.ones_like(target)
+    partial_category = torch.zeros_like(target)
+    partial_category[..., SEGMENT_FIELD_SLICES["side"].start] = 1
+    if effective_contact_supervision_count(partial_category) != 0:
+        raise AssertionError("partial one-hot group was counted as eligible")
+    try:
+        validate_positive_contact_supervision(target, partial_category)
+    except ValueError:
+        checks["partial_categorical_group_rejected"] = True
+    else:
+        raise AssertionError("partial one-hot group was admitted as positive supervision")
+
+    presence_mask = torch.zeros_like(target)
+    presence_mask[..., SEGMENT_FIELD_SLICES["presence"]] = 1
+    checks["presence_positive_count"] = validate_positive_contact_supervision(
+        target, presence_mask
+    )
+    complete_group = torch.zeros_like(target)
+    complete_group[..., SEGMENT_FIELD_SLICES["side"]] = 1
+    target_with_side = target.clone()
+    target_with_side[..., SEGMENT_FIELD_SLICES["side"].start] = 1
+    checks["complete_categorical_group_positive_count"] = (
+        validate_positive_contact_supervision(target_with_side, complete_group)
+    )
+    tau_mask = torch.zeros_like(target)
+    tau_mask[..., SEGMENT_FIELD_SLICES["start_tau"]] = 1
+    censor_mask = torch.zeros_like(target)
+    censor_mask[..., SEGMENT_FIELD_SLICES["left_censored"]] = 1
+    checks["tau_single_item_positive_count"] = effective_contact_supervision_count(
+        tau_mask
+    )
+    checks["censor_single_item_positive_count"] = effective_contact_supervision_count(
+        censor_mask
+    )
+    try:
+        validate_positive_contact_supervision(
+            target,
+            presence_mask,
+            confidence=torch.zeros_like(target),
+        )
+    except ValueError:
+        checks["zero_confidence_effective_supervision_rejected"] = True
+    else:
+        raise AssertionError("zero-confidence supervision was admitted")
+    full_mask = torch.ones_like(target)
+    full_weights = grouped_contact_supervision_weights(full_mask)
+    checks["full_mask_schema_count"] = effective_contact_supervision_count(full_mask)
+    checks["full_mask_weight_field_count"] = len(full_weights)
+    btq_presence = torch.zeros(2, 3, 12, SEGMENT_TARGET_DIM)
+    btq_presence[..., SEGMENT_FIELD_SLICES["presence"]] = 1
+    checks["btq_presence_positive_count"] = effective_contact_supervision_count(
+        btq_presence
+    )
+    checks["supervision_rule_version_present"] = bool(
+        CONTACT_GROUPED_SUPERVISION_RULE_VERSION
     )
     return checks
+
+
+def _grouped_loss_supervision_ast_audit() -> dict[str, Any]:
+    """Ensure grouped loss consumes the same shared schema-weight builder."""
+
+    trainer_path = REPOSITORY_ROOT / "world_action_model/trainer/wa_casual_trainer_mot.py"
+    source = trainer_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions = {
+        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    function = functions.get("grouped_contact_segment_loss")
+    if function is None:
+        raise AssertionError("grouped contact loss function is missing")
+    shared_builder_calls = sum(
+        1
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "grouped_contact_supervision_weights"
+    )
+    shared_weight_reads = sum(
+        1
+        for node in ast.walk(function)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "supervision_weights"
+    )
+    if shared_builder_calls != 1 or shared_weight_reads != 3:
+        raise AssertionError("grouped loss no longer uses one shared field-weight builder")
+    selected = [
+        functions["apply_contact_query_assignment"],
+        functions["grouped_contact_segment_loss"],
+    ]
+    namespace = {
+        "F": F,
+        "torch": torch,
+        "SEGMENT_BINARY_FIELDS": SEGMENT_BINARY_FIELDS,
+        "SEGMENT_CATEGORICAL_FIELDS": SEGMENT_CATEGORICAL_FIELDS,
+        "SEGMENT_CONTINUOUS_FIELDS": SEGMENT_CONTINUOUS_FIELDS,
+        "SEGMENT_FIELD_SLICES": SEGMENT_FIELD_SLICES,
+        "SEGMENT_TARGET_DIM": SEGMENT_TARGET_DIM,
+        "grouped_contact_supervision_weights": grouped_contact_supervision_weights,
+    }
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=selected, type_ignores=[])),
+            str(trainer_path),
+            "exec",
+        ),
+        namespace,
+    )
+    loss_fn = namespace["grouped_contact_segment_loss"]
+    prediction = torch.zeros(1, 2, SEGMENT_TARGET_DIM)
+    target = torch.zeros_like(prediction)
+    target[..., SEGMENT_FIELD_SLICES["side"].start] = 1
+    partial = torch.zeros_like(prediction)
+    partial[..., SEGMENT_FIELD_SLICES["side"].start] = 1
+    presence = torch.zeros_like(prediction)
+    presence[..., SEGMENT_FIELD_SLICES["presence"]] = 1
+    complete_group = torch.zeros_like(prediction)
+    complete_group[..., SEGMENT_FIELD_SLICES["side"]] = 1
+    partial_loss = float(loss_fn(prediction, target, mask=partial))
+    presence_loss = float(loss_fn(prediction, target, mask=presence))
+    complete_group_loss = float(loss_fn(prediction, target, mask=complete_group))
+    if partial_loss != 0.0 or presence_loss <= 0.0 or complete_group_loss <= 0.0:
+        raise AssertionError("grouped loss numerical eligibility differs from shared count")
+    return {
+        "rule_version": CONTACT_GROUPED_SUPERVISION_RULE_VERSION,
+        "shared_builder_call_count": shared_builder_calls,
+        "shared_weight_read_count": shared_weight_reads,
+        "partial_category_loss": partial_loss,
+        "presence_loss_positive": presence_loss > 0.0,
+        "complete_category_group_loss_positive": complete_group_loss > 0.0,
+        "passed": True,
+    }
 
 
 def _production_non_admission_audit() -> dict[str, Any]:
@@ -1039,6 +1343,10 @@ def _reduce_invariant_results(report: dict[str, Any]) -> dict[str, bool]:
     codec = report["codec"]["checks"]
     legacy = report["legacy_compatibility"]
     trainer = report["trainer_fail_closed"]
+    grouped_loss_ast = report["grouped_loss_supervision_ast"]
+    semantic_cache_resolution = report["semantic_cache_resolution"]
+    soft_cache_continuous = report["soft_cache_continuous"]
+    non_b16_hard_cache = report["non_b16_hard_cache_fail_closed"]
     production = report["non_admission"]
     route_receipts_canonical = all(
         receipt["receipt_sha256"]
@@ -1116,8 +1424,71 @@ def _reduce_invariant_results(report: dict[str, Any]) -> dict[str, bool]:
             and all(equal["cache_domain_fail_closed"].values())
         ),
         "trainer_route_weight_and_mask_fail_closed": (
-            all(bool(value) for name, value in trainer.items() if name != "positive_mask_count")
-            and trainer["positive_mask_count"] > 0
+            all(
+                bool(trainer[name])
+                for name in (
+                    "matched_route_accepted",
+                    "route_mismatch_rejected",
+                    "missing_top_route_rejected",
+                    "missing_transformer_route_rejected",
+                    "zero_weight_rejected",
+                    "nan_weight_rejected",
+                    "all_zero_mask_rejected",
+                    "partial_categorical_group_rejected",
+                    "zero_confidence_effective_supervision_rejected",
+                    "supervision_rule_version_present",
+                )
+            )
+            and trainer["presence_positive_count"] == 12
+            and trainer["complete_categorical_group_positive_count"] == 12
+            and trainer["tau_single_item_positive_count"] == 12
+            and trainer["censor_single_item_positive_count"] == 12
+            and trainer["full_mask_schema_count"] == 108
+            and trainer["full_mask_weight_field_count"] == 9
+            and trainer["btq_presence_positive_count"] == 72
+            and grouped_loss_ast["passed"]
+            and grouped_loss_ast["shared_builder_call_count"] == 1
+            and grouped_loss_ast["shared_weight_read_count"] == 3
+            and grouped_loss_ast["partial_category_loss"] == 0.0
+            and grouped_loss_ast["presence_loss_positive"]
+            and grouped_loss_ast["complete_category_group_loss_positive"]
+            and grouped_loss_ast["rule_version"]
+            == CONTACT_GROUPED_SUPERVISION_RULE_VERSION
+        ),
+        "all_resolved_hard_semantic_caches_use_b16_grammar": all(
+            case["receipt_declares_finite_semantic_packet"]
+            and case["canonical_packet_cached_and_accepted"]
+            and case["cached_reuse_action_bitwise_equal"]
+            and case["continuous_0_25_rejected"]
+            for case in semantic_cache_resolution.values()
+        )
+        and set(semantic_cache_resolution)
+        == {"implicit_hard_st", "implicit_hard_detached", "explicit_hard_detached"}
+        and not semantic_cache_resolution["implicit_hard_st"]["route_explicit"]
+        and not semantic_cache_resolution["implicit_hard_detached"]["route_explicit"]
+        and semantic_cache_resolution["explicit_hard_detached"]["route_explicit"],
+        "soft_semantic_cache_remains_continuous": (
+            soft_cache_continuous["resolved_route"]
+            == ContactCausalRoute.SOFT_SEMANTIC.value
+            and not soft_cache_continuous["route_explicit"]
+            and not soft_cache_continuous[
+                "receipt_declares_finite_semantic_packet"
+            ]
+            and soft_cache_continuous["continuous_0_25_cached_and_accepted"]
+            and soft_cache_continuous["cached_reuse_action_bitwise_equal"]
+        ),
+        "finite_hard_non_b16_cache_fails_closed": (
+            non_b16_hard_cache["resolved_route"]
+            == ContactCausalRoute.HARD_ST_SEMANTIC.value
+            and not non_b16_hard_cache["route_explicit"]
+            and non_b16_hard_cache["time_bins"] == 8
+            and non_b16_hard_cache[
+                "receipt_declares_finite_semantic_packet"
+            ]
+            and non_b16_hard_cache["cache_rejected"]
+            and non_b16_hard_cache[
+                "cache_only_negative_does_not_invoke_ordinary_forward"
+            ]
         ),
         "production_exact_set_gate_zero_diff": (
             production["production_runner_exact_set_unchanged"]
@@ -1197,6 +1568,12 @@ def run_contact_route_cpu_audit() -> dict[str, Any]:
         "codec": _codec_audit(equal_model),
         "matrix_checkpoint": _matrix_checkpoint_audit(),
         "trainer_fail_closed": _trainer_fail_closed_audit(),
+        "grouped_loss_supervision_ast": _grouped_loss_supervision_ast_audit(),
+        "semantic_cache_resolution": _semantic_cache_resolution_audit(inputs),
+        "soft_cache_continuous": _soft_cache_continuous_audit(inputs),
+        "non_b16_hard_cache_fail_closed": (
+            _non_b16_hard_cache_fail_closed_audit(inputs)
+        ),
         "non_admission": _production_non_admission_audit(),
         "legacy_compatibility": _legacy_compatibility_audit(inputs),
         "ast_parameter_route": _ast_route_audit(),
