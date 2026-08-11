@@ -518,4 +518,3 @@ memory_updated = true
 - Mo et al., [Where2Act: From Pixels to Actions for Articulated 3D Objects](https://openaccess.thecvf.com/content/ICCV2021/html/Mo_Where2Act_From_Pixels_to_Actions_for_Articulated_3D_Objects_ICCV_2021_paper.html), ICCV 2021. 预测actionable pixel及interaction orientation/trajectory；说明point alone不足，但属于RGB-D/continuous proposal路线。
 - Chi et al., [Diffusion Policy: Visuomotor Policy Learning via Action Diffusion](https://arxiv.org/abs/2303.04137), RSS 2023. 连续、多模态、receding-horizon action-sequence上界。
 - Sajjan et al., [ClearGrasp: 3D Shape Estimation of Transparent Objects for Manipulation](https://doi.org/10.1109/ICRA40945.2020.9197518), ICRA 2020. 证明透明深度completion是成熟而独立的路线；completed depth/normal应作baseline，不能洗成strict finite oracle。
-
