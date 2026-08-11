@@ -1,5 +1,8 @@
 import functools
+import hashlib
+import json
 import os
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -273,6 +276,79 @@ class CasualWATrainerMoT(Trainer):
         self.require_contact_targets = bool(
             model_config.get("require_contact_targets", False)
         )
+        self.current_training_data_receipt = model_config.get(
+            "current_training_data_receipt"
+        )
+        self.current_training_data_receipt_sha256 = model_config.get(
+            "current_training_data_receipt_sha256"
+        )
+        self.current_training_source_snapshot = model_config.get(
+            "current_training_source_snapshot"
+        )
+        self.production_checkpoint_steps = tuple(
+            int(value) for value in model_config.get("production_checkpoint_steps", [])
+        )
+        if (self.current_training_data_receipt is None) != (
+            self.current_training_data_receipt_sha256 is None
+        ):
+            raise ValueError(
+                "production checkpoint binding requires both current receipt and SHA"
+            )
+        if self.current_training_data_receipt is not None:
+            if not isinstance(self.current_training_data_receipt, dict):
+                raise ValueError("current training-data receipt must be a JSON object")
+            receipt_payload = json.dumps(
+                self.current_training_data_receipt,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            actual_receipt_sha256 = hashlib.sha256(receipt_payload).hexdigest()
+            if actual_receipt_sha256 != self.current_training_data_receipt_sha256:
+                raise ValueError("current training-data receipt fingerprint differs")
+            if self.current_training_data_receipt.get("receipt_version") != (
+                "contact-asym25-current-training-data-receipt/v1"
+            ):
+                raise ValueError("current training-data receipt version mismatch")
+            if self.production_checkpoint_steps != (0, 100, 200):
+                raise ValueError(
+                    "production checkpoint steps must be exactly (0, 100, 200)"
+                )
+            source_receipt = self.current_training_data_receipt.get(
+                "dataset_source_tree_receipt"
+            )
+            snapshot = self.current_training_source_snapshot
+            if (
+                not isinstance(source_receipt, dict)
+                or not isinstance(snapshot, dict)
+                or set(snapshot)
+                != {
+                    "path_record_only",
+                    "tree_sha256",
+                    "file_count",
+                    "total_size_bytes",
+                    "_runtime_rows",
+                }
+                or {
+                    key: snapshot[key]
+                    for key in (
+                        "path_record_only",
+                        "tree_sha256",
+                        "file_count",
+                        "total_size_bytes",
+                    )
+                }
+                != source_receipt
+                or not isinstance(snapshot["_runtime_rows"], list)
+                or len(snapshot["_runtime_rows"]) != snapshot["file_count"]
+            ):
+                raise ValueError(
+                    "current training source snapshot differs from its receipt"
+                )
+        elif self.current_training_source_snapshot is not None:
+            raise ValueError(
+                "current training source snapshot requires a production receipt"
+            )
         self.matched_control_collector = None
         matched_control_config = model_config.get("matched_control_collector")
         if matched_control_config is not None and bool(
@@ -308,7 +384,15 @@ class CasualWATrainerMoT(Trainer):
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
         transformer_pretrained = model_config.get("transformer_pretrained", os.path.join(pretrained, "transformer"))
-        transformer_cfg = model_config.get("transformer")
+        transformer_cfg = dict(model_config.get("transformer"))
+        if self.current_training_data_receipt is not None:
+            transformer_cfg.update(
+                current_training_data_receipt=self.current_training_data_receipt,
+                current_training_data_receipt_sha256=(
+                    self.current_training_data_receipt_sha256
+                ),
+                production_checkpoint_steps=self.production_checkpoint_steps,
+            )
         transformer = CasualWorldActionTransformer_MoT(**transformer_cfg)
         transformer = load_pretrained_weights(
             transformer,
@@ -327,6 +411,94 @@ class CasualWATrainerMoT(Trainer):
         model = ModuleDict(model)
         model.train()
         return model
+
+    def _production_checkpoint_dir(self, step: int) -> Path:
+        epoch = int(0 if step == 0 else self.cur_epoch)
+        return Path(self.model_dir) / f"checkpoint_epoch_{epoch}_step_{step}"
+
+    def _write_production_checkpoint_receipt(self, output_dir: Path, step: int) -> None:
+        if self.current_training_data_receipt is None or not self.is_main_process:
+            return
+        if not output_dir.is_dir():
+            raise FileNotFoundError(
+                f"production checkpoint directory was not written: {output_dir}"
+            )
+        receipt_path = output_dir / "current_training_data_receipt.json"
+        if receipt_path.exists():
+            raise FileExistsError(
+                f"refusing to overwrite checkpoint training-data receipt: {receipt_path}"
+            )
+        payload = {
+            "receipt_version": "contact-asym25-checkpoint-data-binding/v1",
+            "checkpoint_step": int(step),
+            "current_training_data_receipt": self.current_training_data_receipt,
+            "current_training_data_receipt_sha256": (
+                self.current_training_data_receipt_sha256
+            ),
+        }
+        with receipt_path.open("x", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    payload,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _save_production_initial_checkpoint(self) -> None:
+        if self.current_training_data_receipt is None:
+            return
+        if self.cur_step != 0:
+            raise ValueError("production step-0 checkpoint must precede optimization")
+        self._verify_production_training_source()
+        output_dir = self._production_checkpoint_dir(0)
+        if self.is_main_process:
+            if output_dir.exists():
+                raise FileExistsError(
+                    f"refusing to overwrite production step-0 checkpoint: {output_dir}"
+                )
+            output_dir.mkdir(parents=True, exist_ok=False)
+        self.accelerator.wait_for_everyone()
+        state_dict = self.accelerator.get_state_dict(self.models[0])
+        self.save_model_hook(self.models, [state_dict], str(output_dir))
+        self.accelerator.wait_for_everyone()
+        self._write_production_checkpoint_receipt(output_dir, 0)
+        self.accelerator.wait_for_everyone()
+
+    def train(self) -> None:
+        if self.current_training_data_receipt is not None:
+            self._save_production_initial_checkpoint()
+        super().train()
+
+    def _verify_production_training_source(self) -> None:
+        if self.current_training_source_snapshot is None:
+            return
+        from world_action_model.contact_asym25_heldout_eval import (
+            verify_artifact_tree_unchanged,
+        )
+
+        verify_artifact_tree_unchanged(self.current_training_source_snapshot)
+
+    def save_checkpoint_step(self) -> None:
+        if self._by_epoch and self.checkpoint_interval < self.max_epochs:
+            checkpoint_interval = int(self.checkpoint_interval * self.epoch_size)
+        else:
+            checkpoint_interval = int(self.checkpoint_interval)
+        should_save = (
+            self.cur_step % checkpoint_interval == 0 or self.cur_step == self.max_steps
+        )
+        if should_save and self.current_training_data_receipt is not None:
+            self._verify_production_training_source()
+        super().save_checkpoint_step()
+        if should_save and self.current_training_data_receipt is not None:
+            output_dir = self._production_checkpoint_dir(self.cur_step)
+            self.accelerator.wait_for_everyone()
+            self._write_production_checkpoint_receipt(output_dir, self.cur_step)
+            self.accelerator.wait_for_everyone()
 
     def forward_step(self, batch_dict):
         transformer = functools.partial(self.model, "transformer")

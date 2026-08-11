@@ -611,6 +611,9 @@ class CasualWorldActionTransformer_MoT(
         contact_planner_num_heads: int = 8,
         contact_semantic_transport_mode: str = "soft",
         contact_time_bins: int = 16,
+        current_training_data_receipt: Optional[Dict[str, Any]] = None,
+        current_training_data_receipt_sha256: Optional[str] = None,
+        production_checkpoint_steps: Optional[Tuple[int, ...]] = None,
     ) -> None:
         super().__init__()
 
@@ -2225,7 +2228,17 @@ class CasualWorldActionTransformer_MoT(
             action_hidden_states = (
                 self.action_norm_out(action_hidden_states.float()) * (1 + action_scale) + action_shift
             ).type_as(action_hidden_states)
-            return self._decode_action_tokens(action_hidden_states, embodiment_id=embodiment_id)
+            action_pred = self._decode_action_tokens(
+                action_hidden_states, embodiment_id=embodiment_id
+            )
+            if not return_dict:
+                return action_pred
+            output = {"action_pred": action_pred}
+            if "contact_logits" in cache:
+                output["contact_pred"] = cache["contact_logits"]
+            if "contact_semantic" in cache:
+                output["contact_semantic"] = cache["contact_semantic"]
+            return output
         finally:
             if USE_PEFT_BACKEND:
                 unscale_lora_layers(self, lora_scale)

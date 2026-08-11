@@ -313,6 +313,31 @@ class MatchedControlCollector:
             raise MatchedControlError(
                 "collector requires an explicit 64-hex control_config_sha256"
             )
+        self.training_data_receipt_sha256 = config.get(
+            "training_data_receipt_sha256"
+        )
+        self.production_split_seed = config.get("production_split_seed")
+        self.heldout_window_manifest_sha256 = config.get(
+            "heldout_window_manifest_sha256"
+        )
+        if self.training_data_receipt_sha256 is not None:
+            if (
+                not isinstance(self.training_data_receipt_sha256, str)
+                or not _HEX64_RE.fullmatch(self.training_data_receipt_sha256)
+                or self.production_split_seed != self.seed
+                or not isinstance(self.heldout_window_manifest_sha256, str)
+                or not _HEX64_RE.fullmatch(self.heldout_window_manifest_sha256)
+            ):
+                raise MatchedControlError(
+                    "production matched-control receipt/split seed differs"
+                )
+        elif (
+            self.production_split_seed is not None
+            or self.heldout_window_manifest_sha256 is not None
+        ):
+            raise MatchedControlError(
+                "production_split_seed requires training_data_receipt_sha256"
+            )
         self.config_hash_scope = config.get("config_hash_scope")
         if not isinstance(self.config_hash_scope, Mapping) or set(
             self.config_hash_scope
@@ -483,6 +508,9 @@ class MatchedControlCollector:
             "config_hash_scope": self.config_hash_scope,
             "git_commit": self.git_commit,
             "collector_code_sha256": self.collector_code_sha256,
+            "training_data_receipt_sha256": self.training_data_receipt_sha256,
+            "heldout_window_manifest_sha256": self.heldout_window_manifest_sha256,
+            "production_split_seed": self.production_split_seed,
             "batch_ids": batch_ids,
             "diagnostic_data_paths": diagnostic_paths,
             "hashes": hashes,
@@ -607,6 +635,26 @@ def _read_variant_records(
                 "git_commit"
             ].strip():
                 raise MatchedControlError(f"missing git_commit in {path}:{line_number}")
+            training_receipt = record.get("training_data_receipt_sha256")
+            window_receipt = record.get("heldout_window_manifest_sha256")
+            production_seed = record.get("production_split_seed")
+            if training_receipt is not None:
+                if (
+                    not isinstance(training_receipt, str)
+                    or not _HEX64_RE.fullmatch(training_receipt)
+                    or not isinstance(window_receipt, str)
+                    or not _HEX64_RE.fullmatch(window_receipt)
+                    or isinstance(production_seed, bool)
+                    or production_seed not in ALLOWED_SEEDS
+                    or production_seed != record.get("seed")
+                ):
+                    raise MatchedControlError(
+                        f"invalid production receipt/window/seed in {path}:{line_number}"
+                    )
+            elif window_receipt is not None or production_seed is not None:
+                raise MatchedControlError(
+                    f"incomplete production receipt binding in {path}:{line_number}"
+                )
             for name in ("seed", "global_step", "micro_step", "rank", "world_size"):
                 value = record.get(name)
                 if isinstance(value, bool) or not isinstance(value, int):
@@ -679,6 +727,9 @@ def compare_variant_traces(
         "control_config_sha256": None,
         "config_hash_scope": None,
         "git_commit": None,
+        "training_data_receipt_sha256": None,
+        "heldout_window_manifest_sha256": None,
+        "production_split_seed": None,
         "world_size": None,
         "rank_set": None,
         "topology": None,
@@ -764,6 +815,15 @@ def compare_variant_traces(
         git_commits = {record.get("git_commit") for record in all_records}
         code_hashes = {record["collector_code_sha256"] for record in all_records}
         versions = {record["record_version"] for record in all_records}
+        training_receipt_hashes = {
+            record.get("training_data_receipt_sha256") for record in all_records
+        }
+        production_split_seeds = {
+            record.get("production_split_seed") for record in all_records
+        }
+        heldout_window_hashes = {
+            record.get("heldout_window_manifest_sha256") for record in all_records
+        }
         if len(control_hashes) != 1:
             raise MatchedControlError("control_config_sha256 differs across variants")
         if len(hash_scopes) != 1:
@@ -774,6 +834,25 @@ def compare_variant_traces(
             raise MatchedControlError("collector code SHA differs across traces or current code")
         if versions != {COLLECTOR_VERSION}:
             raise MatchedControlError("collector version differs across variants")
+        if (
+            len(training_receipt_hashes) != 1
+            or len(production_split_seeds) != 1
+            or len(heldout_window_hashes) != 1
+        ):
+            raise MatchedControlError(
+                "training-data receipt, split seed, or held-out windows differ across variants"
+            )
+        matched_training_receipt_sha256 = next(iter(training_receipt_hashes))
+        matched_production_split_seed = next(iter(production_split_seeds))
+        matched_heldout_window_sha256 = next(iter(heldout_window_hashes))
+        if (matched_training_receipt_sha256 is None) != (
+            matched_production_split_seed is None
+        ) or (matched_training_receipt_sha256 is None) != (
+            matched_heldout_window_sha256 is None
+        ):
+            raise MatchedControlError(
+                "incomplete production matched-control training-data binding"
+            )
         world_sizes = {int(record["world_size"]) for record in all_records}
         if len(world_sizes) != 1:
             raise MatchedControlError("world_size changes within the matched-control report")
@@ -864,6 +943,9 @@ def compare_variant_traces(
                 name="matched-control config hash scope",
             ),
             git_commit=next(iter(git_commits)),
+            training_data_receipt_sha256=matched_training_receipt_sha256,
+            heldout_window_manifest_sha256=matched_heldout_window_sha256,
+            production_split_seed=matched_production_split_seed,
             world_size=report_world_size,
             rank_set=report_rank_set,
             topology={

@@ -359,6 +359,28 @@ def configure_matched_control_from_environment(
     seed = _required_ascii_decimal_environment("GWP_MATCHED_CONTROL_SEED")
     if seed not in ALLOWED_SEEDS:
         raise ValueError(f"GWP_MATCHED_CONTROL_SEED must be one of {ALLOWED_SEEDS}")
+    current_training_receipt_sha256 = config["models"].get(
+        "current_training_data_receipt_sha256"
+    )
+    current_training_receipt = config["models"].get(
+        "current_training_data_receipt"
+    )
+    heldout_window_manifest_sha256 = None
+    if current_training_receipt_sha256 is not None:
+        heldout_window_manifest_sha256 = current_training_receipt.get(
+            "heldout_window_manifest_sha256"
+        ) if isinstance(current_training_receipt, Mapping) else None
+        if (
+            not isinstance(current_training_receipt_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", current_training_receipt_sha256)
+            or not isinstance(current_training_receipt, Mapping)
+            or current_training_receipt.get("split_seed") != seed
+            or not isinstance(heldout_window_manifest_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", heldout_window_manifest_sha256)
+        ):
+            raise ValueError(
+                "matched-control seed/current training-data receipt binding differs"
+            )
 
     dataset_configs = config["dataloaders"]["train"]["data_or_config"]
     transform = config["dataloaders"]["train"]["transform"]
@@ -430,6 +452,12 @@ def configure_matched_control_from_environment(
         "config_hash_scope": CONFIG_HASH_SCOPE,
         "runtime_rank": runtime_topology["rank"],
         "runtime_world_size": runtime_topology["world_size"],
+        "training_data_receipt_sha256": current_training_receipt_sha256,
+        "heldout_window_manifest_sha256": heldout_window_manifest_sha256,
+        "production_split_seed": (
+            None if current_training_receipt is None
+            else current_training_receipt.get("split_seed")
+        ),
     }
     if evidence_binding is not None:
         config["models"]["matched_control_collector"].update(evidence_binding)
