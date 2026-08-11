@@ -936,6 +936,7 @@ def validate_result_v3(
         {
             "reader_role", "arrow_schema_columns", "removed_target_columns",
             "action_column_read", "contact_sidecar_read",
+            "test_only_import_harness",
         },
         "causal prediction source-column receipt",
     )
@@ -972,6 +973,35 @@ def validate_result_v3(
         or "action" not in target_columns
     ):
         raise CausalProductionError("causal two-phase source receipts differ")
+    harness = prediction_source["test_only_import_harness"]
+    if test_only_tiny_runtime:
+        harness = _exact(
+            harness,
+            {
+                "stubbed_package_initializers_only",
+                "real_runtime_modules",
+                "stubbed_data_or_model_operations",
+            },
+            "test-only dataset import harness",
+        )
+        if (
+            harness["stubbed_package_initializers_only"]
+            != [
+                "giga_datasets",
+                "giga_datasets.datasets",
+                "world_action_model.datasets",
+            ]
+            or harness["real_runtime_modules"]
+            != [
+                "world_action_model.datasets.wam_lerobot_dataset",
+                "giga_datasets.datasets.base_dataset",
+                "giga_datasets.datasets.lerobot_dataset",
+            ]
+            or harness["stubbed_data_or_model_operations"] is not False
+        ):
+            raise CausalProductionError("test-only dataset import harness scope differs")
+    elif harness is not None:
+        raise CausalProductionError("production evaluator forbids an import harness")
     route_evidence_entry = _route_output_artifact_entry(
         result["route_output_evidence"]
     )

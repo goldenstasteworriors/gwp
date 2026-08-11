@@ -243,10 +243,39 @@ class CausalTestOnlyTinyReplayRuntime:
         **_: Any,
     ) -> None:
         import torch
+        import sys
+        import types
 
         from world_action_model.contact_causal_preflight import (
             build_robot_runtime_source_receipts_v1,
         )
+        repository_root = Path(__file__).resolve().parents[1]
+        package_shells = {
+            "world_action_model.datasets": repository_root / "world_action_model/datasets",
+            "giga_datasets": repository_root / "third_party/giga-datasets/giga_datasets",
+            "giga_datasets.datasets": (
+                repository_root / "third_party/giga-datasets/giga_datasets/datasets"
+            ),
+        }
+        for name, package_path in package_shells.items():
+            existing = sys.modules.get(name)
+            if existing is not None:
+                raise HeldoutEvaluationError(
+                    "test-only dataset package harness must run before package imports"
+                )
+            package = types.ModuleType(name)
+            package.__path__ = [str(package_path)]
+            package.__package__ = name
+            sys.modules[name] = package
+        self.test_only_import_harness = {
+            "stubbed_package_initializers_only": sorted(package_shells),
+            "real_runtime_modules": [
+                "world_action_model.datasets.wam_lerobot_dataset",
+                "giga_datasets.datasets.base_dataset",
+                "giga_datasets.datasets.lerobot_dataset",
+            ],
+            "stubbed_data_or_model_operations": False,
+        }
         from world_action_model.datasets.wam_lerobot_dataset import WAMLeRobotDataset
 
         if (

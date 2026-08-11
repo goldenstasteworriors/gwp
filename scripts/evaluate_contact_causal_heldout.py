@@ -418,6 +418,11 @@ def predict_phase(args: argparse.Namespace) -> None:
                     packets.append(route_packet)
             runtime.unload_checkpoint()
         prediction_source_receipt = dict(runtime.prediction_source_column_receipt)
+        prediction_source_receipt["test_only_import_harness"] = (
+            dict(runtime.test_only_import_harness)
+            if test_only_tiny_runtime
+            else None
+        )
     finally:
         runtime.close()
     cache_parent.rmdir()
