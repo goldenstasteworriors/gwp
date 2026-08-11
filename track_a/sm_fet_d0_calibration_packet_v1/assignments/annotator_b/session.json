@@ -1,7 +1,7 @@
 {
-  "session_schema_version": "sm_fet_d0_session_v1_fix1",
-  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix1",
-  "packet_id": "sm-fet-d0-calibration-b-v1-fix1",
+  "session_schema_version": "sm_fet_d0_session_v1_fix2",
+  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix2",
+  "packet_id": "sm-fet-d0-calibration-b-v1-fix2",
   "annotation_session_id": "d0cal-session-b-20260812",
   "annotator_id": "d0cal-annotator-b",
   "session_status": "assigned_not_started",
@@ -9,7 +9,8 @@
   "closed_at_utc": "",
   "protocol_sha256": "c4f1f811f796e7c8604a0d0510229677693d6d1cc501b78f59f01cd4793e4a92",
   "handbook_sha256": "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4",
-  "task_manifest_sha256": "d7de011067170c6babe2e871b45e17b63b342413d83fe3994584bde2592d2a30",
-  "media_allowlist_sha256": "5d66f614a1cefce668b68f1fd4a4559bafd64c817549521df7918fb9631b1532",
-  "schema_manifest_sha256": "dc628ba57638d3f08646f8bed931df0339970e44ec8edc7fd740a09ff191807c"
+  "task_ontology_sha256": "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a",
+  "task_manifest_sha256": "22de1250aef781ff6c09bc340f55af9c288e4330cf784a5ec1bc885a241a4706",
+  "media_allowlist_sha256": "bcb9dd81e8a4800717c037ec1866a2d1ce3f76d7aca75bb3b9750c5ead1c3486",
+  "schema_manifest_sha256": "8f33609a7c320052781b930543e46d174ae31f0528dd02e03e610df73e9802b7"
 }

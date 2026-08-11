@@ -1,19 +1,23 @@
 {
-  "manifest_schema_version": "sm_fet_d0_recipient_manifest_v1_fix1",
-  "packet_id": "sm-fet-d0-calibration-b-v1-fix1",
+  "manifest_schema_version": "sm_fet_d0_recipient_manifest_v1_fix2",
+  "packet_id": "sm-fet-d0-calibration-b-v1-fix2",
   "manifest_self_hash": "excluded_to_avoid_circular_hash",
   "files_sha256": {
-    "assignment_receipt.json": "ffc22581671000afa3c074a37fc053ea5a8325a20a6b834b24fe0833c04d27a7",
+    "ANNOTATION_HANDBOOK.md": "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4",
+    "TASK_ONTOLOGY.json": "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a",
+    "assignment_receipt.json": "543786f9e7be710113bf41027edf9f4631dcf500d1448eb1e91c7c61b3c4eae7",
     "coverage.csv": "e6bd9eb229102a8999971286be463c338952214e6c3022f8225ce9ab7a3eb9c8",
     "event_edges_v1.csv": "b5af024dcc7305fc946a9b48a35bc795472e477a2ecf286130804472d7382993",
     "event_node_snapshots_v1.csv": "4026cdc8a83a2c0a04f39260dbd403d120140a3bb62757a2a71ce27f012ab1ad",
     "events_v1.csv": "b6bb7ad2526cf0119072dae7465c7cb8e686b6bb26cedb3015b3ad3a27130e8d",
-    "identity.json": "5eefae35164e1e9c07326d9262f57612c579f2eaddf395cdde0eedb59c5fd22a",
-    "media_allowlist.csv": "5d66f614a1cefce668b68f1fd4a4559bafd64c817549521df7918fb9631b1532",
+    "identity.json": "37c286fedcda2aac706d7c0ff9a8cd51b3f86360ce66bb7dc01f2c86192734aa",
+    "media_allowlist.csv": "bcb9dd81e8a4800717c037ec1866a2d1ce3f76d7aca75bb3b9750c5ead1c3486",
     "pose_keys_2d_v1.csv": "85d138ee6d946f0035253dc839a5a1ae1af33e4bc2b4f806486a46c1b2ff583c",
-    "recipient_exact_allowlist.json": "7ce8296d7e07bda81a7a5ffaa4ec071e7dd55f023c3c81fab75d5700ec3159a8",
+    "recipient_exact_allowlist.json": "f561a36ab8f638168d73451adcb6d74921320deeea3cb5ba28066a6ef94e543d",
+    "schema_manifest.json": "8f33609a7c320052781b930543e46d174ae31f0528dd02e03e610df73e9802b7",
     "segments.csv": "d3b900c4a607a1afb87e77e2f491e453f7abb5acffa90663ea39b6283cda31ee",
-    "session.json": "ee600a1ec0251448478c481b0bee4a80309a4f59f0113aa190463f8581c24604",
-    "task_manifest.csv": "d7de011067170c6babe2e871b45e17b63b342413d83fe3994584bde2592d2a30"
+    "session.json": "67660f858718b56af73f3ec968a0b0ab522a9b475fa4cdd3c85d22e39ea71d40",
+    "submission_receipt.json": "8a87af0de178ddc398d2bf56f761be14bb882e00506843db3e0f725aefcadbb7",
+    "task_manifest.csv": "22de1250aef781ff6c09bc340f55af9c288e4330cf784a5ec1bc885a241a4706"
   }
 }

@@ -1,6 +1,6 @@
 {
-  "session_schema_version": "sm_fet_d0_session_v1_fix1",
-  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix1",
+  "session_schema_version": "sm_fet_d0_session_v1_fix2",
+  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix2",
   "packet_id": "",
   "annotation_session_id": "",
   "annotator_id": "",
@@ -8,6 +8,9 @@
   "opened_at_utc": "",
   "closed_at_utc": "",
   "protocol_sha256": "",
+  "handbook_sha256": "",
+  "task_ontology_sha256": "",
   "task_manifest_sha256": "",
-  "media_allowlist_sha256": ""
+  "media_allowlist_sha256": "",
+  "schema_manifest_sha256": ""
 }

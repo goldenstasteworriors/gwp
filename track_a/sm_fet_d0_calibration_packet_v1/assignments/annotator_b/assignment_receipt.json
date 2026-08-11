@@ -1,7 +1,7 @@
 {
-  "receipt_schema_version": "sm_fet_d0_assignment_receipt_v1_fix1",
-  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix1",
-  "packet_id": "sm-fet-d0-calibration-b-v1-fix1",
+  "receipt_schema_version": "sm_fet_d0_assignment_receipt_v1_fix2",
+  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix2",
+  "packet_id": "sm-fet-d0-calibration-b-v1-fix2",
   "annotation_role": "independent_b",
   "annotator_id": "d0cal-annotator-b",
   "annotation_session_id": "d0cal-session-b-20260812",
@@ -12,14 +12,34 @@
   "formal_blind_overlap": false,
   "source_media_copied_into_packet": false,
   "selection_proposal_distributed": false,
-  "protocol_sha256": "c4f1f811f796e7c8604a0d0510229677693d6d1cc501b78f59f01cd4793e4a92",
-  "handbook_sha256": "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4",
-  "schema_manifest_sha256": "dc628ba57638d3f08646f8bed931df0339970e44ec8edc7fd740a09ff191807c",
-  "task_manifest_sha256": "d7de011067170c6babe2e871b45e17b63b342413d83fe3994584bde2592d2a30",
-  "media_allowlist_sha256": "5d66f614a1cefce668b68f1fd4a4559bafd64c817549521df7918fb9631b1532",
-  "identity_sha256": "5eefae35164e1e9c07326d9262f57612c579f2eaddf395cdde0eedb59c5fd22a",
-  "session_sha256": "ee600a1ec0251448478c481b0bee4a80309a4f59f0113aa190463f8581c24604",
-  "recipient_exact_allowlist_sha256": "7ce8296d7e07bda81a7a5ffaa4ec071e7dd55f023c3c81fab75d5700ec3159a8",
+  "protocol": {
+    "reference_id": "sm_fet_annotation_and_pairing_protocol_20260812",
+    "reference_sha256": "c4f1f811f796e7c8604a0d0510229677693d6d1cc501b78f59f01cd4793e4a92"
+  },
+  "frozen_inputs": {
+    "annotation_handbook": {
+      "recipient_path": "ANNOTATION_HANDBOOK.md",
+      "bytes": 40881,
+      "sha256": "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4"
+    },
+    "task_ontology": {
+      "recipient_path": "TASK_ONTOLOGY.json",
+      "bytes": 770,
+      "sha256": "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a"
+    },
+    "schema_manifest": {
+      "recipient_path": "schema_manifest.json",
+      "bytes": 7525,
+      "sha256": "8f33609a7c320052781b930543e46d174ae31f0528dd02e03e610df73e9802b7"
+    }
+  },
+  "task_manifest_sha256": "22de1250aef781ff6c09bc340f55af9c288e4330cf784a5ec1bc885a241a4706",
+  "media_allowlist_sha256": "bcb9dd81e8a4800717c037ec1866a2d1ce3f76d7aca75bb3b9750c5ead1c3486",
+  "recipient_exact_allowlist_sha256": "f561a36ab8f638168d73451adcb6d74921320deeea3cb5ba28066a6ef94e543d",
+  "lifecycle_baseline_sha256": {
+    "identity_json": "37c286fedcda2aac706d7c0ff9a8cd51b3f86360ce66bb7dc01f2c86192734aa",
+    "session_json": "67660f858718b56af73f3ec968a0b0ab522a9b475fa4cdd3c85d22e39ea71d40"
+  },
   "blank_annotation_sha256": {
     "coverage.csv": "e6bd9eb229102a8999971286be463c338952214e6c3022f8225ce9ab7a3eb9c8",
     "segments.csv": "d3b900c4a607a1afb87e77e2f491e453f7abb5acffa90663ea39b6283cda31ee",
@@ -30,8 +50,9 @@
   },
   "required_acl": {
     "packet_root_mode": "0700",
-    "packet_file_mode": "0600",
-    "state_root_mode": "0700",
+    "assignment_immutable_mode": "0400",
+    "assignment_mutable_mode": "0600",
+    "submission_all_files_mode": "0400",
     "media_root_mode": "0700",
     "media_file_mode": "0400",
     "symlink_allowed": false,

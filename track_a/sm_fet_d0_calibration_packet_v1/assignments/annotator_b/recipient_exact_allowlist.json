@@ -1,7 +1,9 @@
 {
-  "allowlist_schema_version": "sm_fet_d0_recipient_allowlist_v1_fix1",
-  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix1",
+  "allowlist_schema_version": "sm_fet_d0_recipient_allowlist_v1_fix2",
+  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix2",
   "exact_files": [
+    "ANNOTATION_HANDBOOK.md",
+    "TASK_ONTOLOGY.json",
     "assignment_receipt.json",
     "coverage.csv",
     "event_edges_v1.csv",
@@ -12,27 +14,64 @@
     "pose_keys_2d_v1.csv",
     "recipient_exact_allowlist.json",
     "recipient_manifest.json",
+    "schema_manifest.json",
     "segments.csv",
     "session.json",
+    "submission_receipt.json",
     "task_manifest.csv"
   ],
-  "mutable_after_assignment": [
-    "coverage.csv",
-    "event_edges_v1.csv",
-    "event_node_snapshots_v1.csv",
-    "events_v1.csv",
-    "pose_keys_2d_v1.csv",
-    "segments.csv"
-  ],
-  "immutable_after_assignment": [
-    "assignment_receipt.json",
-    "identity.json",
-    "media_allowlist.csv",
-    "recipient_exact_allowlist.json",
-    "recipient_manifest.json",
-    "session.json",
-    "task_manifest.csv"
-  ],
+  "file_roles": {
+    "immutable_frozen_input": [
+      "ANNOTATION_HANDBOOK.md",
+      "TASK_ONTOLOGY.json",
+      "assignment_receipt.json",
+      "media_allowlist.csv",
+      "recipient_exact_allowlist.json",
+      "recipient_manifest.json",
+      "schema_manifest.json",
+      "task_manifest.csv"
+    ],
+    "mutable_annotation": [
+      "coverage.csv",
+      "event_edges_v1.csv",
+      "event_node_snapshots_v1.csv",
+      "events_v1.csv",
+      "pose_keys_2d_v1.csv",
+      "segments.csv"
+    ],
+    "mutable_lifecycle_metadata": [
+      "identity.json",
+      "session.json",
+      "submission_receipt.json"
+    ]
+  },
+  "phase_modes": {
+    "assignment": {
+      "immutable_frozen_input": "0400",
+      "mutable_annotation": "0600",
+      "mutable_lifecycle_metadata": "0600"
+    },
+    "submission": {
+      "immutable_frozen_input": "0400",
+      "mutable_annotation": "0400",
+      "mutable_lifecycle_metadata": "0400"
+    }
+  },
+  "allowed_lifecycle_field_changes": {
+    "identity.json": ["identity_status"],
+    "session.json": ["session_status", "opened_at_utc", "closed_at_utc"],
+    "submission_receipt.json": [
+      "submission_status",
+      "annotation_started",
+      "submitted_at_utc",
+      "write_locked",
+      "identity_sha256",
+      "session_sha256",
+      "annotation_sha256",
+      "content_lock_sha256",
+      "resigned_by_role"
+    ]
+  },
   "forbidden_recipient_paths": [
     "README.md",
     "coordinator",

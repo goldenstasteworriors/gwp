@@ -68,7 +68,9 @@ Git 中的 coordinator source bundle 是：
 - `README.md`：通用 coordinator runbook，不在 recipient allowlist；
 - `coordinator/selection_proposal_audit.md`：唯一 episode-specific 选择审计，coordinator-only；
 - `coordinator/assignment_index.json`：从 coordinator 侧冻结两套 receipt/manifest/identity/session
-  SHA-256，避免 recipient 自行改写 manifest 与 receipt 后仍被接受；
+  与初始 submission receipt SHA-256，避免 recipient 自行改写 manifest 与 receipt 后仍被接受；
+- `frozen_inputs/ANNOTATION_HANDBOOK.md` 与 `frozen_inputs/TASK_ONTOLOGY.json`：实际冻结字节；每套
+  recipient root 均有独立 regular-file 副本，assignment receipt 绑定其 recipient path、bytes 与 SHA-256；
 - `task_manifest.csv`：三段的中性任务绑定，无 selection stratum、event hint 或 semantic proposal；
 - `media_allowlist.csv`：仅中性媒体 ID、文件名、bytes、SHA-256、帧数、时长、fps、尺寸和 codec；
 - `schema_manifest.json`：冻结全部八张 CSV 的 exact ordered header、header SHA-256、schema version
@@ -81,21 +83,25 @@ Git 中的 coordinator source bundle 是：
 - `templates/pose_keys_2d_v1.csv`；
 - `templates/identity.json`；
 - `templates/session.json`；
-- `assignments/annotator_a/` 与 `assignments/annotator_b/`：实际已赋值、彼此独立的 13-file
+- `assignments/annotator_a/` 与 `assignments/annotator_b/`：实际已赋值、彼此独立的 17-file
   blank-before-assignment roots，含 receipt、recipient manifest、exact allowlist、identity/session、
-  两张 contact 表与四张 SM-FET 表。
+  submission receipt、schema、handbook、task ontology、两张 contact 表与四张 SM-FET 表。
 
-D0 recipient packet root 的唯一合法文件集合由 `recipient_exact_allowlist.json` 冻结：两张中性
-manifest、`coverage.csv`、`segments.csv`、四张 SM-FET worksheet、identity、session、assignment
-receipt、recipient manifest 与 exact allowlist，共 13 文件。指南/ontology 必须是双方相同、已
-hash 的独立只读输入。media root 只允许 `media_allowlist.csv` 指定的三个 MP4，且与 packet root、
+D0 recipient packet root 的唯一合法文件集合由 `recipient_exact_allowlist.json` 冻结，共 17 文件。
+其中 handbook、task ontology、schema、task/media manifest、assignment receipt、recipient manifest
+与 exact allowlist 是 assignment 起即 `0400` 的 immutable frozen input；六张 annotation CSV 及
+identity/session/submission receipt 在 assignment 阶段为 `0600`。media root 只允许
+`media_allowlist.csv` 指定的三个 MP4，且与 packet root、
 state root 两两不嵌套；Git packet 自身不复制媒体。
 
 不得把本 README、`coordinator/`、绝对 source 路径、整个仓库、source root、processed HDF5、formal
 coordinator/adjudication、另一方 packet 或 proposal audit 分发给 A/B。D0 是 non-blind，含义是
 两人首轮锁定后允许按流程共同讨论定义，不代表首轮 CSV 可以被 proposal 预填。
 
-ACL 最低要求：逐人 owner-only 目录；媒体与 immutable metadata 只读；六张 annotation CSV 仅 owner 可写；
+ACL 最低要求：逐人 packet root 精确 `0700`；上述 immutable frozen input 精确 `0400`；assignment
+阶段六张 annotation CSV 与三张 lifecycle metadata 精确 `0600`；提交重签后全部 17 文件精确
+`0400`。identity 只允许 `identity_status` 变化，session 只允许 status/opened/closed 三字段变化，
+submission receipt 只允许 allowlist 明列的终态、hash 与 content-lock 字段变化；
 禁止 symlink/hard link；禁止云同步、截图、录屏和转发；记录授权人、recipient、开放/撤销时间、
 各文件 hash 和销毁确认。没有数据控制者授权/伦理或用途依据时 fail closed，不分发媒体。
 
@@ -106,7 +112,9 @@ ACL 最低要求：逐人 owner-only 目录；媒体与 immutable metadata 只�
    identity/session template 未赋值、recipient A/B 已赋值且不同、packet 内没有媒体/截图/HDF5。
 2. **Assign**：给 A、B 分配真实且不同的 `annotator_id`、`annotation_session_id` 和 owner-only
    roots；保存 assignment receipt。A/B 得到同一 task/media bytes，不得看到 selection rationale。
-3. **Independent first pass**：A、B 各自完整完成全部三段后锁定提交 hash；不能边讨论边填，
+3. **Independent first pass**：A、B 各自完整完成全部三段后，将 identity/session 置为 `submitted`，
+   写入 `annotation_started=true` 的 coordinator-resigned submission receipt，再把全部 packet 文件
+   降为 `0400` 并验证 content lock；不能边讨论边填，
    不能看对方 CSV。所有 row 仍是 `human_independent_calibration`，不是 GT。
 4. **Locked comparison**：只有两方三段全部锁定并撤销写权限后，协调员才计算结构性分歧并开放
    共同讨论。讨论只针对定义、反例、unknown/mask/censor/reference/overflow，不投票造真值。
@@ -139,8 +147,19 @@ python scripts/contact_labels/check_sm_fet_d0_calibration_packet_v1.py \
   --schema-manifest track_a/sm_fet_d0_calibration_packet_v1/schema_manifest.json
 ```
 
-以上代码块按展示位置换行；每个反斜杠后立即换行。若 Git checkout 后目录/文件权限不再是
-`0700/0600`，assignment 必须先失败；由 coordinator 在真实分发 root 恢复 ACL 后再重跑，不得
+提交锁定后，对每位 recipient root 单独执行：
+
+```bash
+python scripts/contact_labels/check_sm_fet_d0_calibration_packet_v1.py \
+  --phase submission \
+  --packet-root /path/to/locked-recipient-packet \
+  --schema-manifest track_a/sm_fet_d0_calibration_packet_v1/schema_manifest.json
+```
+
+以上 `/path/to/locked-recipient-packet` 必须替换为实际逐人提交 root；代码块按展示位置换行。
+
+以上代码块按展示位置换行；每个反斜杠后立即换行。若 Git checkout 后权限不再是 assignment 的
+`0700 + 0400/0600` 精确策略，assignment 必须先失败；由 coordinator 在真实分发 root 恢复 ACL 后再重跑，不得
 通过关闭检查继续。
 
 ### `source-preflight`
@@ -167,8 +186,14 @@ python scripts/contact_labels/check_sm_fet_d0_calibration_packet_v1.py \
 
 ### `submission`
 
-- 每行 schema/episode/annotator/session/role 与 receipt 一致；每个 episode 恰有一条完整 raw-frame
+- identity、session、submission receipt 三者必须同时进入 `submitted`；要求
+  `annotation_started=true`、非空且有序的 opened/closed UTC、`write_locked=true`、协调员重签
+  content lock，任何 `draft`、`in_progress`、`assigned_not_started` 一律拒绝；
+- 三个 episode 各恰有一条 `review_status=submitted`、`coverage_mode=EXHAUSTIVE` 的完整 raw-frame
   coverage，范围与 task/media manifest 一致；
+- D0 calibration 明确允许 “no event present”：对应 episode 仍必须有上述显式 coverage，该 episode
+  的 events/segments/node/edge/pose 可全部为空。其余五张表整体和逐 episode 均可为空；一旦有 row，
+  必须 submitted 且满足 identity、coverage mode 与全部引用闭合规则；
 - 六张表的 primary ID 非空且唯一，所有 foreign key 同 episode 闭合；
 - `label_origin` 只接受 `human_independent_calibration`，`source_proposal_id` 必须为空；拒绝
   proposal、model、adjudicated 或 GT row。
@@ -180,7 +205,8 @@ node/edge/pose event 与 `edge.contact_segment_id` 做同 episode 唯一引用�
 ### `distribution`
 
 在真实媒体分发前必须额外提供 packet/media/state roots。checker 要求三者两两不嵌套，root
-mode 精确 `0700`、packet files `0600`、media files `0400`、state 初始为空，并逐字节重算三个
+mode 精确 `0700`、packet immutable files `0400`、assignment mutable files `0600`、media files
+`0400`、state 初始为空，并逐字节重算三个
 外部 MP4 的 bytes/SHA-256；任一 symlink、hardlink、共享 inode、额外媒体或 proposal 文件即失败。
 Git 只保存 executable bit，不能保存 `0700/0600/0400` 的完整 ACL，所以每次 checkout/复制后
 必须重新 chmod 并通过 `--phase assignment/distribution`；Git mode 永远不算 ACL 证据。

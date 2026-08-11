@@ -1,30 +1,34 @@
 {
-  "index_schema_version": "sm_fet_d0_assignment_index_v1_fix1",
-  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix1",
-  "schema_manifest_sha256": "dc628ba57638d3f08646f8bed931df0339970e44ec8edc7fd740a09ff191807c",
+  "index_schema_version": "sm_fet_d0_assignment_index_v1_fix2",
+  "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix2",
+  "schema_manifest_sha256": "8f33609a7c320052781b930543e46d174ae31f0528dd02e03e610df73e9802b7",
   "recipients": {
     "annotator_a": {
-      "packet_id": "sm-fet-d0-calibration-a-v1-fix1",
+      "packet_id": "sm-fet-d0-calibration-a-v1-fix2",
       "annotation_role": "independent_a",
       "annotator_id": "d0cal-annotator-a",
       "annotation_session_id": "d0cal-session-a-20260812",
-      "assignment_receipt_sha256": "a54717d743c35bff7ef04c8835c4d1707657e6228549479de3f0f006ec158cc9",
-      "recipient_manifest_sha256": "8e2af12a59bf4692a4c2d634dc0d9a988fdd28dda74116f1e3a93bee3b1f4901",
-      "identity_sha256": "11b6c68429e6cea9242878c8ced99ed5315696859a520403d94ca70ed52d46dc",
-      "session_sha256": "f19275733f08a3e27f0b0a753d9201ebfa3c6c0b446b738f6105ac0851256ad8"
+      "assignment_receipt_sha256": "54e17f8254ca74357d016dabcf94c6e250fb3bc2eff152b920dac779aa16c8b3",
+      "recipient_manifest_sha256": "febc2298ab7f104b9089cc1ef2b10b7a30958ef2d011fbe6141f06deba4c7bfc",
+      "identity_sha256": "6ab11d38602811bd04fa51c2bdea57feaee8c1472e1576d26fcf5d70667dddb9",
+      "session_sha256": "a9220d8d57875b8c78130ff7aa32d1f76c9bc255de7503b21a0a78b0444ae51c",
+      "submission_receipt_sha256": "d50b090882485f1a54839c3a8c91a579047f8ea1765b02424aea7475346ef8fb"
     },
     "annotator_b": {
-      "packet_id": "sm-fet-d0-calibration-b-v1-fix1",
+      "packet_id": "sm-fet-d0-calibration-b-v1-fix2",
       "annotation_role": "independent_b",
       "annotator_id": "d0cal-annotator-b",
       "annotation_session_id": "d0cal-session-b-20260812",
-      "assignment_receipt_sha256": "ffc22581671000afa3c074a37fc053ea5a8325a20a6b834b24fe0833c04d27a7",
-      "recipient_manifest_sha256": "55af98eef95d40468c7b0dd875b883cc5d34666b0aab90d424de3bdda7ec047e",
-      "identity_sha256": "5eefae35164e1e9c07326d9262f57612c579f2eaddf395cdde0eedb59c5fd22a",
-      "session_sha256": "ee600a1ec0251448478c481b0bee4a80309a4f59f0113aa190463f8581c24604"
+      "assignment_receipt_sha256": "543786f9e7be710113bf41027edf9f4631dcf500d1448eb1e91c7c61b3c4eae7",
+      "recipient_manifest_sha256": "67a712e1b5eb6a547665bea9f5cf00aae15d00faf0614f296e7e6f32e33d5ba1",
+      "identity_sha256": "37c286fedcda2aac706d7c0ff9a8cd51b3f86360ce66bb7dc01f2c86192734aa",
+      "session_sha256": "67660f858718b56af73f3ec968a0b0ab522a9b475fa4cdd3c85d22e39ea71d40",
+      "submission_receipt_sha256": "8a87af0de178ddc398d2bf56f761be14bb882e00506843db3e0f725aefcadbb7"
     }
   },
   "required_packet_root_mode": "0700",
-  "required_packet_file_mode": "0600",
+  "assignment_immutable_mode": "0400",
+  "assignment_mutable_mode": "0600",
+  "submission_all_files_mode": "0400",
   "git_mode_is_not_acl_evidence": true
 }
