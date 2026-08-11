@@ -16,7 +16,7 @@ from world_action_model.contact_asym25_checkpoint_acceptance import (  # noqa: E
     ACCEPTANCE_VERSION,
     CheckpointAcceptanceError,
     strict_json_file,
-    validate_current_run_matched_report,
+    validate_acceptance,
     validate_bundle_manifest,
     validate_training_receipt,
     write_json_exclusive,
@@ -73,11 +73,6 @@ def main() -> None:
     _, matched_report_sha256 = strict_json_file(
         matched_report_path, "current-run matched-control report"
     )
-    validate_current_run_matched_report(
-        matched_report_path,
-        expected_sha256=matched_report_sha256,
-        training_receipt=receipt,
-    )
     acceptance = {
         "acceptance_version": ACCEPTANCE_VERSION,
         "status": "accepted",
@@ -96,6 +91,14 @@ def main() -> None:
         "checkpoint_bundle_sha256": bundle["bundle_sha256"],
         "checkpoint_training_receipt_sha256": receipt_sha,
     }
+    validate_acceptance(
+        acceptance,
+        checkpoint_dir=checkpoint,
+        bundle_manifest=bundle,
+        bundle_manifest_sha256=bundle_file_sha,
+        training_receipt=receipt,
+        training_receipt_sha256=receipt_sha,
+    )
     digest = write_json_exclusive(output, acceptance)
     print(f"{digest}  {output}")
 

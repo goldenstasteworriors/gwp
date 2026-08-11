@@ -192,7 +192,9 @@ must match the reviewed `checkpoint_safe_serialization` training setting;
 config-only, mixed-format, nested, orphan and extra files are rejected. The
 trainer emits reviewed receipts only at steps 0, 100 and 200. Later ordinary
 checkpoints may still be saved by a long run, but cannot accidentally enter the
-production evidence chain.
+production evidence chain. The independent reviewer CLI executes the same full
+acceptance validator before writing anything, so invalid or aliased reviewer
+identities and serialization mismatches cannot produce an `accepted` artifact.
 
 ```bash
 conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.py \
