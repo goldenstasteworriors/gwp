@@ -18,7 +18,13 @@ from world_action_model.contact_transition_schema import (
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
 )
-from world_action_model.contact_route_contract import ContactCausalRoute
+from world_action_model.contact_route_contract import (
+    ContactCausalRoute,
+    validate_spec_only_trainer_route_config,
+)
+from world_action_model.contact_supervision_contract import (
+    validate_positive_contact_supervision,
+)
 from world_action_model.matched_control_hashes import MatchedControlCollector
 from world_action_model.models import CasualWorldActionTransformer_MoT
 from world_action_model.trainer.wa_casual_trainer_pretrain import (
@@ -277,6 +283,9 @@ class CasualWATrainerMoT(Trainer):
         self.require_contact_targets = bool(
             model_config.get("require_contact_targets", False)
         )
+        self.require_positive_contact_supervision = bool(
+            model_config.get("require_positive_contact_supervision", False)
+        )
         transformer_config = model_config.get("transformer", {})
         self.contact_causal_route = str(
             model_config.get(
@@ -285,6 +294,9 @@ class CasualWATrainerMoT(Trainer):
             )
             or ""
         )
+        resolved_spec_route = validate_spec_only_trainer_route_config(model_config)
+        if resolved_spec_route is not None:
+            self.contact_causal_route = resolved_spec_route.value
         self.current_training_data_receipt = model_config.get(
             "current_training_data_receipt"
         )
@@ -546,17 +558,22 @@ class CasualWATrainerMoT(Trainer):
                 f"{self.contact_condition_mode!r}"
             )
         if self.contact_causal_route in {
-            ContactCausalRoute.AUX_ONLY_DIRECT_Q12.value,
-            ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST.value,
+            route.value
+            for route in (
+                ContactCausalRoute.AUX_ONLY_DIRECT_Q12,
+                ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST,
+                ContactCausalRoute.HARD_ST_SEMANTIC,
+            )
         }:
             if self.contact_condition_mode != "predicted":
-                raise ValueError(
-                    f"route {self.contact_causal_route!r} rejects oracle conditioning"
-                )
-            if self.contact_loss_weight <= 0.0 or not self.require_contact_targets:
+                if self.contact_causal_route != ContactCausalRoute.HARD_ST_SEMANTIC.value:
+                    raise ValueError(
+                        f"route {self.contact_causal_route!r} rejects oracle conditioning"
+                    )
+            if not self.require_contact_targets or not self.require_positive_contact_supervision:
                 raise ValueError(
                     f"route {self.contact_causal_route!r} requires a positive grouped "
-                    "contact auxiliary loss and required targets"
+                    "contact auxiliary loss and positively masked required targets"
                 )
             if self.contact_schema_version != SEGMENT_SCHEMA_VERSION:
                 raise ValueError(
@@ -935,6 +952,12 @@ class CasualWATrainerMoT(Trainer):
         contact_target = batch_dict.get("contact_target")
         contact_condition = batch_dict.get("contact_condition")
         contact_condition_mask = batch_dict.get("contact_condition_mask")
+        if self.require_positive_contact_supervision:
+            validate_positive_contact_supervision(
+                contact_target,
+                batch_dict.get("contact_loss_mask"),
+                batch_dict.get("contact_confidence"),
+            )
         if self.contact_causal_route in {
             ContactCausalRoute.AUX_ONLY_DIRECT_Q12.value,
             ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST.value,

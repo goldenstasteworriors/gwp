@@ -61,6 +61,7 @@ config["models"].update(
     contact_schema_version=SEGMENT_SCHEMA_VERSION,
     contact_condition_mode="predicted",
     require_contact_targets=True,
+    require_positive_contact_supervision=True,
 )
 config["contact_causal_route_metadata"] = dict(
     contact_route_metadata(selected_route, num_queries=12, time_bins=16)

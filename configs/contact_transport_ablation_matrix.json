@@ -34,7 +34,7 @@
     "allow_server_training": false
   },
   "op38_route_contract": {
-    "contract_version": "contact_causal_route_contract_v1",
+    "contract_version": "contact_causal_route_contract_v2",
     "contract_code": "world_action_model/contact_route_contract.py",
     "audit_code": "world_action_model/contact_route_audit.py",
     "audit_cli": "scripts/audit_contact_route_contract.py",
@@ -53,6 +53,19 @@
     "equal_bit_action_visible_width": 22,
     "equal_bit_action_visible_bits": 16,
     "equal_bit_positive_zero_padding": 6,
+    "equal_bit_matrix_runtime_policy": "nonpersistent_source_rebuilt_validate_bytes_rank_each_use_strict_load_rejects_key",
+    "hard_semantic_grammar_version": "contact_segment_hard_grammar_b16_v1",
+    "hard_semantic_states_per_query": 48673,
+    "cache_packet_receipt_version": "contact_action_packet_receipt_v1",
+    "cache_packet_receipt_binds": ["route_contract", "packet_dtype", "packet_shape", "canonical_packet_bytes_sha256"],
+    "cache_packet_receipt_model_held_comparison": true,
+    "equal_cache_validator": ["shape", "dtype", "finite", "binary_prefix16", "positive_zero_suffix6", "little_endian_raw_id_lt_48673"],
+    "hard_semantic_cache_validator": ["shape", "dtype", "finite", "positive_zero", "canonical_absent", "presence_binary", "categorical_one_hot", "b16_tau_lattice", "ordered_uncensored_tau", "censor_tau_consistency"],
+    "spec_only_trainer_routes": ["aux_only_direct_q12", "equal_bit_unstructured_hard_st", "hard_st_semantic"],
+    "spec_only_trainer_requires": ["top_and_transformer_route_present_equal", "finite_positive_contact_loss_weight", "required_contact_target", "explicit_positive_effective_mask"],
+    "audit_version": "contact_causal_route_cpu_audit_v2",
+    "audit_passed_reduction": "all_named_invariant_results",
+    "audit_report_is_admission": false,
     "production_admitted": false,
     "benefit_claimed": false
   },
@@ -90,7 +103,8 @@
         "models.transformer.contact_semantic_bottleneck": false,
         "models.transformer.contact_causal_route": "aux_only_direct_q12",
         "models.contact_loss_weight": 0.25,
-        "models.require_contact_targets": true
+        "models.require_contact_targets": true,
+        "models.require_positive_contact_supervision": true
       },
       "route_definition": "The Q=12 contact planner and grouped loss run, but planner hidden/logits/semantics are all invisible to action and absent from its cache; action retains the original direct reference attention. This matches planner parameters/forward compute, not the action-visible bit capacity."
     },
@@ -107,7 +121,8 @@
         "models.transformer.contact_causal_route": "equal_bit_unstructured_hard_st",
         "models.contact_loss_weight": 0.25,
         "models.contact_condition_mode": "predicted",
-        "models.require_contact_targets": true
+        "models.require_contact_targets": true,
+        "models.require_positive_contact_supervision": true
       },
       "route_definition": "Each query maps 22 raw auxiliary logits through the receipt-bound full-rank 16x22 Rademacher matrix, hard-ST bits, little-endian id decoding, and invalid-id-to-zero canonicalization. Action reads exactly 16 hard bits plus six positive zeros through the shared 22-to-action-width encoder; it cannot read raw logits, planner hidden, GT, oracle, direct reference, or future tokens.",
       "states_per_query": 48673,

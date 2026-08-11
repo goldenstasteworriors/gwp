@@ -39,7 +39,9 @@ codec 常量和纯函数位于 `world_action_model/contact_transition_schema.py`
   `12 * log2(48673) = 186.85000894308362 bit`，与 B16 semantic hard route 完全相同；
 - 22 raw planner logits 经固定 mixing 和 sigmoid 形成 soft surrogate；forward 使用
   canonical hard code，backward 使用 hard-ST。固定 matrix 是 equal-bit route 独有的
-  persistent registered buffer；legacy routes 不新增 state_dict key。
+  nonpersistent registered buffer；每次使用前都从源码常量重建并检查 shape、有限值、
+  原始 int8 bytes SHA 与 full row rank。checkpoint 不能携带/替换该 key，strict load 会拒绝；
+  legacy routes 的 state_dict key 集不变。
 
 模型仍用原有 `contact_condition_encoder` 完成相同的 22→action-width 投影。raw contact
 logits只作为 grouped contact auxiliary prediction和 ST 源，不直接进入 action。
@@ -53,9 +55,18 @@ logits只作为 grouped contact auxiliary prediction和 ST 源，不直接进入
   单独提供 mask 也会拒绝。
 - strict semantic/equal-bit route 收到非空 `encoder_hidden_states_image` 会拒绝。
 - direct cache保留 direct reference KV，但不保存 planner hidden、logits、semantics 或
-  code；equal-bit cache只保存 canonical hard code、code SHA 和由 state+code 生成的 prefix
-  KV，不保存 raw logits、semantic 或 reference KV。
-- cache 绑定 route receipt SHA；缺项、多余 raw route 值或篡改 route receipt 会拒绝。
+  code；equal-bit cache只保存 canonical hard code、packet receipt 和由 state+code 生成的
+  prefix KV，不保存 raw logits、semantic 或 reference KV。
+- equal-bit cache 检查精确 `[B,Q,22]` shape、与 encoder 相同的 floating dtype/device、
+  finite、前 16 维严格 `{0,1}`、后六维严格 IEEE-754 `+0`、little-endian raw ID `<48673`。
+- 显式 `hard_st_semantic` cache 直接验证完整 B16 hard grammar：canonical absent、presence、
+  side/site/role/mode one-hot、tau lattice、`start<=end`、censor/tau 一致和所有零为 `+0`；
+  不把 packet 当 logits 重新 transport。其每 query 接受域精确为 48,673 个状态。
+- packet receipt 从已验证的 canonical packet bytes、dtype/shape 和重新生成的 route contract
+  计算，并与 model-held receipt 比较；同时篡改 packet 和 cache 内 receipt 也会拒绝。
+- trainer 要求 top-level route 与 transformer resolved route 均显式且一致；三条 spec route
+  的 grouped contact loss weight 必须 finite 且 `>0`，target、显式 mask 和真实正的有效
+  supervision count 都必须存在；全零 mask、NaN weight fail closed。legacy missingness 不变。
 
 ## CPU audit 与 same-noise harness
 
@@ -82,8 +93,12 @@ audit 覆盖：
 6. `encode_action_tokens` 的 AST/参数没有 raw planner hidden/logits/reference/future route；
 7. legacy soft/hard-ST/hard-detached transport、action/contact forward bytes和 state_dict
    key 集兼容；
-8. config receipt、每个 route receipt和完整 report使用 canonical JSON SHA-256，未使用
-   Python `hash()`。
+8. matrix checkpoint/runtime 替换、cache grammar/receipt、trainer route mismatch、全零 mask、
+   NaN weight 等负例；
+9. config receipt、每个 route receipt和完整 report使用 canonical JSON SHA-256，未使用
+   Python `hash()`；顶层 `passed` 由全部命名 invariant 归约，不是固定常量；
+10. production runner exact set 和 gate protected paths 相对 baseline 为零 diff。报告明确
+    `production_admitted=false`，audit 通过不构成 admission。
 
 same-noise intervention 结果只标为 `route_sensitivity_only_not_physical_feasibility`；没有
 native simulator/真实传感器 oracle 时，不得把它解释为物理正确、可执行或成功。

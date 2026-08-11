@@ -25,6 +25,7 @@ from diffusers.utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscal
 from world_action_model.contact_transition_schema import (
     CONTACT_SEMANTIC_TRANSPORT_MODES,
     EQUAL_BIT_MIXING_MATRIX,
+    EQUAL_BIT_MIXING_MATRIX_SHA256,
     EQUAL_BIT_NUM_BITS,
     EQUAL_BIT_VALID_STATES,
     SEGMENT_BINARY_FIELDS,
@@ -34,9 +35,11 @@ from world_action_model.contact_transition_schema import (
     SEGMENT_SCHEMA_VERSION,
     SEGMENT_TARGET_DIM,
     contact_transport_capacity_metadata,
+    validated_equal_bit_mixing_matrix,
 )
 from world_action_model.contact_route_contract import (
     ContactCausalRoute,
+    contact_packet_receipt,
     contact_route_metadata,
     resolve_contact_causal_route,
     route_action_attends_reference,
@@ -863,7 +866,7 @@ class CasualWorldActionTransformer_MoT(
             self.register_buffer(
                 "equal_bit_mixing_matrix",
                 torch.tensor(EQUAL_BIT_MIXING_MATRIX, dtype=torch.float32),
-                persistent=True,
+                persistent=False,
             )
 
     def _encode_state_tokens(self, state: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -1176,7 +1179,7 @@ class CasualWorldActionTransformer_MoT(
             )
         if not torch.isfinite(contact_logits).all():
             raise ValueError("equal-bit transport requires finite planner logits")
-        matrix = self.equal_bit_mixing_matrix.to(
+        matrix = self._validated_equal_bit_mixing_matrix(
             device=contact_logits.device, dtype=contact_logits.dtype
         )
         mixed_logits = F.linear(contact_logits, matrix) / math.sqrt(
@@ -1222,6 +1225,30 @@ class CasualWorldActionTransformer_MoT(
             dim=-1,
         )
         return hard.detach() + (soft_packet - soft_packet.detach())
+
+    def _validated_equal_bit_mixing_matrix(
+        self, *, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Validate the nonpersistent runtime copy, then build from source bytes."""
+
+        self._validated_contact_route_metadata()
+        source = validated_equal_bit_mixing_matrix()
+        runtime = getattr(self, "equal_bit_mixing_matrix", None)
+        if runtime is None or tuple(runtime.shape) != tuple(source.shape):
+            raise RuntimeError("equal-bit runtime matrix shape differs from its receipt")
+        if not torch.is_floating_point(runtime) or not torch.isfinite(runtime).all():
+            raise RuntimeError("equal-bit runtime matrix dtype/values are invalid")
+        runtime_int8 = runtime.detach().to(device="cpu", dtype=torch.int8).contiguous()
+        source_int8 = torch.from_numpy(source)
+        if not torch.equal(runtime_int8, source_int8) or not torch.equal(
+            runtime.detach().to(device="cpu", dtype=torch.float32),
+            source_int8.to(dtype=torch.float32),
+        ):
+            raise RuntimeError("equal-bit runtime matrix differs from source constants")
+        runtime_sha = hashlib.sha256(runtime_int8.numpy().tobytes(order="C")).hexdigest()
+        if runtime_sha != EQUAL_BIT_MIXING_MATRIX_SHA256:
+            raise RuntimeError("equal-bit runtime matrix digest differs from its receipt")
+        return torch.tensor(source, device=device, dtype=dtype)
 
     def _plan_contact_logits(
         self,
@@ -2131,48 +2158,164 @@ class CasualWorldActionTransformer_MoT(
 
     def reset_action_only_prefix_cache(self) -> None:
         self._action_only_prefix_cache = None
+        self._action_only_prefix_cache_packet_receipt_sha256 = None
+
+    def _validated_contact_route_metadata(self) -> Mapping[str, Any]:
+        if self.contact_causal_route is None or self.contact_route_metadata is None:
+            raise RuntimeError("contact route metadata is unavailable")
+        expected = contact_route_metadata(
+            self.contact_causal_route,
+            num_queries=self.num_contact_tokens,
+            time_bins=self.contact_time_bins,
+        )
+        if self.contact_route_metadata != expected:
+            raise RuntimeError("runtime contact route metadata differs from source contract")
+        return expected
+
+    @staticmethod
+    def _canonical_packet_bytes(packet: torch.Tensor) -> bytes:
+        return (
+            packet.detach()
+            .to(device="cpu")
+            .contiguous()
+            .view(torch.uint8)
+            .numpy()
+            .tobytes()
+        )
+
+    def _validate_hard_semantic_packet(self, packet: torch.Tensor) -> None:
+        """Validate the exact B16 grammar without treating packets as logits."""
+
+        flat = packet.reshape(-1, SEGMENT_TARGET_DIM)
+        presence = flat[:, SEGMENT_FIELD_SLICES["presence"]].reshape(-1)
+        if not torch.logical_or(presence == 0, presence == 1).all():
+            raise RuntimeError("hard semantic cache presence must be binary")
+        absent = presence == 0
+        if bool(absent.any()) and not bool((flat[absent, 1:] == 0).all()):
+            raise RuntimeError("absent hard semantic cache packet is not canonical")
+        present = flat[presence == 1]
+        for field in SEGMENT_CATEGORICAL_FIELDS:
+            values = present[:, SEGMENT_FIELD_SLICES[field]]
+            if not torch.logical_or(values == 0, values == 1).all() or not bool(
+                (values.sum(dim=-1) == 1).all()
+            ):
+                raise RuntimeError(
+                    f"hard semantic cache field {field!r} is not exactly one-hot"
+                )
+        for field in ("left_censored", "right_censored"):
+            values = present[:, SEGMENT_FIELD_SLICES[field]]
+            if not torch.logical_or(values == 0, values == 1).all():
+                raise RuntimeError(
+                    f"hard semantic cache field {field!r} is not binary"
+                )
+        if present.numel():
+            lattice = torch.arange(
+                self.contact_time_bins, device=packet.device, dtype=packet.dtype
+            ) / float(self.contact_time_bins - 1)
+            start = present[:, SEGMENT_FIELD_SLICES["start_tau"]].reshape(-1)
+            end = present[:, SEGMENT_FIELD_SLICES["end_tau"]].reshape(-1)
+            if not bool((start[:, None] == lattice[None, :]).any(dim=-1).all()) or not bool(
+                (end[:, None] == lattice[None, :]).any(dim=-1).all()
+            ):
+                raise RuntimeError("hard semantic cache times are outside the B16 lattice")
+            left = present[:, SEGMENT_FIELD_SLICES["left_censored"]].reshape(-1).bool()
+            right = present[:, SEGMENT_FIELD_SLICES["right_censored"]].reshape(-1).bool()
+            if bool((left & (start != 0)).any()):
+                raise RuntimeError("left-censored cache packet has nonzero start_tau")
+            if bool((right & (end != 1)).any()):
+                raise RuntimeError("right-censored cache packet has end_tau != 1")
+            uncensored = ~(left | right)
+            if bool((uncensored & (start > end)).any()):
+                raise RuntimeError("uncensored cache packet has start_tau > end_tau")
+
+    def _validate_cached_contact_packet(
+        self, packet: torch.Tensor, cache: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        encoder = cache.get("encoder_action_hidden_states")
+        if not isinstance(packet, torch.Tensor) or not isinstance(encoder, torch.Tensor):
+            raise RuntimeError("contact cache packet/encoder must be tensors")
+        expected_shape = (encoder.shape[0], self.num_contact_tokens, SEGMENT_TARGET_DIM)
+        if tuple(packet.shape) != expected_shape:
+            raise RuntimeError(
+                f"contact cache packet shape {tuple(packet.shape)} != {expected_shape}"
+            )
+        if not torch.is_floating_point(packet) or packet.dtype != encoder.dtype:
+            raise RuntimeError("contact cache packet dtype differs from its encoder state")
+        if packet.device != encoder.device:
+            raise RuntimeError("contact cache packet device differs from its encoder state")
+        if not torch.isfinite(packet).all():
+            raise RuntimeError("contact cache packet requires finite values")
+        zeros = packet == 0
+        if bool(zeros.any()) and bool(torch.signbit(packet[zeros]).any()):
+            raise RuntimeError("contact cache packet contains signed negative zero")
+
+        if self.contact_causal_route is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST:
+            bits = packet[..., :EQUAL_BIT_NUM_BITS]
+            if not torch.logical_or(bits == 0, bits == 1).all():
+                raise RuntimeError("equal-bit cache prefix is not binary")
+            if not bool((packet[..., EQUAL_BIT_NUM_BITS:] == 0).all()):
+                raise RuntimeError("equal-bit cache suffix is not canonical +0")
+            weights = (2 ** torch.arange(
+                EQUAL_BIT_NUM_BITS, device=packet.device, dtype=torch.int64
+            )).view(*([1] * (bits.ndim - 1)), EQUAL_BIT_NUM_BITS)
+            raw_id = (bits.to(dtype=torch.int64) * weights).sum(dim=-1)
+            if bool((raw_id >= EQUAL_BIT_VALID_STATES).any()):
+                raise RuntimeError("equal-bit cache contains an invalid raw id")
+        elif (
+            self.contact_causal_route is ContactCausalRoute.HARD_ST_SEMANTIC
+            and self.contact_causal_route_explicit
+        ):
+            if self.contact_time_bins != 16:
+                raise RuntimeError("hard semantic cache receipt requires B=16")
+            self._validate_hard_semantic_packet(packet)
+
+        return contact_packet_receipt(
+            route_receipt=self._validated_contact_route_metadata(),
+            packet_bytes=self._canonical_packet_bytes(packet),
+            packet_dtype=str(packet.dtype),
+            packet_shape=tuple(packet.shape),
+        )
 
     def _validate_contact_action_only_cache(self, cache: Mapping[str, Any]) -> None:
         """Fail closed if route-specific cache contents are missing or excessive."""
 
         if self.contact_route_metadata is not None and cache.get(
             "contact_route_receipt_sha256"
-        ) != self.contact_route_metadata["receipt_sha256"]:
+        ) != self._validated_contact_route_metadata()["receipt_sha256"]:
             raise RuntimeError("action-only cache route receipt differs from the model")
         if self.contact_causal_route is ContactCausalRoute.AUX_ONLY_DIRECT_Q12:
-            forbidden = {"contact_semantic", "contact_logits", "contact_code"}
-            if forbidden.intersection(cache):
-                raise RuntimeError("direct route cache contains forbidden planner values")
-        if self.contact_causal_route is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST:
-            if "contact_code" not in cache or {
+            forbidden = {
                 "contact_semantic",
                 "contact_logits",
-            }.intersection(cache):
-                raise RuntimeError(
-                    "equal-bit cache must contain only the canonical contact code"
-                )
-            code = cache["contact_code"]
-            if (
-                not torch.isfinite(code).all()
-                or not torch.logical_or(
-                    code[..., :EQUAL_BIT_NUM_BITS] == 0,
-                    code[..., :EQUAL_BIT_NUM_BITS] == 1,
-                ).all()
-                or not (code[..., EQUAL_BIT_NUM_BITS:] == 0).all()
-            ):
-                raise RuntimeError("equal-bit cache contains a non-canonical code")
-            code_bytes = (
-                code.detach()
-                .to(device="cpu")
-                .contiguous()
-                .view(torch.uint8)
-                .numpy()
-                .tobytes()
+                "contact_code",
+                "contact_packet_receipt",
+            }
+            if forbidden.intersection(cache):
+                raise RuntimeError("direct route cache contains forbidden planner values")
+            return
+        if self.contact_action_uses_packet:
+            equal_bit = (
+                self.contact_causal_route
+                is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST
             )
-            if cache.get("contact_code_sha256") != hashlib.sha256(
-                code_bytes
-            ).hexdigest():
-                raise RuntimeError("equal-bit cache code digest differs")
+            packet_key = "contact_code" if equal_bit else "contact_semantic"
+            invalid_layout = packet_key not in cache
+            if equal_bit:
+                invalid_layout = invalid_layout or bool(
+                    {"contact_semantic", "contact_logits"}.intersection(cache)
+                )
+            if invalid_layout:
+                raise RuntimeError(
+                    f"contact cache is missing or contradicts canonical {packet_key}"
+                )
+            recomputed = self._validate_cached_contact_packet(cache[packet_key], cache)
+            if cache.get("contact_packet_receipt") != recomputed:
+                raise RuntimeError("contact cache packet receipt differs from canonical bytes")
+            expected_sha = getattr(
+                self, "_action_only_prefix_cache_packet_receipt_sha256", None
+            )
+            if expected_sha is None or recomputed["receipt_sha256"] != expected_sha:
+                raise RuntimeError("contact cache packet differs from its model-held receipt")
 
     def _condition_time_only(
         self,
@@ -2303,7 +2446,7 @@ class CasualWorldActionTransformer_MoT(
             "num_ref_tokens": int(visual_hidden_states.shape[1]),
         }
         if self.contact_route_metadata is not None:
-            cache["contact_route_receipt_sha256"] = self.contact_route_metadata[
+            cache["contact_route_receipt_sha256"] = self._validated_contact_route_metadata()[
                 "receipt_sha256"
             ]
         if (
@@ -2312,11 +2455,7 @@ class CasualWorldActionTransformer_MoT(
             and contact_semantic is not None
         ):
             packet = contact_semantic.detach()
-            packet_bytes = (
-                packet.to(device="cpu").contiguous().view(torch.uint8).numpy().tobytes()
-            )
             cache["contact_code"] = packet
-            cache["contact_code_sha256"] = hashlib.sha256(packet_bytes).hexdigest()
         elif contact_semantic is not None:
             cache["contact_semantic"] = contact_semantic.detach()
         if (
@@ -2327,6 +2466,18 @@ class CasualWorldActionTransformer_MoT(
             is not ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST
         ):
             cache["contact_logits"] = contact_logits.detach()
+        if self.contact_action_uses_packet:
+            packet_key = (
+                "contact_code"
+                if self.contact_causal_route
+                is ContactCausalRoute.EQUAL_BIT_UNSTRUCTURED_HARD_ST
+                else "contact_semantic"
+            )
+            receipt = self._validate_cached_contact_packet(cache[packet_key], cache)
+            cache["contact_packet_receipt"] = receipt
+            self._action_only_prefix_cache_packet_receipt_sha256 = receipt[
+                "receipt_sha256"
+            ]
         self._action_only_prefix_cache = cache
         self._validate_contact_action_only_cache(cache)
         return cache
