@@ -2825,6 +2825,27 @@ def run_serialized_full_evaluator_acceptance(
 ) -> dict[str, Any]:
     """Labvla subprocess entry point for the complete file-backed acceptance."""
 
+    import sys
+    import types
+
+    repository_root = Path(repository_root).expanduser().absolute()
+    package_init_stubs = {
+        "giga_datasets": repository_root
+        / "third_party/giga-datasets/giga_datasets",
+        "giga_datasets.datasets": repository_root
+        / "third_party/giga-datasets/giga_datasets/datasets",
+        "world_action_model.datasets": repository_root
+        / "world_action_model/datasets",
+    }
+    for name, source in package_init_stubs.items():
+        if name in sys.modules:
+            raise RuntimeError(
+                f"full evaluator imported dependency package too early: {name}"
+            )
+        module = types.ModuleType(name)
+        module.__path__ = [str(source)]
+        sys.modules[name] = module
+
     from world_action_model.contact_causal_heldout_eval import (
         build_aggregate_v5,
         validate_aggregate_v5,
@@ -2935,6 +2956,10 @@ def run_serialized_full_evaluator_acceptance(
         "tampered_packet_digest_rejected": True,
         "tampered_acceptance_rejected": True,
         "coverage_negative_cases": coverage_negatives,
+        "stub_scope": {
+            name: "package_init_only; actual target/core submodules loaded from path"
+            for name in package_init_stubs
+        },
     }
     _write_json(Path(output_path), report)
     return report
