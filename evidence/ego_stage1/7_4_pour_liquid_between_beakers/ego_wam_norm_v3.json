@@ -1032,7 +1032,7 @@
     "target_hand_status_semantics": "open_fraction_0_closed_1_open",
     "hand_status_conversion": "target=1-source",
     "hand_active_semantics": "binary_tracker_validity_0_inactive_1_active",
-    "hand_active_meta_sha256": "ed9eea54a36a9d1971b9a5d96174510cf4b8d8c423a648af5fe095eb8d81e090",
+    "hand_active_meta_sha256": "1ff4405374e0f713cc0c2b1bce543646407d4cc0182348c984568ff9aaeef0d7",
     "hand_active_sidecar_bundle_sha256": "72fff6f1a17916cc76cb0057eb77350e56cd1b883bd69759fe93131efc023fe9",
     "hand_active_raw_hdf5_bundle_sha256": "f074948ce59928b90f3122b205693590e74a114c1f54172ff41e938fe84db6cb",
     "hand_active_statistics": {
@@ -1301,7 +1301,7 @@
       }
     },
     "hand_active_statistics_sha256": "ceacea024494dc561eeb1cf2dab719a1f87b1ab1cb76a078b56248f8fe0c2199",
-    "wam_code_receipt_sha256": "0351922c6724cf9e2c64b42175a49d2c08eb29532bb4750c40932e117e962a54",
+    "wam_code_receipt_sha256": "7e53d0830f29a4e9cbd85cb00c7d58f9daa22804f1399788f710dbc84e7658d1",
     "lerobot_runtime_source_sha256": "bb4b1f7cb2dca6b440f846b35670eba2ddb39434db0f03591a53fef6f022a9f8",
     "lerobot_runtime_version": "0.4.4",
     "normalization_valid_sample_count": {
