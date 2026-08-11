@@ -1,10 +1,10 @@
 # SM-FET-WAM v2-min 新颖性对抗审稿备忘录
 
-> 日期：2026-08-12  
-> 角色：独立新颖性审稿人（adversarial novelty review）  
-> 审查对象：`SM-FET-WAM v2-min + offline CAPOT partial/many-to-many pairing + training-only relation-effect grouping + entry/turn/exit pose auxiliary`  
-> 基线提交：`e212afec9db5198a89930c7ff896e3e49a0c8249`  
-> idea-discussion `idea_id`：`6c12acbf-343e-4b07-9814-96696416a05c`  
+> 日期：2026-08-12<br>
+> 角色：独立新颖性审稿人（adversarial novelty review）<br>
+> 审查对象：`SM-FET-WAM v2-min + offline CAPOT partial/many-to-many pairing + training-only relation-effect grouping + entry/turn/exit pose auxiliary`<br>
+> 基线提交：`e212afec9db5198a89930c7ff896e3e49a0c8249`<br>
+> idea-discussion `idea_id`：`6c12acbf-343e-4b07-9814-96696416a05c`<br>
 > idea-discussion `discussion_id`：`b076f98d-d7ce-49da-842a-ca451352a9b0`
 
 ## 0. 一句话结论
