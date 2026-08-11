@@ -1,0 +1,28 @@
+{
+  "receipt_version": "contact-asym25-checkpoint-training-receipt/v5",
+  "matrix_schema_version": null,
+  "matrix_id": null,
+  "seed": null,
+  "checkpoint_step": null,
+  "route": null,
+  "run_identity": null,
+  "output_path_record_only": null,
+  "model_config": null,
+  "stable_contract": null,
+  "training_contract": null,
+  "precursor": null,
+  "evidence": null,
+  "topology": null,
+  "parameter_topology": null,
+  "measured_route_costs": null,
+  "gradient_reachability_receipt": null,
+  "checkpoint_artifact_hashes": null,
+  "checkpoint_file": null,
+  "parent_checkpoint_weight_sha256": null,
+  "scientific_admission": {
+    "production_data_admission": false,
+    "allow_5b_training": false,
+    "allow_server_training": false,
+    "benefit_claimed": false
+  }
+}

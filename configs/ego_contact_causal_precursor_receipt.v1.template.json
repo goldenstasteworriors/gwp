@@ -1,0 +1,31 @@
+{
+  "receipt_version": "ego-contact-planner-precursor-receipt/v1",
+  "precursor_id": null,
+  "gate_sha256": null,
+  "objective_contract": null,
+  "fixed_save_step": null,
+  "root_checkpoint_bundle_sha256": null,
+  "precursor_checkpoint_bundle_sha256": null,
+  "root_parameter_tensor_sha256": null,
+  "precursor_parameter_tensor_sha256": null,
+  "frozen_root_tensor_sha256": null,
+  "frozen_precursor_tensor_sha256": null,
+  "parameter_partition": null,
+  "dataset_source_tree_sha256": null,
+  "sidecar_bundle_sha256": null,
+  "training_code_head": null,
+  "training_code_source_tree_sha256": null,
+  "training_run_id": null,
+  "training_run_nonce": null,
+  "reviewer_acceptance_sha256": null,
+  "action_path_scientific_input_output": false,
+  "route_neutral": false,
+  "hand_active_used_as_contact_ground_truth": false,
+  "grip_used_as_contact_ground_truth": false,
+  "scientific_admission": {
+    "production_data_admission": false,
+    "allow_5b_training": false,
+    "allow_server_training": false,
+    "benefit_claimed": false
+  }
+}

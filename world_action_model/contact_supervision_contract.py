@@ -14,6 +14,9 @@ from world_action_model.contact_transition_schema import (
 
 
 CONTACT_GROUPED_SUPERVISION_RULE_VERSION = "contact_grouped_supervision_v1"
+CONTACT_GROUPED_SUPERVISION_ZERO_SAFE_VERSION = (
+    "contact_grouped_supervision_v2_zero_safe"
+)
 
 
 def grouped_contact_supervision_weights(mask, confidence=None) -> dict[str, torch.Tensor]:
@@ -98,3 +101,69 @@ def validate_positive_contact_supervision(target, mask, confidence=None) -> int:
     if mask_count <= 0 or effective_count <= 0:
         raise ValueError("contact supervision has no grouped-loss-eligible item")
     return mask_count
+
+
+def validate_zero_safe_contact_supervision(target, mask, confidence=None) -> dict:
+    """Validate v1.1 arrays while allowing a zero-supervision window.
+
+    A zero mask remains unknown/censored.  It is never rewritten as a negative
+    contact label.  Dataset-level positive coverage is a separate production
+    receipt and therefore cannot be inferred from a single batch.
+    """
+
+    if target is None or mask is None:
+        raise ValueError("zero-safe contact supervision still requires target and mask arrays")
+    target = torch.as_tensor(target)
+    mask = torch.as_tensor(mask, device=target.device)
+    if target.ndim < 1 or target.shape[-1] != SEGMENT_TARGET_DIM:
+        raise ValueError(
+            f"contact target must end in width {SEGMENT_TARGET_DIM}, got {tuple(target.shape)}"
+        )
+    if not torch.isfinite(target).all():
+        raise ValueError("contact target must be finite")
+    try:
+        mask = torch.broadcast_to(mask, target.shape)
+    except RuntimeError as exc:
+        raise ValueError("contact loss mask cannot broadcast to target") from exc
+    if not torch.logical_or(mask == 0, mask == 1).all():
+        raise ValueError("zero-safe contact loss mask must be exactly binary")
+    if confidence is None:
+        confidence = torch.ones_like(mask)
+    else:
+        confidence = torch.as_tensor(confidence, device=target.device)
+        try:
+            confidence = torch.broadcast_to(confidence, target.shape)
+        except RuntimeError as exc:
+            raise ValueError("contact confidence cannot broadcast to target") from exc
+    if not torch.isfinite(confidence).all() or bool((confidence < 0).any()):
+        raise ValueError("contact confidence must be finite and nonnegative")
+    if bool((confidence[mask == 0] != 0).any()):
+        raise ValueError("unknown contact fields must have zero confidence")
+    weights = grouped_contact_supervision_weights(mask, confidence)
+    field_counts = {
+        field: int((weight > 0).sum().item())
+        for field, weight in sorted(weights.items())
+    }
+    denominators = {
+        field: float(weight.sum().item())
+        for field, weight in sorted(weights.items())
+    }
+    total = sum(field_counts.values())
+    return {
+        "supervision_version": CONTACT_GROUPED_SUPERVISION_ZERO_SAFE_VERSION,
+        "field_eligible_counts": field_counts,
+        "field_weighted_denominators": denominators,
+        "total_eligible_count": total,
+        "zero_supervision": total == 0,
+        "unknown_encoded_as_negative": False,
+    }
+
+
+def canonical_zero_contact_loss(prediction: torch.Tensor) -> torch.Tensor:
+    """Return differentiable canonical ``+0`` with zero planner gradient."""
+
+    prediction = torch.as_tensor(prediction)
+    if not torch.isfinite(prediction).all():
+        raise ValueError("contact prediction must be finite")
+    # abs().sum() is nonnegative, so multiplication produces positive zero.
+    return prediction.float().abs().sum() * prediction.new_tensor(0.0).float()

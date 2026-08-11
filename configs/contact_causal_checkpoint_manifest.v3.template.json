@@ -1,0 +1,15 @@
+{
+  "manifest_version": "contact-asym25-heldout-checkpoints/v3",
+  "matrix_schema_version": null,
+  "matrix_id": null,
+  "precursor_id": null,
+  "precursor_receipt_bytes_sha256": null,
+  "precursor_bundle_sha256": null,
+  "seed": null,
+  "causal_route_id": null,
+  "training_run_id": null,
+  "training_run_nonce": null,
+  "primary_checkpoint_step": null,
+  "best_checkpoint_selection_allowed": false,
+  "checkpoints": null
+}

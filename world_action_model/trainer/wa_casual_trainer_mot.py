@@ -24,8 +24,11 @@ from world_action_model.contact_route_contract import (
 )
 from world_action_model.contact_supervision_contract import (
     CONTACT_GROUPED_SUPERVISION_RULE_VERSION,
+    CONTACT_GROUPED_SUPERVISION_ZERO_SAFE_VERSION,
+    canonical_zero_contact_loss,
     grouped_contact_supervision_weights,
     validate_positive_contact_supervision,
+    validate_zero_safe_contact_supervision,
 )
 from world_action_model.matched_control_hashes import MatchedControlCollector
 from world_action_model.models import CasualWorldActionTransformer_MoT
@@ -286,6 +289,21 @@ class CasualWATrainerMoT(Trainer):
         self.require_positive_contact_supervision = bool(
             model_config.get("require_positive_contact_supervision", False)
         )
+        self.contact_supervision_rule_version = str(
+            model_config.get(
+                "contact_supervision_rule_version",
+                CONTACT_GROUPED_SUPERVISION_RULE_VERSION,
+            )
+        )
+        self.production_matrix_id = str(
+            model_config.get("production_matrix_id", "") or ""
+        )
+        self.production_causal_route_id = str(
+            model_config.get("production_causal_route_id", "") or ""
+        )
+        self.ego_contact_precursor_objective = model_config.get(
+            "ego_contact_precursor_objective"
+        )
         transformer_config = model_config.get("transformer", {})
         self.contact_causal_route = str(
             model_config.get(
@@ -294,7 +312,29 @@ class CasualWATrainerMoT(Trainer):
             )
             or ""
         )
-        resolved_spec_route = validate_spec_only_trainer_route_config(model_config)
+        if self.production_matrix_id:
+            from world_action_model.contact_causal_production import (
+                MATRIX_ID,
+                SUPERVISION_VERSION,
+                ensure_exact_causal_route,
+            )
+
+            if self.production_matrix_id != MATRIX_ID:
+                raise ValueError("production causal matrix ID differs")
+            selected_causal_route = ensure_exact_causal_route(
+                self.production_causal_route_id
+            )
+            if self.contact_causal_route != selected_causal_route:
+                raise ValueError("production causal route differs from model route")
+            if self.contact_supervision_rule_version != SUPERVISION_VERSION:
+                raise ValueError("production causal route requires zero-safe supervision v2")
+            if self.require_positive_contact_supervision:
+                raise ValueError(
+                    "zero-safe production routes must not require positive supervision per batch"
+                )
+            resolved_spec_route = None
+        else:
+            resolved_spec_route = validate_spec_only_trainer_route_config(model_config)
         if resolved_spec_route is not None:
             self.contact_causal_route = resolved_spec_route.value
         self.current_training_data_receipt = model_config.get(
@@ -353,6 +393,26 @@ class CasualWATrainerMoT(Trainer):
         self.production_base_model_bundle_sha256 = model_config.get(
             "production_base_model_bundle_sha256"
         )
+        self.causal_training_data_receipt = model_config.get(
+            "causal_training_data_receipt"
+        )
+        self.causal_training_data_receipt_sha256 = model_config.get(
+            "causal_training_data_receipt_sha256"
+        )
+        self.causal_preflight_receipt = model_config.get(
+            "causal_preflight_receipt"
+        )
+        self.causal_preflight_receipt_sha256 = model_config.get(
+            "causal_preflight_receipt_sha256"
+        )
+        self.causal_precursor_binding = model_config.get(
+            "causal_precursor_binding"
+        )
+        self.causal_checkpoint_receipt_base = model_config.get(
+            "causal_checkpoint_receipt_base"
+        )
+        self._causal_checkpoint_weight_sha256 = {}
+        self._causal_initial_parameter_sha256 = None
         matched_control_config = model_config.get("matched_control_collector")
         self.production_matched_control_external_acceptance_sha256 = (
             matched_control_config.get("external_acceptance_sha256")
@@ -367,6 +427,84 @@ class CasualWATrainerMoT(Trainer):
             raise ValueError(
                 "production checkpoint binding requires both current receipt and SHA"
             )
+        causal_values = (
+            self.causal_training_data_receipt,
+            self.causal_training_data_receipt_sha256,
+            self.causal_preflight_receipt,
+            self.causal_preflight_receipt_sha256,
+            self.causal_precursor_binding,
+            self.causal_checkpoint_receipt_base,
+        )
+        if self.production_matrix_id:
+            if any(value is None for value in causal_values):
+                raise ValueError("causal production checkpoint evidence bindings are incomplete")
+            if self.production_checkpoint_steps != (0, 100, 200):
+                raise ValueError("causal checkpoint steps must be exactly (0, 100, 200)")
+            from world_action_model.contact_causal_production import (
+                PREFLIGHT_RECEIPT_VERSION,
+                TRAINING_DATA_RECEIPT_VERSION,
+                sha256_json as causal_sha256_json,
+                validate_training_receipt_v5,
+            )
+
+            if (
+                not isinstance(self.causal_training_data_receipt, dict)
+                or self.causal_training_data_receipt.get("receipt_version")
+                != TRAINING_DATA_RECEIPT_VERSION
+                or causal_sha256_json(self.causal_training_data_receipt)
+                != self.causal_training_data_receipt_sha256
+                or not isinstance(self.causal_preflight_receipt, dict)
+                or self.causal_preflight_receipt.get("receipt_version")
+                != PREFLIGHT_RECEIPT_VERSION
+                or causal_sha256_json(self.causal_preflight_receipt)
+                != self.causal_preflight_receipt_sha256
+                or self.causal_preflight_receipt.get("causal_route_id")
+                != self.production_causal_route_id
+                or self.causal_preflight_receipt.get("training_data_receipt_sha256")
+                != self.causal_training_data_receipt_sha256
+                or not isinstance(self.causal_checkpoint_receipt_base, dict)
+                or self.causal_checkpoint_receipt_base.get("receipt_version")
+                != "contact-asym25-checkpoint-training-receipt/v5"
+            ):
+                raise ValueError("causal production preflight/training-data/base receipt differs")
+            from world_action_model.contact_causal_preflight import (
+                validate_preflight_receipt_v2,
+                validate_training_data_receipt_v2,
+            )
+
+            validate_training_data_receipt_v2(self.causal_training_data_receipt)
+            validate_preflight_receipt_v2(
+                self.causal_preflight_receipt,
+                training_data_receipt=self.causal_training_data_receipt,
+            )
+            validate_training_receipt_v5(self.causal_checkpoint_receipt_base)
+            base = self.causal_checkpoint_receipt_base
+            if (
+                base["checkpoint_step"] != 0
+                or base["matrix_id"] != self.production_matrix_id
+                or base["route"]["causal_route_id"]
+                != self.production_causal_route_id
+                or base["seed"] != self.causal_training_data_receipt["split_seed"]
+                or base["precursor"] != self.causal_precursor_binding
+                or base["evidence"]["production_preflight_receipt_sha256"]
+                != self.causal_preflight_receipt_sha256
+                or base["evidence"]["training_data_receipt_sha256"]
+                != self.causal_training_data_receipt_sha256
+                or base["stable_contract"]["dataset_tree_sha256"]
+                != self.causal_training_data_receipt["dataset_tree_sha256"]
+                or base["stable_contract"]["hardware_contract_sha256"]
+                != self.causal_training_data_receipt["hardware_contract_sha256"]
+                or base["stable_contract"]["train_only_norm_sha256"]
+                != self.causal_training_data_receipt["train_only_norm_sha256"]
+                or base["topology"]
+                != {
+                    "world_size": self.num_processes,
+                    "rank_set": list(range(self.num_processes)),
+                }
+            ):
+                raise ValueError("causal checkpoint v5 base binding differs")
+        elif any(value is not None for value in causal_values):
+            raise ValueError("causal checkpoint bindings require the causal production matrix")
         if self.current_training_data_receipt is not None:
             if not isinstance(self.current_training_data_receipt, dict):
                 raise ValueError("current training-data receipt must be a JSON object")
@@ -545,7 +683,16 @@ class CasualWATrainerMoT(Trainer):
         if matched_control_config is not None and bool(
             matched_control_config.get("enabled", False)
         ):
-            self.matched_control_collector = MatchedControlCollector(
+            collector_class = MatchedControlCollector
+            if matched_control_config.get("collector_version") == (
+                "matched-control-hash-collector/v3"
+            ):
+                from world_action_model.contact_causal_matched_control import (
+                    CausalMatchedControlCollector,
+                )
+
+                collector_class = CausalMatchedControlCollector
+            self.matched_control_collector = collector_class(
                 matched_control_config,
                 rank=self.process_index,
                 world_size=self.num_processes,
@@ -566,11 +713,17 @@ class CasualWATrainerMoT(Trainer):
             )
         }:
             if self.contact_condition_mode != "predicted":
-                if self.contact_causal_route != ContactCausalRoute.HARD_ST_SEMANTIC.value:
+                if self.production_matrix_id or self.contact_causal_route != ContactCausalRoute.HARD_ST_SEMANTIC.value:
                     raise ValueError(
                         f"route {self.contact_causal_route!r} rejects oracle conditioning"
                     )
-            if not self.require_contact_targets or not self.require_positive_contact_supervision:
+            if self.production_matrix_id:
+                if not self.require_contact_targets or self.require_positive_contact_supervision:
+                    raise ValueError(
+                        f"route {self.contact_causal_route!r} requires zero-safe required "
+                        "targets without a per-batch positive-supervision requirement"
+                    )
+            elif not self.require_contact_targets or not self.require_positive_contact_supervision:
                 raise ValueError(
                     f"route {self.contact_causal_route!r} requires a positive grouped "
                     "contact auxiliary loss and positively masked required targets"
@@ -591,7 +744,7 @@ class CasualWATrainerMoT(Trainer):
             ),
             "effect_or_counterfactual_physics_loss": False,
             "contact_supervision_rule_version": (
-                CONTACT_GROUPED_SUPERVISION_RULE_VERSION
+                self.contact_supervision_rule_version
                 if self.contact_schema_version == SEGMENT_SCHEMA_VERSION
                 else None
             ),
@@ -654,6 +807,25 @@ class CasualWATrainerMoT(Trainer):
                 self._production_initial_weights_snapshot
             )
         transformer.to(self.device)
+        self.ego_contact_precursor_parameter_partition = None
+        if self.ego_contact_precursor_objective is not None:
+            from world_action_model.contact_ego_causal_precursor import (
+                precursor_objective_contract,
+                freeze_precursor_action_path,
+            )
+
+            if not isinstance(self.ego_contact_precursor_objective, dict):
+                raise ValueError("Ego precursor objective must be a canonical mapping")
+            fixed_step = self.ego_contact_precursor_objective.get("fixed_save_step")
+            if self.ego_contact_precursor_objective != precursor_objective_contract(
+                fixed_save_step=fixed_step
+            ):
+                raise ValueError("Ego precursor objective contract differs")
+            if not bool(getattr(transformer, "contact_planner_precursor", False)):
+                raise ValueError("Ego precursor requires model-side precursor planner mode")
+            self.ego_contact_precursor_parameter_partition = (
+                freeze_precursor_action_path(transformer)
+            )
         if model_config.get("enable_gradient_checkpointing", True):
             transformer.enable_gradient_checkpointing()
 
@@ -661,6 +833,22 @@ class CasualWATrainerMoT(Trainer):
         checkpoint = model_config.get("checkpoint", None)
         strict = model_config.get("strict", True)
         self.load_checkpoint(checkpoint, list(model.values()), strict=strict)
+        if self.production_matrix_id:
+            from world_action_model.contact_causal_production import (
+                model_parameter_and_buffer_digests,
+            )
+
+            parameter_sha256, _ = model_parameter_and_buffer_digests(transformer)
+            self._causal_initial_parameter_sha256 = parameter_sha256
+            if (
+                parameter_sha256
+                != self.causal_precursor_binding.get("parameter_tensor_sha256")
+                or parameter_sha256
+                != self.causal_checkpoint_receipt_base.get(
+                    "parameter_topology", {}
+                ).get("step0_parameter_tensor_sha256")
+            ):
+                raise ValueError("causal Stage2 initial tensors differ from the precursor")
         model = ModuleDict(model)
         model.train()
         return model
@@ -670,12 +858,18 @@ class CasualWATrainerMoT(Trainer):
         return Path(self.model_dir) / f"checkpoint_epoch_{epoch}_step_{step}"
 
     def _write_production_checkpoint_receipt(self, output_dir: Path, step: int) -> None:
-        if self.current_training_data_receipt is None or not self.is_main_process:
+        if (
+            self.current_training_data_receipt is None
+            and not self.production_matrix_id
+        ) or not self.is_main_process:
             return
         if not output_dir.is_dir():
             raise FileNotFoundError(
                 f"production checkpoint directory was not written: {output_dir}"
             )
+        if self.production_matrix_id:
+            self._write_causal_checkpoint_receipt(output_dir, step)
+            return
         from world_action_model.contact_asym25_checkpoint_acceptance import (
             CROSS_SEED_SCIENTIFIC_CONTRACT,
             build_bundle_manifest,
@@ -790,8 +984,58 @@ class CasualWATrainerMoT(Trainer):
             "bundle_sha256"
         ]
 
+    def _write_causal_checkpoint_receipt(self, output_dir: Path, step: int) -> None:
+        from world_action_model.contact_asym25_checkpoint_acceptance import (
+            build_bundle_manifest,
+            write_json_exclusive,
+        )
+        from world_action_model.contact_causal_production import (
+            build_checkpoint_training_receipt_v5,
+            model_parameter_and_buffer_digests,
+            write_canonical_json_exclusive,
+        )
+        from world_action_model.verified_io import hash_verified_regular_file
+
+        artifact_dir = output_dir / "transformer"
+        if not artifact_dir.is_dir():
+            raise FileNotFoundError("causal transformer checkpoint was not written")
+        bundle_manifest = build_bundle_manifest(artifact_dir)
+        write_json_exclusive(
+            artifact_dir / "checkpoint_bundle_manifest.json", bundle_manifest
+        )
+        weight_path = artifact_dir / bundle_manifest["weight_file"]
+        config_sha256, _ = hash_verified_regular_file(artifact_dir / "config.json")
+        unwrapped = self.accelerator.unwrap_model(self.models[0])
+        transformer = unwrapped["transformer"]
+        parameter_sha256, buffer_sha256 = model_parameter_and_buffer_digests(
+            transformer
+        )
+        if step == 0:
+            parent_sha256 = self.causal_precursor_binding["parameter_tensor_sha256"]
+        else:
+            prior = self.production_checkpoint_steps[
+                self.production_checkpoint_steps.index(step) - 1
+            ]
+            if prior not in self._causal_checkpoint_weight_sha256:
+                raise ValueError("causal checkpoint parent was not emitted in this run")
+            parent_sha256 = self._causal_checkpoint_weight_sha256[prior]
+        receipt = build_checkpoint_training_receipt_v5(
+            base_receipt=self.causal_checkpoint_receipt_base,
+            checkpoint_step=step,
+            checkpoint_file_path=weight_path,
+            parameter_tensor_sha256=parameter_sha256,
+            buffer_tensor_sha256=buffer_sha256,
+            config_sha256=config_sha256,
+            whole_bundle_sha256=bundle_manifest["bundle_sha256"],
+            parent_checkpoint_weight_sha256=parent_sha256,
+        )
+        write_canonical_json_exclusive(
+            artifact_dir / "checkpoint_training_receipt.json", receipt
+        )
+        self._causal_checkpoint_weight_sha256[step] = parameter_sha256
+
     def _save_production_initial_checkpoint(self) -> None:
-        if self.current_training_data_receipt is None:
+        if self.current_training_data_receipt is None and not self.production_matrix_id:
             return
         if self.cur_step != 0:
             raise ValueError("production step-0 checkpoint must precede optimization")
@@ -811,7 +1055,7 @@ class CasualWATrainerMoT(Trainer):
         self.accelerator.wait_for_everyone()
 
     def train(self) -> None:
-        if self.current_training_data_receipt is not None:
+        if self.current_training_data_receipt is not None or self.production_matrix_id:
             self._save_production_initial_checkpoint()
         super().train()
 
@@ -833,7 +1077,7 @@ class CasualWATrainerMoT(Trainer):
             self.cur_step % checkpoint_interval == 0 or self.cur_step == self.max_steps
         )
         is_production_evidence_step = (
-            self.current_training_data_receipt is not None
+            (self.current_training_data_receipt is not None or self.production_matrix_id)
             and self.cur_step in self.production_checkpoint_steps
         )
         if should_save and is_production_evidence_step:
@@ -846,6 +1090,8 @@ class CasualWATrainerMoT(Trainer):
             self.accelerator.wait_for_everyone()
 
     def forward_step(self, batch_dict):
+        if self.ego_contact_precursor_objective is not None:
+            return self._forward_ego_contact_precursor_step(batch_dict)
         transformer = functools.partial(self.model, "transformer")
         images = batch_dict["images"]
         bs = images.shape[0]
@@ -957,6 +1203,14 @@ class CasualWATrainerMoT(Trainer):
         contact_target = batch_dict.get("contact_target")
         contact_condition = batch_dict.get("contact_condition")
         contact_condition_mask = batch_dict.get("contact_condition_mask")
+        if self.contact_supervision_rule_version == CONTACT_GROUPED_SUPERVISION_ZERO_SAFE_VERSION:
+            supervision_receipt = validate_zero_safe_contact_supervision(
+                contact_target,
+                batch_dict.get("contact_loss_mask"),
+                batch_dict.get("contact_confidence"),
+            )
+            if supervision_receipt["zero_supervision"]:
+                self._last_zero_safe_supervision_receipt = supervision_receipt
         if self.require_positive_contact_supervision:
             validate_positive_contact_supervision(
                 contact_target,
@@ -1035,11 +1289,24 @@ class CasualWATrainerMoT(Trainer):
         }
         if contact_pred is not None and contact_target is not None:
             if self.contact_schema_version == SEGMENT_SCHEMA_VERSION:
-                contact_loss = grouped_contact_segment_loss(
-                    contact_pred,
-                    contact_target,
-                    mask=batch_dict.get("contact_loss_mask"),
-                    confidence=batch_dict.get("contact_confidence"),
+                zero_safe = (
+                    self.contact_supervision_rule_version
+                    == CONTACT_GROUPED_SUPERVISION_ZERO_SAFE_VERSION
+                    and validate_zero_safe_contact_supervision(
+                        contact_target,
+                        batch_dict.get("contact_loss_mask"),
+                        batch_dict.get("contact_confidence"),
+                    )["zero_supervision"]
+                )
+                contact_loss = (
+                    canonical_zero_contact_loss(contact_pred)
+                    if zero_safe
+                    else grouped_contact_segment_loss(
+                        contact_pred,
+                        contact_target,
+                        mask=batch_dict.get("contact_loss_mask"),
+                        confidence=batch_dict.get("contact_confidence"),
+                    )
                 )
             else:
                 contact_loss = masked_contact_loss(
@@ -1054,6 +1321,131 @@ class CasualWATrainerMoT(Trainer):
             missing = "contact_target" if contact_target is None else "contact prediction head"
             raise ValueError(f"required {missing} is missing")
         return losses
+
+    def _forward_ego_contact_precursor_step(self, batch_dict):
+        """Visual/contact-only Stage1 objective with no action scientific I/O."""
+
+        transformer = functools.partial(self.model, "transformer")
+        forbidden = {"contact_condition", "contact_condition_mask"}.intersection(
+            batch_dict
+        )
+        if forbidden:
+            raise ValueError(
+                f"route-neutral Ego precursor rejects model-side contact inputs: {sorted(forbidden)}"
+            )
+        images = batch_dict["images"]
+        ref_images = batch_dict["ref_images"]
+        prompt_embeds = batch_dict["prompt_embeds"].to(self.dtype)
+        state = batch_dict["state"]
+        embodiment_id = batch_dict["embodiment_id"]
+        contact_target = batch_dict.get("contact_target")
+        contact_mask = batch_dict.get("contact_loss_mask")
+        contact_confidence = batch_dict.get("contact_confidence")
+        supervision = validate_zero_safe_contact_supervision(
+            contact_target, contact_mask, contact_confidence
+        )
+        bs = images.shape[0]
+        visual_timestep, visual_sigma = self.get_timestep_and_sigma(
+            bs, images.ndim, self.visual_flow_shift
+        )
+        if self.state_repeats > 1:
+            state = state.repeat(1, self.state_repeats, 1)
+        visual_latents = self.forward_vae(images)
+        visual_noise = torch.randn_like(visual_latents)
+        visual_target = visual_noise - visual_latents
+        noisy_latents = visual_noise * visual_sigma + visual_latents * (1 - visual_sigma)
+        if not self.expand_timesteps:
+            ref_latents_full = self.forward_vae(ref_images)
+            num_frames = images.shape[1]
+            latent_height = ref_latents_full.shape[-2]
+            latent_width = ref_latents_full.shape[-1]
+            mask_lat_size = torch.ones(
+                bs, 1, num_frames, latent_height, latent_width
+            )
+            mask_lat_size[:, :, list(range(1, num_frames))] = 0
+            first_frame_mask = mask_lat_size[:, :, 0:1]
+            first_frame_mask = torch.repeat_interleave(
+                first_frame_mask, dim=2, repeats=self.vae_scale_factor_temporal
+            )
+            mask_lat_size = torch.concat(
+                [first_frame_mask, mask_lat_size[:, :, 1:, :]], dim=2
+            )
+            mask_lat_size = mask_lat_size.view(
+                bs,
+                -1,
+                self.vae_scale_factor_temporal,
+                latent_height,
+                latent_width,
+            ).transpose(1, 2).to(ref_latents_full.device)
+            condition = torch.concat([mask_lat_size, ref_latents_full], dim=1)
+            insert_noisy_latents = torch.concat([noisy_latents, condition], dim=1)
+        else:
+            num_latent_frames = visual_latents.shape[2]
+            latent_height = visual_latents.shape[-2]
+            latent_width = visual_latents.shape[-1]
+            ref_latents_full = self.forward_vae(ref_images[:, :1])
+            first_frame_mask = torch.ones(
+                bs,
+                1,
+                num_latent_frames,
+                latent_height,
+                latent_width,
+                dtype=visual_latents.dtype,
+                device=visual_latents.device,
+            )
+            first_frame_mask[:, :, 0] = 0
+            insert_noisy_latents = (
+                (1 - first_frame_mask) * ref_latents_full
+                + first_frame_mask * noisy_latents
+            )
+        insert_noisy_latents = insert_noisy_latents.to(self.dtype)
+        state = state.to(self.dtype)
+        ref_latents = insert_noisy_latents[:, :, :1]
+        noisy_latents = insert_noisy_latents[:, :, 1:]
+        frame_per_tokens = (
+            first_frame_mask.shape[-1] * first_frame_mask.shape[-2] // 4
+        )
+        num_latent_tokens = frame_per_tokens * first_frame_mask.shape[2]
+        num_clean_latent_tokens = frame_per_tokens
+        timestep = torch.zeros(
+            bs,
+            state.shape[1] + num_latent_tokens,
+            device=noisy_latents.device,
+            dtype=noisy_latents.dtype,
+        )
+        timestep[:, state.shape[1] + num_clean_latent_tokens :] = visual_timestep[
+            :, None
+        ]
+        visual_pred, action_pred, contact_pred = transformer(
+            ref_latents=ref_latents,
+            noisy_latents=noisy_latents,
+            timestep=timestep,
+            encoder_hidden_states=prompt_embeds,
+            return_dict=False,
+            state=state,
+            embodiment_id=embodiment_id,
+            contact_precursor=True,
+        )
+        if action_pred is not None:
+            raise RuntimeError("route-neutral precursor unexpectedly produced an action output")
+        visual_loss = (
+            (visual_pred.float() - visual_target.float()) * first_frame_mask
+        ).pow(2).mean()
+        contact_loss = (
+            canonical_zero_contact_loss(contact_pred)
+            if supervision["zero_supervision"]
+            else grouped_contact_segment_loss(
+                contact_pred,
+                contact_target,
+                mask=contact_mask,
+                confidence=contact_confidence,
+            )
+        )
+        self._last_zero_safe_supervision_receipt = supervision
+        return {
+            "visual_loss": visual_loss,
+            "contact_loss": self.contact_loss_weight * contact_loss,
+        }
 
     def forward_vae(self, images):
         images = images.to(self.vae.dtype)

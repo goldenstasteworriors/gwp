@@ -119,3 +119,14 @@ matched-control collector，不开放 5B/server training。
 
 `configs/contact_transport_ablation_matrix.json` 记录 route/codec/hash 契约，并明确新路由
 状态为 `implemented_cpu_route_unadmitted`；production runner exact set保持不变。
+
+## op42 production namespace
+
+op38 remains spec-only and byte/behavior compatible. op42 does not change this
+route registry or its CLI. It adds a separate
+`contact-causal-production-matrix/v1` admission namespace with exact routes
+`aux_only_direct_q12 / equal_bit_unstructured_hard_st / hard_st_semantic`.
+The v1 matrix, v2 zero-safe supervision, v3 Robot gate/collector, v5 training
+receipt, and CPU acceptance are documented in
+`docs/contact_causal_production_matrix.md`. A passing op38 audit remains
+non-admission evidence and cannot substitute for a Robot v3 gate.

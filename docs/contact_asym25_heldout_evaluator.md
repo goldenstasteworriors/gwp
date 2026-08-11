@@ -210,3 +210,23 @@ conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.
   --result evidence/contact_asym25/seed8888/hard_detached/contact_asym25_heldout_metrics.json \
   --output evidence/contact_asym25/production_matrix.json
 ```
+
+## Causal-main evaluator v2
+
+The commands and v1/v2/v4 schemas above continue to describe only the old
+mechanism matrix. The causal-main chain uses checkpoint training receipt v5,
+independent acceptance v3, checkpoint manifest v3, evaluator v2, result v3,
+and aggregate v5. Its exact matrix is 3 seeds × 3 causal routes × steps
+0/100/200, so the aggregate must re-open exactly 27 distinct independent
+acceptances and reject any reused training/reviewer identity or nonce.
+
+Contact field metrics for all three routes come from the shared semantic
+auxiliary logits. `aux_only_direct_q12` has packet kind
+`none_direct_reference` and no packet hash; the equal-bit route reports
+unstructured codec metrics only; the semantic route reports grammar and field
+metrics. Ground-truth contact targets/masks are never model inputs, and oracle
+is excluded from predicted-route results. Step 200 is the preregistered primary
+checkpoint; held-out best-step selection is forbidden. The new validators and
+CPU-only synthetic acceptance command are documented in
+`docs/contact_causal_production_matrix.md`. No real evaluator evidence is
+created by op42.

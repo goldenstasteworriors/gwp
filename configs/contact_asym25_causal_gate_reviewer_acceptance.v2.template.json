@@ -1,0 +1,23 @@
+{
+  "acceptance_version": "contact-asym25-gate-reviewer-acceptance/v2",
+  "status": "not_reviewed",
+  "accepted": false,
+  "matrix_schema_version": null,
+  "matrix_id": null,
+  "route_set": null,
+  "reviewer_identity": null,
+  "reviewer_attestation_nonce": null,
+  "acceptance_run_id": null,
+  "acceptance_run_nonce": null,
+  "evidence_valid_until_utc": null,
+  "reviewed_gate_contract_sha256": null,
+  "current_head_source_tree_sha256": null,
+  "hardware_contract_sha256": null,
+  "dataset_tree_sha256": null,
+  "train_only_norm_sha256": null,
+  "sidecar_bundle_sha256": null,
+  "precursor_receipt_bytes_sha256": null,
+  "matched_control_report_sha256": null,
+  "oracle_sufficiency_receipt_sha256": null,
+  "oracle_is_main_matrix_route": false
+}

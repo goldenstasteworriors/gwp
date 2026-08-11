@@ -1,0 +1,17 @@
+{
+  "aggregate_version": "contact-asym25-heldout-aggregate/v5",
+  "matrix_schema_version": null,
+  "matrix_id": null,
+  "seeds": null,
+  "causal_routes": null,
+  "checkpoint_steps": null,
+  "checkpoint_acceptance_count": null,
+  "result_sha256_by_seed_route": null,
+  "matrix_contract": null,
+  "primary_checkpoint_step": null,
+  "oracle_included": false,
+  "production_data_admission": false,
+  "allow_5b_training": false,
+  "allow_server_training": false,
+  "benefit_claimed": false
+}

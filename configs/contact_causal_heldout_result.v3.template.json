@@ -1,0 +1,19 @@
+{
+  "result_version": "contact-asym25-heldout-result/v3",
+  "evaluator_version": "contact-asym25-heldout-evaluator/v2",
+  "matrix_schema_version": null,
+  "matrix_id": null,
+  "seed": null,
+  "causal_route_id": null,
+  "checkpoint_manifest_sha256": null,
+  "precursor_receipt_bytes_sha256": null,
+  "fixed_window_manifest_sha256": null,
+  "action_metrics_contract_sha256": null,
+  "contact_aux_metrics_contract_sha256": null,
+  "checkpoint_steps": null,
+  "primary_checkpoint_step": null,
+  "best_checkpoint_selection_allowed": false,
+  "checkpoint_outputs": null,
+  "oracle_used": false,
+  "benefit_claimed": false
+}

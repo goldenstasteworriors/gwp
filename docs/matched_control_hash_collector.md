@@ -117,3 +117,22 @@ The Q0, capacity-control, auxiliary-only, raw-latent, shuffled, delayed, and
 oracle rows remain without a matched-control runner. The exact implemented
 runner set is `soft_semantic`, `hard_st`, and `hard_detached`; label and
 asymmetric25 scientific gates remain closed.
+
+## Causal-main collector v3
+
+`world_action_model/contact_causal_matched_control.py` is an independent v3
+collector and does not enlarge the v2 exact set above. Its exact route set is
+`aux_only_direct_q12 / equal_bit_unstructured_hard_st / hard_st_semantic`.
+The config validator rejects unknown keys, legacy aliases, boolean seeds,
+missing optimizer/scheduler state, reused run identity/nonce, `/tmp` outputs,
+and any self-admission flag.
+
+In addition to the old batch/timestep/noise evidence, v3 hashes contact
+targets, masks, confidence and grouped eligible counts; action targets and
+masks; T5 input; pre-forward RNG; initial parameter tensors; optimizer groups
+and step-0 state; scheduler step-0 state; and byte-identical precursor receipt.
+The reducer compares the complete stable contract, so an unlisted future field
+must match by default. Route-local fields remain explicit and the three route
+run IDs/nonces must be globally distinct. See
+`docs/contact_causal_production_matrix.md` for the versioned CLI and current
+No-Go boundary.

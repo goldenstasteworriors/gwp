@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from diffusers.configuration_utils import ConfigMixin, register_to_config
+from diffusers.configuration_utils import ConfigMixin, FrozenDict, register_to_config
 from diffusers.loaders import FromOriginalModelMixin, PeftAdapterMixin
 from diffusers.models.attention import AttentionMixin, AttentionModuleMixin
 from diffusers.models.attention_dispatch import dispatch_attention_fn
@@ -629,6 +629,8 @@ class CasualWorldActionTransformer_MoT(
         contact_semantic_transport_mode: str = "soft",
         contact_time_bins: int = 16,
         contact_causal_route: Optional[str] = None,
+        contact_planner_precursor: bool = False,
+        production_matrix_id: Optional[str] = None,
         current_training_data_receipt: Optional[Dict[str, Any]] = None,
         current_training_data_receipt_sha256: Optional[str] = None,
         production_checkpoint_steps: Optional[Tuple[int, ...]] = None,
@@ -712,6 +714,28 @@ class CasualWorldActionTransformer_MoT(
         self.contact_semantic_bottleneck = bool(contact_semantic_bottleneck)
         self.contact_semantic_transport_mode = str(contact_semantic_transport_mode)
         self.contact_time_bins = int(contact_time_bins)
+        self.contact_planner_precursor = bool(contact_planner_precursor)
+        self.production_matrix_id = str(production_matrix_id or "")
+        if self.production_matrix_id and self.production_matrix_id != (
+            "contact-asym25-causal-main-q12-b16-stage2/v1"
+        ):
+            raise ValueError("unsupported contact causal production matrix ID")
+        self.production_causal_matrix = bool(self.production_matrix_id)
+        if not self.contact_planner_precursor and not self.production_matrix_id:
+            # Keep historical Ego v6/op38 saved configs free of op42-only
+            # default keys. New precursor/matrix runs retain both explicit
+            # fields in their checkpoint config.
+            legacy_config = dict(self._internal_dict)
+            legacy_config.pop("contact_planner_precursor", None)
+            legacy_config.pop("production_matrix_id", None)
+            defaults = legacy_config.get("_use_default_values")
+            if isinstance(defaults, list):
+                legacy_config["_use_default_values"] = [
+                    name
+                    for name in defaults
+                    if name not in {"contact_planner_precursor", "production_matrix_id"}
+                ]
+            self._internal_dict = FrozenDict(legacy_config)
         self.contact_causal_route = resolve_contact_causal_route(
             contact_causal_route,
             contact_semantic_bottleneck=self.contact_semantic_bottleneck,
@@ -783,7 +807,7 @@ class CasualWorldActionTransformer_MoT(
         self.contact_planner_enabled = self.contact_semantic_bottleneck or (
             self.contact_causal_route_explicit
             and route_uses_standalone_planner(self.contact_causal_route)
-        )
+        ) or self.contact_planner_precursor
         self.contact_action_uses_packet = self.contact_semantic_bottleneck or (
             self.contact_causal_route_explicit
             and route_action_uses_packet(self.contact_causal_route)
@@ -1366,7 +1390,7 @@ class CasualWorldActionTransformer_MoT(
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Return auxiliary logits and the sole optional action-visible packet."""
 
-        if route_rejects_oracle(self.contact_causal_route) and (
+        if (self.production_causal_matrix or route_rejects_oracle(self.contact_causal_route)) and (
             contact_condition is not None or contact_condition_mask is not None
         ):
             raise ValueError(
@@ -1703,7 +1727,12 @@ class CasualWorldActionTransformer_MoT(
     def forward(self, *args, **kwargs):
         action_only = kwargs.pop("action_only", False)
         no_video_tokens = kwargs.pop("no_video_tokens", False)
+        contact_precursor = kwargs.pop("contact_precursor", False)
         if self.training:
+            if contact_precursor:
+                if not self.contact_planner_precursor:
+                    raise RuntimeError("contact precursor forward requires explicit precursor config")
+                return self._forward_train_contact_precursor(*args, **kwargs)
             if action_only:
                 if no_video_tokens:
                     return self._forward_train_action_only_no_video(*args, **kwargs)
@@ -1712,6 +1741,62 @@ class CasualWorldActionTransformer_MoT(
         if action_only:
             return self._forward_inference_action_only(*args, **kwargs)
         return self._forward_inference(*args, **kwargs)
+
+    def _forward_train_contact_precursor(
+        self,
+        noisy_latents: torch.Tensor = None,
+        ref_latents: torch.Tensor = None,
+        timestep: torch.LongTensor = None,
+        encoder_hidden_states: torch.Tensor = None,
+        encoder_hidden_states_image: Optional[torch.Tensor] = None,
+        return_dict: bool = False,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
+        state: Optional[torch.Tensor] = None,
+        embodiment_id: Optional[torch.Tensor] = None,
+        contact_condition: Optional[torch.Tensor] = None,
+        contact_condition_mask: Optional[torch.Tensor] = None,
+    ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
+        """Train visual WAM + contact planner without constructing action tokens.
+
+        Contact targets and masks remain trainer-only loss inputs.  This method
+        rejects every model-side oracle input and never calls the action
+        encoder, action decoder, or contact-condition encoder.
+        """
+
+        if contact_condition is not None or contact_condition_mask is not None:
+            raise ValueError("route-neutral precursor rejects oracle/model-side contact inputs")
+        if encoder_hidden_states_image is not None:
+            raise ValueError("route-neutral precursor rejects an extra image condition path")
+        visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, grid_info = (
+            self.encode_visual_tokens(ref_latents, noisy_latents)
+        )
+        contact_logits = self._plan_contact_logits(
+            state,
+            visual_hidden_states[:, :num_ref_tokens],
+            encoder_hidden_states,
+            embodiment_id=embodiment_id,
+        )
+        state_states = self._encode_state_tokens(state, embodiment_id=embodiment_id)
+        action_rotary_emb = self.action_rope(state_states)
+        return self._forward_tokens(
+            action_hidden_states=state_states,
+            visual_hidden_states=visual_hidden_states,
+            action_rotary_emb=action_rotary_emb,
+            visual_rotary_emb=visual_rotary_emb,
+            timestep=timestep,
+            encoder_hidden_states=encoder_hidden_states,
+            num_state_tokens=state_states.shape[1],
+            num_contact_tokens=0,
+            num_ref_tokens=num_ref_tokens,
+            encoder_hidden_states_image=None,
+            return_dict=return_dict,
+            attention_kwargs=attention_kwargs,
+            output_action=False,
+            output_visual=True,
+            visual_grid_info=grid_info,
+            embodiment_id=embodiment_id,
+            contact_pred_override=contact_logits,
+        )
 
     def _forward_tokens(
         self,
@@ -2536,7 +2621,7 @@ class CasualWorldActionTransformer_MoT(
             raise ValueError(
                 "strict contact route rejects nonempty encoder_hidden_states_image"
             )
-        if route_rejects_oracle(self.contact_causal_route) and (
+        if (self.production_causal_matrix or route_rejects_oracle(self.contact_causal_route)) and (
             contact_condition is not None or contact_condition_mask is not None
         ):
             raise ValueError(

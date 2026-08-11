@@ -1,0 +1,16 @@
+{
+  "evaluator_version": "contact-asym25-heldout-evaluator/v2",
+  "matrix_id": null,
+  "causal_route_id": null,
+  "contact_aux_prediction_source": null,
+  "contact_target_model_input": false,
+  "contact_condition_mask_model_input": false,
+  "oracle_used": false,
+  "packet_kind": null,
+  "packet_present": false,
+  "packet_sha256": null,
+  "semantic_aux_logits_sha256": null,
+  "action_prediction_sha256": null,
+  "action_metrics_contract_sha256": null,
+  "packet_metrics": null
+}

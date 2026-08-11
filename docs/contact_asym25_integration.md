@@ -163,3 +163,22 @@ The fail-closed Ego entry and its separate 20 Hz fingerprint/norm contract are
 documented in `docs/ego_discrete_contact_stage1.md`. It deliberately requires
 no robot hardware manifest; attaching an Ego sidecar to the robot-native stage
 or a robot sidecar to this Ego stage fails clock/dataset identity checks.
+
+## Causal-main Robot v3 path
+
+The v2 mechanism gate and commands above retain their exact historical
+meaning. op42 adds an independent v3 path at
+`configs/giga_world_policy_0_5_sonic_g1_asymmetric25_contact_causal_matrix_finetune.py`.
+It accepts only matrix
+`contact-asym25-causal-main-q12-b16-stage2/v1` and the exact three causal
+routes; it does not infer a route from legacy transport booleans or accept
+`hard_st` as an alias.
+
+The bootstrap requires canonical25 data captured on the real target hardware,
+human-adjudicated robot-native contact labels, dataset-level positive contact
+coverage, train-only normalization, route-neutral precursor bytes, current
+HEAD/source tree, v3 collector evidence, v2 preflight/data receipts, and a
+reviewed v5 checkpoint-receipt base. Every checked-in v3/v2 template remains
+false/null. No true gate, reviewer acceptance, production data admission, or
+server/5B authorization is included. The full evidence chain and CPU-only
+implementation audit are in `docs/contact_causal_production_matrix.md`.
