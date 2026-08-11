@@ -1,10 +1,13 @@
 {
   "schema_version": "contact_transport_ablation_v2",
   "canonical_commit": "913811d",
+  "op38_spec_design_baseline": "d9234a6f5566c6d22f0ca8ca5d39988de1fe0e88",
   "seeds": [6666, 7777, 8888],
   "control_capture": {
     "implementation_status": "implemented_opt_in_rank_local_jsonl_offline_compare",
     "implemented_runner_variants": ["soft_semantic", "hard_st", "hard_detached"],
+    "implemented_cpu_route_unadmitted": ["aux_only_direct_q12", "equal_bit_unstructured_hard_st", "hard_st_semantic"],
+    "production_runner_set_unchanged_by_op38": true,
     "runner_set_policy": "exact_set_no_missing_extra_or_alias_variants",
     "collector_code": "world_action_model/matched_control_hashes.py",
     "runner_config": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
@@ -29,6 +32,29 @@
     "paired_hash_collector_implemented": true,
     "allow_5b_training": false,
     "allow_server_training": false
+  },
+  "op38_route_contract": {
+    "contract_version": "contact_causal_route_contract_v1",
+    "contract_code": "world_action_model/contact_route_contract.py",
+    "audit_code": "world_action_model/contact_route_audit.py",
+    "audit_cli": "scripts/audit_contact_route_contract.py",
+    "spec_only_config": "configs/giga_world_policy_0_5_sonic_g1_contact_causal_controls.py",
+    "equal_bit_codec_version": "contact_equal_bit_unstructured_v1",
+    "equal_bit_mixing_matrix_source": "world_action_model/contact_transition_schema.py:EQUAL_BIT_MIXING_MATRIX",
+    "equal_bit_mixing_shape": [16, 22],
+    "equal_bit_mixing_dtype": "int8",
+    "equal_bit_mixing_layout": "row_major_int8_twos_complement",
+    "equal_bit_mixing_matrix_sha256": "9de3c743cbd3b5ccfda9df21ea6b3d430560343aad9842d862c0e2f5b00f009f",
+    "equal_bit_bit_order": "little_endian_lsb_first",
+    "equal_bit_valid_id_range": [0, 48672],
+    "equal_bit_invalid_id_range": [48673, 65535],
+    "equal_bit_invalid_canonical_id": 0,
+    "equal_bit_states_per_query": 48673,
+    "equal_bit_action_visible_width": 22,
+    "equal_bit_action_visible_bits": 16,
+    "equal_bit_positive_zero_padding": 6,
+    "production_admitted": false,
+    "benefit_claimed": false
   },
   "variants": [
     {
@@ -55,16 +81,37 @@
       "route_definition": "Run the same Q=12 planner modules for parameter/FLOP control, then discard every planner output. Contact queries must be completely absent from the action context; action tokens retain the original direct reference route. The present model cannot express this route with config alone."
     },
     {
-      "id": "aux_only",
-      "implementation_status": "spec_only_requires_action_invisible_aux_head",
-      "config_source": "planned derivative of configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
+      "id": "aux_only_direct_q12",
+      "implementation_status": "implemented_cpu_route_unadmitted",
+      "config_source": "configs/giga_world_policy_0_5_sonic_g1_contact_causal_controls.py",
       "config_overrides": {
         "models.transformer.num_contact_tokens": 12,
         "models.transformer.contact_bottleneck": false,
+        "models.transformer.contact_semantic_bottleneck": false,
+        "models.transformer.contact_causal_route": "aux_only_direct_q12",
         "models.contact_loss_weight": 0.25,
         "models.require_contact_targets": true
       },
-      "route_definition": "The Q=12 contact planner and grouped loss run, but planner hidden/logits/semantics are all invisible to action; action retains direct reference attention. This decoupled auxiliary-only route is not implemented."
+      "route_definition": "The Q=12 contact planner and grouped loss run, but planner hidden/logits/semantics are all invisible to action and absent from its cache; action retains the original direct reference attention. This matches planner parameters/forward compute, not the action-visible bit capacity."
+    },
+    {
+      "id": "equal_bit_unstructured_hard_st",
+      "implementation_status": "implemented_cpu_route_unadmitted",
+      "config_source": "configs/giga_world_policy_0_5_sonic_g1_contact_causal_controls.py",
+      "config_overrides": {
+        "models.transformer.num_contact_tokens": 12,
+        "models.transformer.contact_bottleneck": true,
+        "models.transformer.contact_semantic_bottleneck": true,
+        "models.transformer.contact_semantic_transport_mode": "hard_st",
+        "models.transformer.contact_time_bins": 16,
+        "models.transformer.contact_causal_route": "equal_bit_unstructured_hard_st",
+        "models.contact_loss_weight": 0.25,
+        "models.contact_condition_mode": "predicted",
+        "models.require_contact_targets": true
+      },
+      "route_definition": "Each query maps 22 raw auxiliary logits through the receipt-bound full-rank 16x22 Rademacher matrix, hard-ST bits, little-endian id decoding, and invalid-id-to-zero canonicalization. Action reads exactly 16 hard bits plus six positive zeros through the shared 22-to-action-width encoder; it cannot read raw logits, planner hidden, GT, oracle, direct reference, or future tokens.",
+      "states_per_query": 48673,
+      "bits_q12": 186.85000894308362
     },
     {
       "id": "raw_latent_routing",
@@ -92,6 +139,8 @@
     },
     {
       "id": "hard_st",
+      "route_contract_id": "hard_st_semantic",
+      "legacy_transport_mapping": "hard_st -> hard_st_semantic",
       "implementation_status": "implemented_transport_and_matched_control_runner_blocked_by_labels_and_asymmetric25_gate",
       "config_source": "configs/giga_world_policy_0_5_sonic_g1_discrete_contact_ablation.py",
       "config_overrides": {
