@@ -40,6 +40,17 @@ def _required_run_identity(name: str) -> str:
     return value
 
 
+def _required_sha256(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ContactAsym25PreflightError(
+            f"production training requires lowercase SHA-256 in {name}"
+        )
+    return value
+
+
 _FIXED_ENV = {
     "GWP_CONTACT_TOKENS": "12",
     "GWP_CONTACT_TARGET_DIM": "22",
@@ -196,6 +207,9 @@ config["models"].update(
         "GWP_CONTACT_EXPERIMENT_FAMILY_ID"
     ),
     production_variant_id=_required_run_identity("GWP_CONTACT_VARIANT_ID"),
+    production_matched_control_receipt_sha256=_required_sha256(
+        "GWP_CONTACT_MATCHED_CONTROL_RECEIPT_SHA256"
+    ),
     production_training_precision="bfloat16",
     production_action_schema_contract=ASYMMETRIC25_ACTION_SCHEMA_CONTRACT,
 )

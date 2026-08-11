@@ -195,6 +195,7 @@ def validate_training_receipt(value: object) -> dict[str, Any]:
             "training_run_nonce",
             "experiment_family_id",
             "variant_id",
+            "matched_control_receipt_sha256",
             "split_seed",
             "training_precision",
             "contact_query_count",
@@ -225,6 +226,7 @@ def validate_training_receipt(value: object) -> dict[str, Any]:
         "current_training_data_receipt_sha256",
         "training_code_receipt_sha256",
         "dataset_source_tree_sha256",
+        "matched_control_receipt_sha256",
     ):
         _require_sha256(receipt[field], field)
     if (

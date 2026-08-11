@@ -295,6 +295,9 @@ class CasualWATrainerMoT(Trainer):
             "production_experiment_family_id"
         )
         self.production_variant_id = model_config.get("production_variant_id")
+        self.production_matched_control_receipt_sha256 = model_config.get(
+            "production_matched_control_receipt_sha256"
+        )
         self.production_training_precision = model_config.get(
             "production_training_precision"
         )
@@ -341,6 +344,19 @@ class CasualWATrainerMoT(Trainer):
                     raise ValueError(f"{name} must contain at least 16 characters")
             if self.production_training_precision != "bfloat16":
                 raise ValueError("production training precision must be bfloat16")
+            if (
+                not isinstance(
+                    self.production_matched_control_receipt_sha256, str
+                )
+                or len(self.production_matched_control_receipt_sha256) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in self.production_matched_control_receipt_sha256
+                )
+            ):
+                raise ValueError(
+                    "production matched-control receipt must be lowercase SHA-256"
+                )
             if not isinstance(self.production_action_schema_contract, dict):
                 raise ValueError("production action schema contract is required")
             source_receipt = self.current_training_data_receipt.get(
@@ -508,6 +524,9 @@ class CasualWATrainerMoT(Trainer):
             "training_run_nonce": self.production_training_run_nonce,
             "experiment_family_id": self.production_experiment_family_id,
             "variant_id": self.production_variant_id,
+            "matched_control_receipt_sha256": (
+                self.production_matched_control_receipt_sha256
+            ),
             "split_seed": current["split_seed"],
             "training_precision": self.production_training_precision,
             "contact_query_count": 12,

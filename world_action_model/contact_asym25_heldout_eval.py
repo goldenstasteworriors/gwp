@@ -2168,7 +2168,7 @@ def validate_three_seed_run_contracts(
 
     if set(evidence_by_seed) != set(EVALUATION_SEEDS):
         raise HeldoutEvaluationError("three-seed evidence matrix is incomplete")
-    run_contracts: dict[int, tuple[str, str, str, str]] = {}
+    run_contracts: dict[int, tuple[str, str, str, str, str]] = {}
     acceptance_hashes: set[str] = set()
     for seed in EVALUATION_SEEDS:
         rows = evidence_by_seed[seed]
@@ -2181,6 +2181,7 @@ def validate_three_seed_run_contracts(
                 receipt.get("experiment_family_id"),
                 receipt.get("variant_id"),
                 receipt.get("heldout_window_manifest_sha256"),
+                receipt.get("matched_control_receipt_sha256"),
             )
             for receipt, _ in rows
         }
@@ -2191,6 +2192,9 @@ def validate_three_seed_run_contracts(
         for _, digest in rows:
             acceptance_hashes.add(_require_sha256(digest, "checkpoint acceptance digest"))
         run_contracts[seed] = next(iter(identities))
+        _require_sha256(
+            run_contracts[seed][4], "matched-control receipt digest"
+        )
     if (
         len({value[0] for value in run_contracts.values()}) != len(EVALUATION_SEEDS)
         or len({value[1] for value in run_contracts.values()}) != 1
@@ -2206,8 +2210,44 @@ def validate_three_seed_run_contracts(
         "training_run_nonces_by_seed": {
             str(seed): run_contracts[seed][0] for seed in EVALUATION_SEEDS
         },
+        "matched_control_receipt_sha256_by_seed": {
+            str(seed): run_contracts[seed][4] for seed in EVALUATION_SEEDS
+        },
         "independent_acceptance_sha256": sorted(acceptance_hashes),
     }
+
+
+def validate_matched_variant_run_contracts(
+    receipts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Prove matched variants share controls but are distinct training runs."""
+
+    if len(receipts) < 2:
+        raise HeldoutEvaluationError("matched-variant comparison needs at least two runs")
+    common_fields = (
+        "split_seed",
+        "production_preflight_receipt_sha256",
+        "heldout_window_manifest_sha256",
+        "matched_control_receipt_sha256",
+        "experiment_family_id",
+    )
+    for receipt in receipts:
+        validate_training_receipt(receipt)
+    common = {field: receipts[0][field] for field in common_fields}
+    if any(
+        any(receipt[field] != value for field, value in common.items())
+        for receipt in receipts[1:]
+    ):
+        raise HeldoutEvaluationError(
+            "matched variants differ in seed/window/control/family receipt"
+        )
+    variants = [receipt["variant_id"] for receipt in receipts]
+    nonces = [receipt["training_run_nonce"] for receipt in receipts]
+    if len(set(variants)) != len(variants) or len(set(nonces)) != len(nonces):
+        raise HeldoutEvaluationError(
+            "matched variants require distinct variant IDs and training run nonces"
+        )
+    return {**common, "variant_ids": sorted(variants), "training_run_nonces": sorted(nonces)}
 
 
 def build_current_training_data_receipt(

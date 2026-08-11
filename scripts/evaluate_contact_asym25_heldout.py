@@ -39,6 +39,7 @@ from world_action_model.contact_asym25_heldout_eval import (  # noqa: E402
     score_heldout_window,
     snapshot_artifact_tree,
     validate_three_seed_run_contracts,
+    validate_matched_variant_run_contracts,
     verify_artifact_tree_unchanged,
     write_per_window_csv,
     write_strict_json,
@@ -82,6 +83,14 @@ def _base_parser() -> argparse.ArgumentParser:
     )
     aggregate.add_argument("--output", type=Path, required=True)
     aggregate.add_argument("--overwrite", action="store_true")
+
+    matched = subparsers.add_parser(
+        "check-matched-variants",
+        help="Verify two or more same-seed variants share window/control receipts.",
+    )
+    matched.add_argument("--result", type=Path, action="append", required=True)
+    matched.add_argument("--output", type=Path, required=True)
+    matched.add_argument("--overwrite", action="store_true")
 
     fingerprint = subparsers.add_parser(
         "fingerprint-tree",
@@ -516,6 +525,61 @@ def fingerprint_tree(args: argparse.Namespace) -> None:
     print(json.dumps(receipt, indent=2, sort_keys=True, allow_nan=False))
 
 
+def check_matched_variants(args: argparse.Namespace) -> None:
+    from world_action_model.contact_asym25_checkpoint_acceptance import (
+        strict_json_file,
+    )
+    from world_action_model.contact_asym25_heldout_eval import (
+        load_evaluation_result_bundle,
+    )
+
+    output_path = args.output.expanduser().resolve(strict=False)
+    if output_path == Path("/tmp") or Path("/tmp") in output_path.parents:
+        raise HeldoutEvaluationError("matched-variant reports must not use /tmp")
+    if len(args.result) < 2:
+        raise HeldoutEvaluationError("matched-variant check needs at least two results")
+    bundles = [load_evaluation_result_bundle(path) for path in args.result]
+    representatives = []
+    for bundle in bundles:
+        receipts = []
+        for entry in bundle["checkpoint_manifest"]["checkpoints"]:
+            receipt, _ = strict_json_file(
+                entry["checkpoint_training_receipt_path"],
+                "matched-variant checkpoint training receipt",
+            )
+            receipts.append(receipt)
+        run_identities = {
+            (
+                receipt["training_run_nonce"],
+                receipt["variant_id"],
+                receipt["matched_control_receipt_sha256"],
+            )
+            for receipt in receipts
+        }
+        if len(run_identities) != 1:
+            raise HeldoutEvaluationError(
+                "matched-variant result mixes checkpoint run identities"
+            )
+        representatives.append(receipts[0])
+    contract = validate_matched_variant_run_contracts(representatives)
+    output = {
+        "matched_variant_check_version": "contact-asym25-matched-variant-check/v1",
+        "status": "passed",
+        **contract,
+        "source_reports": [
+            {
+                "path_record_only": str(bundle["path"]),
+                "sha256": bundle["result_sha256"],
+                "variant_id": receipt["variant_id"],
+                "training_run_nonce": receipt["training_run_nonce"],
+            }
+            for bundle, receipt in zip(bundles, representatives, strict=True)
+        ],
+    }
+    digest = write_strict_json(output_path, output, overwrite=args.overwrite)
+    print(json.dumps({"output": str(output_path), "sha256": digest}, sort_keys=True))
+
+
 def main() -> None:
     args = _base_parser().parse_args()
     if args.command == "prepare-windows":
@@ -524,6 +588,8 @@ def main() -> None:
         evaluate(args)
     elif args.command == "aggregate":
         aggregate(args)
+    elif args.command == "check-matched-variants":
+        check_matched_variants(args)
     elif args.command == "fingerprint-tree":
         fingerprint_tree(args)
     else:

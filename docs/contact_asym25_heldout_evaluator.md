@@ -44,6 +44,7 @@ export GWP_CONTACT_HELDOUT_WINDOW_MANIFEST="$PWD/evidence/contact_asym25/windows
 export GWP_CONTACT_TRAINING_RUN_NONCE="REVIEWED_UNIQUE_RUN_NONCE"
 export GWP_CONTACT_EXPERIMENT_FAMILY_ID="CONTACT_ASYM25_FAMILY_2026"
 export GWP_CONTACT_VARIANT_ID="contact_asym25_hard_st"
+export GWP_CONTACT_MATCHED_CONTROL_RECEIPT_SHA256="64_HEX_REVIEWED_CONTROL_RECEIPT"
 ```
 
 Step 0 is saved before optimization. Periodic saving is fixed at 100 steps, so
@@ -135,4 +136,16 @@ conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.
   --result evidence/contact_asym25/eval_seed7777/contact_asym25_heldout_metrics.json \
   --result evidence/contact_asym25/eval_seed8888/contact_asym25_heldout_metrics.json \
   --output evidence/contact_asym25/aggregate_three_seeds.json
+```
+
+For same-seed matched variants, run the separate offline comparison. It
+requires the same preflight, fixed-window, matched-control and experiment-family
+receipts, but distinct variant IDs and training-run nonces.
+
+```bash
+conda run -n gigaworld-policy python -B scripts/evaluate_contact_asym25_heldout.py \
+  check-matched-variants \
+  --result evidence/contact_asym25/hard_st/contact_asym25_heldout_metrics.json \
+  --result evidence/contact_asym25/soft/contact_asym25_heldout_metrics.json \
+  --output evidence/contact_asym25/matched_variant_check.json
 ```
