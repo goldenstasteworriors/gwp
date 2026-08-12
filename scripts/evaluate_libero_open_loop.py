@@ -27,6 +27,7 @@ from giga_models.sockets import RobotInferenceClient  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--suite", required=True, help="LIBERO suite name used to namespace prompt caches")
     parser.add_argument("--episodes", type=int, nargs="+")
     parser.add_argument("--episodes-per-task", type=int, default=2)
     parser.add_argument("--host", default="127.0.0.1")
@@ -159,7 +160,7 @@ def main() -> None:
         request = {
             "image": images[episode],
             "state": np.asarray(group.iloc[0]["observation.state"], dtype=np.float32),
-            "prompt_key": f"libero_spatial:{task_id}",
+            "prompt_key": f"{args.suite}:{task_id}",
             "task_id": task_id,
             "episode_index": episode,
             "chunk_index": 0,
