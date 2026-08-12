@@ -18,6 +18,13 @@ def _int_list(name: str, default: str) -> list[int]:
     return [int(item.strip()) for item in _env(name, default).split(",") if item.strip()]
 
 
+def _bool(name: str, default: bool) -> bool:
+    value = _env(name, "1" if default else "0").strip().lower()
+    if value not in {"0", "1", "false", "true", "no", "yes"}:
+        raise ValueError(f"{name} must be a boolean value")
+    return value in {"1", "true", "yes"}
+
+
 num_frames = 48
 data_path = _required("GWP_LIBERO_DATA_PATH")
 norm_stats_path = _required("GWP_NORM_STATS_PATH")
@@ -159,7 +166,7 @@ config = dict(
         checkpoint_strict=False,
         log_with=None,
         log_interval=int(_env("GWP_LOG_INTERVAL", "20")),
-        with_ema=True,
+        with_ema=_bool("GWP_WITH_EMA", True),
         activation_checkpointing=True,
         activation_class_names=["WanAttention"],
     ),
