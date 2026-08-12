@@ -50,12 +50,62 @@
 
 修正在线图像方向后，四个核心方法各 20 次闭环 rollout 均为 0% success。该结果说明 1k steps 不足以验证任务成功率；不能据此声称方法改善了控制。
 
-## 正在进行的主实验
+## 6k-step 主实验（LIBERO-Spatial）
 
-- LIBERO-Spatial：`off`、`policy_only`、`joint`、`video_only` 从 step 1000 保留 optimizer state 续训到 step 6000。
-- LIBERO-Spatial+Goal+Object：`off` 与 `policy_only` 使用 1314 episodes、171996 states，从相同 GWP-0.5 初始化训练 6000 steps。
-- 训练完成后重复开环、同初态几何 consequence 和闭环 success rate；跨套件结果分别报告，不把不同 suite 混成一个平均数。
+五个方法均从各自 step-1000 checkpoint 恢复 optimizer state 并训练至 step 6000。开环仍使用完全相同的 20 个 episode。
 
-## 当前判定标准
+| 方法 | 总 MSE | 平移 | 旋转 | 夹爪 |
+|---|---:|---:|---:|---:|
+| off | **0.069097** | **0.129222** | 0.003119 | **0.086655** |
+| policy_only | 0.073330 | 0.133820 | 0.002922 | 0.103085 |
+| joint | 0.075305 | 0.133581 | **0.002778** | 0.118057 |
+| video_only | 0.097592 | 0.186205 | 0.004642 | 0.110602 |
+| action_only | 0.099046 | 0.181536 | 0.003860 | 0.137133 |
 
-只有当 `policy_only` 在多个 suite 上改善闭环 success rate，并且优于 `joint`/`video_only`，才能支持“视频 consequence 梯度改善动作”的核心因果叙事。若只改善动作 MSE 或 EEF 误差而不改善成功率，则结论应降级为 representation/trajectory regularization；若 6k 与跨套件实验均无闭环收益，则应否定当前形式，而不是继续强调视频生成质量。
+`policy_only` 的总 MSE 比 `off` 高 6.1%，因此 1k 时的 43.2% 优势没有保持。`action_only` 比 `off` 高 43.3%，说明原始视频辅助任务对动作学习有明显价值；但在其上额外施加 consequence gradient 没有带来稳定收益。
+
+同初态几何 consequence 使用与 1k 相同的 10 个任务/episode：
+
+| 方法 | 配准后 mask IoU ↑ | EEF 像素误差 ↓ | EEF 坐标轴端点误差 ↓ | SO(3) 误差/度 ↓ | 48-step EEF 误差 ↓ |
+|---|---:|---:|---:|---:|---:|
+| off | 0.6354 | 19.82 | 19.74 | 8.56 | 38.46 |
+| policy_only | 0.6315 | 20.57 | 20.69 | 8.19 | 39.07 |
+| joint | **0.6491** | **19.02** | **19.26** | **7.21** | **36.37** |
+| video_only | 0.6333 | 21.49 | 21.36 | 7.67 | 44.40 |
+
+`joint` 在几何代理上最好，但其开环动作 MSE 不如 `off`；`policy_only` 仅改善旋转误差，其 EEF 和 mask 指标均未优于 `off`。这进一步表明“优化视觉 consequence 代理”不等于“得到更好的动作策略”。
+
+四个核心方法各执行 20 个 LIBERO-Spatial 闭环 rollout，全部为 0/20 success。该训练预算下所有方法都尚未达到可用闭环水平，因此闭环结果不能区分方法，但足以否定“当前实验已证明控制收益”。
+
+## 三套件复现实验
+
+`off` 与 `policy_only` 从相同 GWP-0.5 初始化，在 LIBERO-Spatial+Goal+Object 的 1314 episodes、171996 states 上共同训练 6000 steps。每个 suite 的开环结果来自每个 task 两个相同 episode，共 20 个 episode：
+
+| Suite | off 总 MSE | policy_only 总 MSE | 相对变化 |
+|---|---:|---:|---:|
+| LIBERO-Spatial | **0.096449** | 0.099050 | +2.7% |
+| LIBERO-Goal | **0.089440** | 0.093570 | +4.6% |
+| LIBERO-Object | 0.053820 | **0.053416** | -0.8% |
+
+Object 上的微小改善来自夹爪项（0.0407 vs 0.0484），但平移和旋转 MSE 均更差；Spatial 和 Goal 的总误差均退化。因此没有跨 suite 的一致收益。
+
+闭环在每套 suite 的 10 个任务上各跑 1 次；`off` 与 `policy_only` 均为 Spatial 0/10、Goal 0/10、Object 0/10，总计各 0/30。
+
+## 结论与下一版方案
+
+本轮结果不支持当前 `policy_only` 形式。最合理的解释是：视频 flow-matching loss 对动作的梯度主要反映高维像素生成的局部敏感性，并不等价于任务进度或可控性；在训练早期它像一个正则项，随后原始动作监督追上并超过它。与此同时，`action_only` 显著更差，说明应保留 GigaWorld Policy 原有的视频辅助训练。
+
+下一版不应继续强化“让动作与整帧生成结果对齐”，而应把对齐目标改成低维、控制相关且时标一致的 consequence：
+
+1. 从未来视频 latent 解码 EEF/机器人 occupancy/object-contact token，只对这些 token 与动作 rollout 的几何结果做一致性，不对整帧 flow loss 求动作梯度。
+2. 将 48-step 动作聚合到视频帧对应的 12/24/36/48 step，显式解决动作与视频采样间隔不同的问题。
+3. 使用 stop-gradient target encoder 或置信度门控，只在视频 consequence 预测可靠时更新动作；保留原始动作监督为主目标。
+4. 首先在可达到非零 success 的更长训练/EMA 配方上复现实验，再用 success rate 选择方法，EEF/mask 只作为机制诊断。
+
+只有当新方法在多个 suite 上改善闭环 success rate，并且优于 `joint`/`video_only`，才能支持“视频 consequence 改善动作”的核心因果叙事；只改善 MSE 或 EEF 误差时，结论应降级为 trajectory regularization。
+
+## 结果位置
+
+- Spatial 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_spatial_1000step/<method>/`
+- 三套件 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_sgo_6000/<method>/`
+- 每个方法下的 `open_loop_*`、`consequence_pose_*`、`closed_loop_*` 分别保存动作、几何 overlay/summary 和闭环结果。
