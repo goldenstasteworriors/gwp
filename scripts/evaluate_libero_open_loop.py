@@ -56,6 +56,8 @@ def select_episodes(frames: pd.DataFrame, explicit: list[int] | None, per_task: 
 
 
 def decode_selected_frames(video_path: Path, frame_indices: dict[int, int]) -> dict[int, np.ndarray]:
+    """Decode selected local frame indices from one packed video shard."""
+
     by_frame = {frame_index: episode for episode, frame_index in frame_indices.items()}
     result: dict[int, np.ndarray] = {}
     last_needed = max(by_frame)
@@ -69,6 +71,50 @@ def decode_selected_frames(video_path: Path, frame_indices: dict[int, int]) -> d
     if missing:
         raise RuntimeError(f"Failed to decode first frames for episodes {missing}")
     return result
+
+
+def decode_episode_first_frames(
+    dataset_root: Path,
+    episodes: list[int],
+    fps: float,
+) -> dict[int, np.ndarray]:
+    """Resolve each episode through LeRobot v3 video shard metadata."""
+
+    metadata_paths = sorted(dataset_root.glob("meta/episodes/chunk-*/*.parquet"))
+    if not metadata_paths:
+        raise FileNotFoundError(f"No episode metadata under {dataset_root / 'meta/episodes'}")
+    columns = [
+        "episode_index",
+        "videos/observation.images.image/chunk_index",
+        "videos/observation.images.image/file_index",
+        "videos/observation.images.image/from_timestamp",
+    ]
+    metadata = pd.concat(
+        [pd.read_parquet(path, columns=columns) for path in metadata_paths], ignore_index=True
+    ).set_index("episode_index")
+    requests_by_shard: dict[tuple[int, int], dict[int, int]] = {}
+    for episode in episodes:
+        if episode not in metadata.index:
+            raise ValueError(f"No video metadata for episode {episode}")
+        row = metadata.loc[episode]
+        chunk = int(row["videos/observation.images.image/chunk_index"])
+        file_index = int(row["videos/observation.images.image/file_index"])
+        local_frame = int(round(float(row["videos/observation.images.image/from_timestamp"]) * fps))
+        requests_by_shard.setdefault((chunk, file_index), {})[episode] = local_frame
+
+    images: dict[int, np.ndarray] = {}
+    for (chunk, file_index), frame_indices in requests_by_shard.items():
+        video_path = (
+            dataset_root
+            / "videos"
+            / "observation.images.image"
+            / f"chunk-{chunk:03d}"
+            / f"file-{file_index:03d}.mp4"
+        )
+        if not video_path.is_file():
+            raise FileNotFoundError(video_path)
+        images.update(decode_selected_frames(video_path, frame_indices))
+    return images
 
 
 def jsonable(value: Any) -> Any:
@@ -96,11 +142,8 @@ def main() -> None:
         episode: frames[frames["episode_index"] == episode].sort_values("frame_index")
         for episode in episodes
     }
-    first_indices = {episode: int(group.iloc[0]["index"]) for episode, group in grouped.items()}
-    video_paths = sorted(args.dataset_root.glob("videos/observation.images.image/chunk-*/file-*.mp4"))
-    if len(video_paths) != 1:
-        raise NotImplementedError("This evaluator currently expects the packed LIBERO v3 single video file")
-    images = decode_selected_frames(video_paths[0], first_indices)
+    info = json.loads((args.dataset_root / "meta" / "info.json").read_text())
+    images = decode_episode_first_frames(args.dataset_root, episodes, float(info["fps"]))
 
     client = RobotInferenceClient(host=args.host, port=args.port)
     sent_tasks: set[int] = set()
