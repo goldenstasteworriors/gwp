@@ -157,7 +157,7 @@ config = dict(
     optimizers=dict(type="CAME8Bit", lr=6e-5, weight_decay=1e-2),
     schedulers=dict(type="ConstantScheduler"),
     train=dict(
-        resume=False,
+        resume=_bool("GWP_RESUME", False),
         max_epochs=0,
         max_steps=int(_env("GWP_MAX_STEPS", "6000")),
         gradient_accumulation_steps=int(_env("GWP_GRAD_ACCUM_STEPS", "1")),
@@ -168,6 +168,7 @@ config = dict(
         checkpoint_strict=False,
         log_with=None,
         log_interval=int(_env("GWP_LOG_INTERVAL", "20")),
+        seed=int(_env("GWP_SEED", "6666")),
         with_ema=_bool("GWP_WITH_EMA", True),
         activation_checkpointing=True,
         activation_class_names=["WanAttention"],
