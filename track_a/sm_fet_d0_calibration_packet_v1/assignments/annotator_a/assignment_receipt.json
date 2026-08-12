@@ -24,13 +24,13 @@
     },
     "task_ontology": {
       "recipient_path": "TASK_ONTOLOGY.json",
-      "bytes": 770,
-      "sha256": "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a"
+      "bytes": 2321,
+      "sha256": "ccb600e7ccbe2762ab6903df0c206026306cd9a8b0fdeba12d6999a01ef7a372"
     },
     "schema_manifest": {
       "recipient_path": "schema_manifest.json",
-      "bytes": 7525,
-      "sha256": "8f33609a7c320052781b930543e46d174ae31f0528dd02e03e610df73e9802b7"
+      "bytes": 8712,
+      "sha256": "0f5d757edcb912b6c9e12f271e314c760e5e4c148c7a49b56131e5a22383dd31"
     }
   },
   "task_manifest_sha256": "22de1250aef781ff6c09bc340f55af9c288e4330cf784a5ec1bc885a241a4706",
@@ -38,7 +38,7 @@
   "recipient_exact_allowlist_sha256": "f561a36ab8f638168d73451adcb6d74921320deeea3cb5ba28066a6ef94e543d",
   "lifecycle_baseline_sha256": {
     "identity_json": "6ab11d38602811bd04fa51c2bdea57feaee8c1472e1576d26fcf5d70667dddb9",
-    "session_json": "a9220d8d57875b8c78130ff7aa32d1f76c9bc255de7503b21a0a78b0444ae51c"
+    "session_json": "5d61da3a2b1c926cda4f94832115186589cd4da3351de3a95a88b81b718ab87e"
   },
   "blank_annotation_sha256": {
     "coverage.csv": "e6bd9eb229102a8999971286be463c338952214e6c3022f8225ce9ab7a3eb9c8",

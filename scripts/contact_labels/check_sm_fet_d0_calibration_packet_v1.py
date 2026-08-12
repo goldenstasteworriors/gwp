@@ -20,18 +20,34 @@ from typing import Any
 
 
 PACKET_VERSION = "sm_fet_d0_calibration_packet_v1_fix2"
-SCHEMA_MANIFEST_SHA256 = "8f33609a7c320052781b930543e46d174ae31f0528dd02e03e610df73e9802b7"
+SCHEMA_MANIFEST_SHA256 = "0f5d757edcb912b6c9e12f271e314c760e5e4c148c7a49b56131e5a22383dd31"
+TASK_ONTOLOGY_SHA256 = "ccb600e7ccbe2762ab6903df0c206026306cd9a8b0fdeba12d6999a01ef7a372"
+TASK_ONTOLOGY_BYTES = 2321
+SCHEMA_MANIFEST_BYTES = 8712
+CANONICAL_ROLES = (
+    "MANIPULATED_OR_SOURCE",
+    "TOOL",
+    "RECEPTACLE_OR_DESTINATION",
+    "FIXTURE_OR_SUPPORT",
+)
+ROLE_MEANINGS = (
+    (1, 0, 1, "MANIPULATED_OR_SOURCE", "manipulated_or_source", "当前被直接拿持、移动、转动或作为物质来源的主对象。"),
+    (2, 1, 2, "TOOL", "tool", "真实、独立的 pipette、stirrer、funnel、cap-as-tool 等功能中介。液体、stream、rim、杯口不是自由 tool node。"),
+    (3, 2, 3, "RECEPTACLE_OR_DESTINATION", "receptacle_or_destination", "接收、盛放或作为目标关系终点的对象。"),
+    (4, 3, 4, "FIXTURE_OR_SUPPORT", "fixture_or_support", "被 current/next events 引用的桌面、rack、holder 等固定支撑。"),
+)
+LEGACY_ROLE_TOKENS = {"TOOL_OR_MEDIATOR", "SUPPORT_OR_CONTEXT"}
 BLIND_EPISODES = {0, 9, 12, 34, 36, 38, 43, 50, 51, 53, 54, 58}
 CALIBRATION_EPISODES = [46, 65, 1]
 
 EXPECTED_ASSIGNMENT_ARTIFACTS = {
     "independent_a": {
-        "assignment_receipt.json": "54e17f8254ca74357d016dabcf94c6e250fb3bc2eff152b920dac779aa16c8b3",
-        "recipient_manifest.json": "febc2298ab7f104b9089cc1ef2b10b7a30958ef2d011fbe6141f06deba4c7bfc",
+        "assignment_receipt.json": "d2f0f1d3031acbc0e7f7f175b699184b7cfa016c63c6b4f5311ea2028ce30ca7",
+        "recipient_manifest.json": "53d2109f152977e965e9353105e5a9a2214c04cbfd89cb6ba441e5493d21ccb3",
     },
     "independent_b": {
-        "assignment_receipt.json": "543786f9e7be710113bf41027edf9f4631dcf500d1448eb1e91c7c61b3c4eae7",
-        "recipient_manifest.json": "67a712e1b5eb6a547665bea9f5cf00aae15d00faf0614f296e7e6f32e33d5ba1",
+        "assignment_receipt.json": "f2f6877d558d2ee69610b1fa49c54761ea66a413b09fa81f8039ee1578876e1b",
+        "recipient_manifest.json": "5b6d8f7535966086f0bf4f7709d3bdac351dfccdd153f105544b0d31c5d5eecf",
     },
 }
 
@@ -158,6 +174,87 @@ def load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         fail(f"JSON root must be an object: {path}")
     return value
+
+
+def validate_role_semantics(ontology: dict[str, Any], handbook_text: str, schema_manifest: dict[str, Any]) -> None:
+    expected_ontology_keys = {
+        "ontology_schema_version", "task_ontology_id", "task_family", "frame_clock", "evidence_scope",
+        "human_shared_semantic_schema_id", "canonical_role_enum", "roles", "worksheet_role_fields",
+        "coverage_contract", "episode_specific_content", "selection_rationale_present", "label_or_gt_present",
+    }
+    if set(ontology) != expected_ontology_keys:
+        fail("task ontology exact key set mismatch")
+    if ontology.get("ontology_schema_version") != "sm_fet_d0_task_ontology_v2_r1d_roles":
+        fail("task ontology schema version mismatch")
+    if ontology.get("task_ontology_id") != "biochem4.v1" or ontology.get("task_family") != "POUR":
+        fail("task ontology id/family mismatch")
+    if ontology.get("human_shared_semantic_schema_id") != "sm_fet_r1d_shared_semantic_key_v1":
+        fail("task ontology does not bind the minimal-r1d human shared semantic schema")
+    if ontology.get("canonical_role_enum") != list(CANONICAL_ROLES):
+        fail("task ontology canonical role enum/order mismatch")
+    expected_roles = [
+        {"ordinal": ordinal, "node_slot": slot, "focus_code": focus, "id": role, "handbook_token": token, "meaning_zh": meaning}
+        for ordinal, slot, focus, role, token, meaning in ROLE_MEANINGS
+    ]
+    if ontology.get("roles") != expected_roles:
+        fail("task ontology role ordinal/slot/focus-code/id/meaning mismatch")
+    expected_fields = {
+        "events_v1.csv.focus_role": "canonical_role_enum",
+        "event_node_snapshots_v1.csv.node_role": "canonical_role_enum",
+        "event_node_snapshots_v1.csv.node_slot": "node_slot",
+        "event_edges_v1.csv.primary_role": "canonical_role_enum",
+        "event_edges_v1.csv.secondary_role": "NONE_or_canonical_role_enum",
+        "segments.csv.object_role": "canonical_role_enum",
+    }
+    if ontology.get("worksheet_role_fields") != expected_fields:
+        fail("task ontology worksheet role-field mapping mismatch")
+    ontology_wire = json.dumps(ontology, ensure_ascii=False, sort_keys=True)
+    if any(token in ontology_wire for token in LEGACY_ROLE_TOKENS):
+        fail("legacy non-canonical role token present in task ontology")
+    fixed_order = "`manipulated_or_source`、`tool`、`receptacle_or_destination`、`fixture_or_support`"
+    if fixed_order not in handbook_text:
+        fail("handbook canonical fixed-role order is missing")
+    cursor = -1
+    for ordinal, _slot, _focus, _role, token, meaning in ROLE_MEANINGS:
+        marker = f"{ordinal}. `{token}`：{meaning}"
+        position = handbook_text.find(marker)
+        if position <= cursor:
+            fail(f"handbook role order/meaning mismatch: {token}")
+        cursor = position
+    expected_schema_role_contract = {
+        "authority": "minimal-r1d frozen human shared semantic JSON plus D0 annotation handbook",
+        "human_shared_semantic_schema_id": "sm_fet_r1d_shared_semantic_key_v1",
+        "canonical_role_enum": list(CANONICAL_ROLES),
+        "ordinal_to_role": {str(ordinal): role for ordinal, _slot, _focus, role, _token, _meaning in ROLE_MEANINGS},
+        "node_slot_to_role": {str(slot): role for _ordinal, slot, _focus, role, _token, _meaning in ROLE_MEANINGS},
+        "worksheet_value_enums": {
+            "events_v1.csv.focus_role": "canonical_role_enum",
+            "event_node_snapshots_v1.csv.node_role": "canonical_role_enum",
+            "event_node_snapshots_v1.csv.node_slot": "node_slot_to_role key",
+            "event_edges_v1.csv.primary_role": "canonical_role_enum",
+            "event_edges_v1.csv.secondary_role": "NONE or canonical_role_enum",
+            "segments.csv.object_role": "canonical_role_enum",
+        },
+        "forbidden_legacy_role_tokens": ["TOOL_OR_MEDIATOR", "SUPPORT_OR_CONTEXT"],
+    }
+    if schema_manifest.get("role_contract") != expected_schema_role_contract:
+        fail("schema manifest role contract disagrees with ontology/handbook")
+    fields = {name: header.split(",") for name, header in HEADERS.items()}
+    if fields["events_v1.csv"].count("focus_role") != 1:
+        fail("events header must contain exactly one focus_role field")
+    node_fields = fields["event_node_snapshots_v1.csv"]
+    if node_fields.count("node_slot") != 1 or node_fields.count("node_role") != 1 or node_fields.index("node_role") != node_fields.index("node_slot") + 1:
+        fail("node snapshot header node_slot/node_role contract mismatch")
+    for filename, field in (("event_edges_v1.csv", "primary_role"), ("event_edges_v1.csv", "secondary_role"), ("segments.csv", "object_role")):
+        if fields[filename].count(field) != 1:
+            fail(f"worksheet role header mismatch: {filename}.{field}")
+
+
+def validate_role_contract_files(ontology_path: Path, handbook_path: Path, schema_manifest_path: Path) -> None:
+    ontology = load_json(ontology_path)
+    handbook = validate_text_bytes(handbook_path).decode("utf-8")
+    schema_manifest = load_json(schema_manifest_path)
+    validate_role_semantics(ontology, handbook, schema_manifest)
 
 
 def validate_text_bytes(path: Path) -> bytes:
@@ -457,8 +554,8 @@ def validate_packet_root(root: Path, schema_manifest_path: Path, *, phase: str, 
     frozen = receipt.get("frozen_inputs")
     expected_frozen = {
         "annotation_handbook": ("ANNOTATION_HANDBOOK.md", 40881, "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4"),
-        "task_ontology": ("TASK_ONTOLOGY.json", 770, "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a"),
-        "schema_manifest": ("schema_manifest.json", 7525, SCHEMA_MANIFEST_SHA256),
+        "task_ontology": ("TASK_ONTOLOGY.json", TASK_ONTOLOGY_BYTES, TASK_ONTOLOGY_SHA256),
+        "schema_manifest": ("schema_manifest.json", SCHEMA_MANIFEST_BYTES, SCHEMA_MANIFEST_SHA256),
     }
     if not isinstance(frozen, dict) or set(frozen) != set(expected_frozen):
         fail("assignment receipt frozen-input set mismatch")
@@ -469,6 +566,7 @@ def validate_packet_root(root: Path, schema_manifest_path: Path, *, phase: str, 
         path = root / path_name
         if path.stat().st_size != byte_count or sha256_path(path) != digest:
             fail(f"recipient frozen-input bytes mismatch: {path_name}")
+    validate_role_contract_files(root / "TASK_ONTOLOGY.json", root / "ANNOTATION_HANDBOOK.md", root / "schema_manifest.json")
     immutable = {
         "task_manifest.csv": "task_manifest_sha256",
         "media_allowlist.csv": "media_allowlist_sha256",
@@ -483,7 +581,7 @@ def validate_packet_root(root: Path, schema_manifest_path: Path, *, phase: str, 
         "annotator_id": receipt.get("annotator_id"),
         "protocol_sha256": "c4f1f811f796e7c8604a0d0510229677693d6d1cc501b78f59f01cd4793e4a92",
         "handbook_sha256": "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4",
-        "task_ontology_sha256": "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a",
+        "task_ontology_sha256": TASK_ONTOLOGY_SHA256,
         "task_manifest_sha256": sha256_path(root / "task_manifest.csv"),
         "media_allowlist_sha256": sha256_path(root / "media_allowlist.csv"),
         "schema_manifest_sha256": sha256_path(root / "schema_manifest.json"),
@@ -617,6 +715,36 @@ def validate_reference_rows(tables: dict[str, list[dict[str, str]]], identity: d
             fail("submitted D0 coverage must use full-episode EXHAUSTIVE mode")
     if set(coverage_by_episode) != set(tasks) or any(count != 1 for count in coverage_by_episode.values()):
         fail("submission requires exactly one full-episode coverage row per assigned episode")
+    slot_to_role = {str(slot): role for _ordinal, slot, _focus, role, _token, _meaning in ROLE_MEANINGS}
+    for row in tables["events_v1.csv"]:
+        if row.get("task_family") != "POUR" or row.get("task_ontology_version") != "biochem4.v1":
+            fail("event task family/ontology must match the frozen task ontology")
+        if row.get("focus_role") not in CANONICAL_ROLES:
+            fail("events_v1.csv.focus_role is not a canonical minimal-r1d role")
+    snapshot_groups: dict[tuple[str, str, str], dict[str, str]] = {}
+    for row in tables["event_node_snapshots_v1.csv"]:
+        if row.get("snapshot_role") not in {"entry", "turn", "exit", "anchor"}:
+            fail("node snapshot role is invalid")
+        slot = row.get("node_slot", "")
+        role = row.get("node_role", "")
+        if slot not in slot_to_role or role != slot_to_role[slot]:
+            fail("node snapshot node_slot/node_role canonical mapping mismatch")
+        key = (row.get("event_id", ""), row.get("snapshot_role", ""), row.get("frame_index", ""))
+        group = snapshot_groups.setdefault(key, {})
+        if slot in group:
+            fail("duplicate node_slot in a node snapshot group")
+        group[slot] = role
+    for key, group in snapshot_groups.items():
+        if group != slot_to_role:
+            fail(f"node snapshot group must contain all four canonical role slots: {key}")
+    for row in tables["segments.csv"]:
+        if row.get("object_role") not in CANONICAL_ROLES:
+            fail("segments.csv.object_role is not a canonical minimal-r1d role")
+    for row in tables["event_edges_v1.csv"]:
+        if row.get("primary_role") not in CANONICAL_ROLES:
+            fail("event_edges_v1.csv.primary_role is not a canonical minimal-r1d role")
+        if row.get("secondary_role") not in {"NONE", *CANONICAL_ROLES}:
+            fail("event_edges_v1.csv.secondary_role is not NONE or a canonical minimal-r1d role")
     def same_episode(child: dict[str, str], parent: dict[str, str], relation: str) -> None:
         if child["episode_id"] != parent["episode_id"]:
             fail(f"cross-episode reference forbidden: {relation}")
@@ -668,12 +796,17 @@ def phase_source(source_root: Path) -> dict[str, Any]:
     validate_schema_manifest(source_root)
     frozen_source = {
         "ANNOTATION_HANDBOOK.md": (40881, "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4"),
-        "TASK_ONTOLOGY.json": (770, "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a"),
+        "TASK_ONTOLOGY.json": (TASK_ONTOLOGY_BYTES, TASK_ONTOLOGY_SHA256),
     }
     for name, (byte_count, digest) in frozen_source.items():
         path = source_root / "frozen_inputs" / name
         if path.stat().st_size != byte_count or sha256_path(path) != digest:
             fail(f"source frozen input bytes mismatch: {name}")
+    validate_role_contract_files(
+        source_root / "frozen_inputs" / "TASK_ONTOLOGY.json",
+        source_root / "frozen_inputs" / "ANNOTATION_HANDBOOK.md",
+        source_root / "schema_manifest.json",
+    )
     assignment_index = load_json(source_root / "coordinator" / "assignment_index.json")
     if assignment_index.get("packet_schema_version") != PACKET_VERSION or assignment_index.get("schema_manifest_sha256") != SCHEMA_MANIFEST_SHA256:
         fail("coordinator assignment index schema binding mismatch")
@@ -757,10 +890,22 @@ def phase_self_test() -> dict[str, Any]:
         for episode, values in tasks.items()
     ]
     validate_reference_rows(tables, identity, session, tasks)
-    tables["events_v1.csv"] = [{**common(46), "coverage_id": "cov-46", "event_id": "evt-46-0"}]
-    tables["segments.csv"] = [{**common(46), "coverage_id": "cov-46", "segment_id": "seg-46-0", "onset_event_id": "evt-46-0", "release_event_id": "", "source_proposal_id": ""}]
-    tables["event_node_snapshots_v1.csv"] = [{**common(46), "event_id": "evt-46-0"}]
-    tables["event_edges_v1.csv"] = [{**common(46), "edge_id": "edge-46-0", "event_id": "evt-46-0", "contact_segment_id": "seg-46-0"}]
+    tables["events_v1.csv"] = [{
+        **common(46), "coverage_id": "cov-46", "event_id": "evt-46-0", "task_family": "POUR",
+        "task_ontology_version": "biochem4.v1", "focus_role": "MANIPULATED_OR_SOURCE",
+    }]
+    tables["segments.csv"] = [{
+        **common(46), "coverage_id": "cov-46", "segment_id": "seg-46-0", "onset_event_id": "evt-46-0",
+        "release_event_id": "", "source_proposal_id": "", "object_role": "MANIPULATED_OR_SOURCE",
+    }]
+    tables["event_node_snapshots_v1.csv"] = [
+        {**common(46), "event_id": "evt-46-0", "snapshot_role": "entry", "frame_index": "100", "node_slot": str(slot), "node_role": role}
+        for _ordinal, slot, _focus, role, _token, _meaning in ROLE_MEANINGS
+    ]
+    tables["event_edges_v1.csv"] = [{
+        **common(46), "edge_id": "edge-46-0", "event_id": "evt-46-0", "contact_segment_id": "seg-46-0",
+        "primary_role": "MANIPULATED_OR_SOURCE", "secondary_role": "NONE",
+    }]
     tables["pose_keys_2d_v1.csv"] = [{**common(46), "pose_key_id": "pose-46-0", "event_id": "evt-46-0"}]
     validate_reference_rows(tables, identity, session, tasks)
     broken = {name: [dict(row) for row in rows] for name, rows in tables.items()}
@@ -769,10 +914,16 @@ def phase_self_test() -> dict[str, Any]:
     draft["coverage.csv"][0]["review_status"] = "draft"
     positive_only = {name: [dict(row) for row in rows] for name, rows in tables.items()}
     positive_only["coverage.csv"][0]["coverage_mode"] = "POSITIVE_ONLY"
+    legacy_role_value = {name: [dict(row) for row in rows] for name, rows in tables.items()}
+    legacy_role_value["events_v1.csv"][0]["focus_role"] = "TOOL_OR_MEDIATOR"
+    wrong_node_slot = {name: [dict(row) for row in rows] for name, rows in tables.items()}
+    wrong_node_slot["event_node_snapshots_v1.csv"][1]["node_role"] = "RECEPTACLE_OR_DESTINATION"
     negatives = {
         "dangling_reference": lambda: validate_reference_rows(broken, identity, session, tasks),
         "draft_row": lambda: validate_reference_rows(draft, identity, session, tasks),
         "positive_only_coverage": lambda: validate_reference_rows(positive_only, identity, session, tasks),
+        "legacy_role_value": lambda: validate_reference_rows(legacy_role_value, identity, session, tasks),
+        "node_slot_role_mismatch": lambda: validate_reference_rows(wrong_node_slot, identity, session, tasks),
         "assigned_not_started_state": lambda: validate_terminal_lifecycle(
             {"identity_status": "assigned_by_coordinator"},
             {"session_status": "assigned_not_started", "opened_at_utc": "", "closed_at_utc": ""},
@@ -790,6 +941,22 @@ def phase_self_test() -> dict[str, Any]:
         except CheckFailure:
             continue
         fail(f"negative self-test unexpectedly passed: {name}")
+    source_root = Path(__file__).resolve().parents[2] / "track_a" / "sm_fet_d0_calibration_packet_v1"
+    ontology = load_json(source_root / "frozen_inputs" / "TASK_ONTOLOGY.json")
+    handbook_text = validate_text_bytes(source_root / "frozen_inputs" / "ANNOTATION_HANDBOOK.md").decode("utf-8")
+    schema_manifest = load_json(source_root / "schema_manifest.json")
+    validate_role_semantics(ontology, handbook_text, schema_manifest)
+    legacy = json.loads(json.dumps(ontology))
+    legacy["canonical_role_enum"] = [
+        "MANIPULATED_OR_SOURCE", "RECEPTACLE_OR_DESTINATION", "TOOL_OR_MEDIATOR", "SUPPORT_OR_CONTEXT",
+    ]
+    legacy_rejected = False
+    try:
+        validate_role_semantics(legacy, handbook_text, schema_manifest)
+    except CheckFailure:
+        legacy_rejected = True
+    if not legacy_rejected:
+        fail("legacy role ontology negative self-test unexpectedly passed")
     validate_terminal_lifecycle(
         {"identity_status": "submitted"},
         {"session_status": "submitted", "opened_at_utc": "2026-08-12T00:00:00Z", "closed_at_utc": "2026-08-12T01:00:00Z"},
@@ -798,6 +965,7 @@ def phase_self_test() -> dict[str, Any]:
     return {
         "positive_no_event_present_case": "passed",
         "positive_reference_case": "passed",
+        "negative_legacy_role_ontology": "rejected",
         "negative_attack_cases": sorted(negatives),
     }
 

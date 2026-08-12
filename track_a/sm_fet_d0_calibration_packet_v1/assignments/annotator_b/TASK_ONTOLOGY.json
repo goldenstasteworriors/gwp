@@ -1,21 +1,64 @@
 {
-  "ontology_schema_version": "sm_fet_d0_task_ontology_v1",
+  "ontology_schema_version": "sm_fet_d0_task_ontology_v2_r1d_roles",
   "task_ontology_id": "biochem4.v1",
   "task_family": "POUR",
   "frame_clock": "raw_video_frame_30fps",
   "evidence_scope": "raw_rgb_only",
+  "human_shared_semantic_schema_id": "sm_fet_r1d_shared_semantic_key_v1",
+  "canonical_role_enum": [
+    "MANIPULATED_OR_SOURCE",
+    "TOOL",
+    "RECEPTACLE_OR_DESTINATION",
+    "FIXTURE_OR_SUPPORT"
+  ],
+  "roles": [
+    {
+      "ordinal": 1,
+      "node_slot": 0,
+      "focus_code": 1,
+      "id": "MANIPULATED_OR_SOURCE",
+      "handbook_token": "manipulated_or_source",
+      "meaning_zh": "当前被直接拿持、移动、转动或作为物质来源的主对象。"
+    },
+    {
+      "ordinal": 2,
+      "node_slot": 1,
+      "focus_code": 2,
+      "id": "TOOL",
+      "handbook_token": "tool",
+      "meaning_zh": "真实、独立的 pipette、stirrer、funnel、cap-as-tool 等功能中介。液体、stream、rim、杯口不是自由 tool node。"
+    },
+    {
+      "ordinal": 3,
+      "node_slot": 2,
+      "focus_code": 3,
+      "id": "RECEPTACLE_OR_DESTINATION",
+      "handbook_token": "receptacle_or_destination",
+      "meaning_zh": "接收、盛放或作为目标关系终点的对象。"
+    },
+    {
+      "ordinal": 4,
+      "node_slot": 3,
+      "focus_code": 4,
+      "id": "FIXTURE_OR_SUPPORT",
+      "handbook_token": "fixture_or_support",
+      "meaning_zh": "被 current/next events 引用的桌面、rack、holder 等固定支撑。"
+    }
+  ],
+  "worksheet_role_fields": {
+    "events_v1.csv.focus_role": "canonical_role_enum",
+    "event_node_snapshots_v1.csv.node_role": "canonical_role_enum",
+    "event_node_snapshots_v1.csv.node_slot": "node_slot",
+    "event_edges_v1.csv.primary_role": "canonical_role_enum",
+    "event_edges_v1.csv.secondary_role": "NONE_or_canonical_role_enum",
+    "segments.csv.object_role": "canonical_role_enum"
+  },
   "coverage_contract": {
     "required_episode_mode": "EXHAUSTIVE",
     "no_event_present": "Represented by a submitted full-episode EXHAUSTIVE coverage row and zero event/contact/node/edge/pose rows for that episode.",
     "positive_only_allowed_at_submission": false,
     "not_reviewed_allowed_at_submission": false
   },
-  "entity_roles": [
-    "MANIPULATED_OR_SOURCE",
-    "RECEPTACLE_OR_DESTINATION",
-    "TOOL_OR_MEDIATOR",
-    "SUPPORT_OR_CONTEXT"
-  ],
   "episode_specific_content": false,
   "selection_rationale_present": false,
   "label_or_gt_present": false
