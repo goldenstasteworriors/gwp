@@ -1,0 +1,1186 @@
+{
+  "artifacts": [
+    {
+      "content_source_blob_oid": "36378851a472d40b318c9de45540ce8c6ed0ce39",
+      "content_source_commit": "190f3023da6ea6e0ee8251da22e2f21efea17bcc",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 24,
+      "integrated_blob_oid": "36378851a472d40b318c9de45540ce8c6ed0ce39",
+      "integrated_sha256": "07a3f65e6f3662dd37c005c78340e99c6c2385e87baa79fa297e663c677f688f",
+      "integration_commit": "714ce7d4eef25a60b3a39315a6a7aacab0e17830",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-001",
+      "path": "docs/research/sm_fet_wam_v2_schema_architecture_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "ba07a5fee44c41f01e4df01bdfdea9329df3bee4",
+      "content_source_commit": "6bc51b90002f7f533d7b1ff523caf562949eab64",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 24,
+      "integrated_blob_oid": "ba07a5fee44c41f01e4df01bdfdea9329df3bee4",
+      "integrated_sha256": "d326d7c730c8152fa838230b23ac4fcabf6f78243ab567fd274e2f945e1e6261",
+      "integration_commit": "517424999c28c3793f1003c2d915de50baf35ad8",
+      "link_ordinal_on_line": 2,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-002",
+      "path": "docs/research/sm_fet_wam_v2_final_architecture_decision_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "22031b6fb800a8fdc8c8c989da877adcb27246ae",
+      "content_source_commit": "fdac965a181e7e3acef3510e788ae4661931197f",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 25,
+      "integrated_blob_oid": "22031b6fb800a8fdc8c8c989da877adcb27246ae",
+      "integrated_sha256": "c1a88439d8486487e85b37607e859c56535383453a59eeb992a04abcec5432c1",
+      "integration_commit": "391443c13b586640bdad7a525afdf83f8751befc",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-003",
+      "path": "docs/research/sm_fet_d0_schema_reduction_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "c8b687f145e4165cada9263015eb7af854e92ee8",
+      "content_source_commit": "006198f2aeb5e72e009a09a8449352f1d7c48b12",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 25,
+      "integrated_blob_oid": "c8b687f145e4165cada9263015eb7af854e92ee8",
+      "integrated_sha256": "e7d36f8054813169adc4548345875ce71dd207a9c43b86f101b153dc0916ec02",
+      "integration_commit": "31dc4e0557df6035929c58cd29eb208d61ad7520",
+      "link_ordinal_on_line": 2,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-004",
+      "path": "docs/research/sm_fet_minimal_r1a_schema_capacity_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "97cd5d257056bf1545137b83dbe32302b4c3fb03",
+      "content_source_commit": "e31208172d194511e7fc95acd6075635c249c335",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 26,
+      "integrated_blob_oid": "97cd5d257056bf1545137b83dbe32302b4c3fb03",
+      "integrated_sha256": "11631de5f8014d6f3ae951e9b0845f05f6cbdf3c80e4d48e4384f577eb838c34",
+      "integration_commit": "ff9c4d499040a1956089ea83a84599eeba59781a",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-005",
+      "path": "docs/research/sm_fet_minimal_r1b_schema_capacity_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "4c973dcc83b848ea3d1ed9af17e7fe289d86a94c",
+      "content_source_commit": "144d050ddfcb3d4a3fa0dc5f299754177c63f04b",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 26,
+      "integrated_blob_oid": "4c973dcc83b848ea3d1ed9af17e7fe289d86a94c",
+      "integrated_sha256": "66ca1c3c0311f46278a7547be21e5562d3b56fdde307c153eae401724b809f41",
+      "integration_commit": "9b3332e30915f0a17e35089546b64a025fe1d7db",
+      "link_ordinal_on_line": 2,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-006",
+      "path": "docs/research/sm_fet_minimal_r1b_control_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "a3d096e3076348839a4322d592afbaa3b17db704",
+      "content_source_commit": "49667be32d15bd95fd2bde610b3e251c2fcc8474",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 26,
+      "integrated_blob_oid": "a3d096e3076348839a4322d592afbaa3b17db704",
+      "integrated_sha256": "7aae28fe1e5bfe2c9203e3dbddc4a20e44cecd4ff325ca80155517aaf0f92b6c",
+      "integration_commit": "b371483a301f736cc6e35db179ea9c1d817c9bf2",
+      "link_ordinal_on_line": 3,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-007",
+      "path": "docs/research/sm_fet_minimal_r1b_crossdomain_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "d480a5f136f30a942d2f1bd454089ecee9dbf0c8",
+      "content_source_commit": "39bc2b4b1c4fa822cc5565e8d23081f628723151",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 27,
+      "integrated_blob_oid": "d480a5f136f30a942d2f1bd454089ecee9dbf0c8",
+      "integrated_sha256": "9b755a8b7f9dd84f91380b60de0f051bb3ddb23061f59a08abfb7c95b4dab1a5",
+      "integration_commit": "0f30e7fcdfd355054a7d7ead1332b6d96d7c3ce6",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-008",
+      "path": "docs/research/sm_fet_minimal_r1c_schema_capacity_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "fd0eef071eff9979592c2c2e1b4ba248bfd4b689",
+      "content_source_commit": "57434759a479aa3ec5d4f730778d0180de9ae06a",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 27,
+      "integrated_blob_oid": "fd0eef071eff9979592c2c2e1b4ba248bfd4b689",
+      "integrated_sha256": "57fdccc007bce94f5d79c0e10721b3dbd40fc94ced16d2d7af9255c589360bb5",
+      "integration_commit": "b3195da970402ebe29a2b9a48e914e8affa2eae1",
+      "link_ordinal_on_line": 2,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-009",
+      "path": "docs/research/sm_fet_minimal_r1c_final_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "d72b63ec8605f52fb3881fe55acc1d4e5b175bda",
+      "content_source_commit": "5019c1828cf17e169c51ecf6772ad16b23d51c2d",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 28,
+      "integrated_blob_oid": "d72b63ec8605f52fb3881fe55acc1d4e5b175bda",
+      "integrated_sha256": "7b84c09999a3b46e684ff9c601fa55779e6ef1d47d34ce8d194c67ff171c56d2",
+      "integration_commit": "349d148d7f68b9f2257849627e3444ce789c8980",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-010",
+      "path": "docs/research/sm_fet_minimal_r1d_schema_contract_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "7ed300fa19534dd8f67384f6fa98596d1c64a1e7",
+      "content_source_commit": "c9ce174f8f89f73d11d1def8865c04c66588ef7d",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 28,
+      "integrated_blob_oid": "7ed300fa19534dd8f67384f6fa98596d1c64a1e7",
+      "integrated_sha256": "fd9c6642f2a442a5cd499c9e9bac537effb4767a17bca1470123bbf25abe68ac",
+      "integration_commit": "7779bf2f42f58c4418616968efadfc19e71415b7",
+      "link_ordinal_on_line": 2,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-011",
+      "path": "docs/research/sm_fet_minimal_r1d_freeze_addendum_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "aa767351589e9af5eec16cd4ccc6e925f43371eb",
+      "content_source_commit": "2743cbdaec18e03a4c42f7444806584488837611",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 28,
+      "integrated_blob_oid": "aa767351589e9af5eec16cd4ccc6e925f43371eb",
+      "integrated_sha256": "f69a428a191c126f804232c07dfc7c29b2d2552c0ad54132f16b3cff56007737",
+      "integration_commit": "94a518b898788f782988f9e58a6e0b31c4a8e334",
+      "link_ordinal_on_line": 3,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-012",
+      "path": "docs/research/sm_fet_minimal_r1d_codec_conformance_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "66877b80f52f643b5636215e74970c4b79832a31",
+      "content_source_commit": "44bdee68c54cd816123ae6017d3e33412fd679d1",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 28,
+      "integrated_blob_oid": "66877b80f52f643b5636215e74970c4b79832a31",
+      "integrated_sha256": "407385ad1cb8234e5e481db63609deeb9751c48f7fa854edde1100cfa767d303",
+      "integration_commit": "134971711c21ca6ed45913c38bf8567181a7f962",
+      "link_ordinal_on_line": 4,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-013",
+      "path": "docs/research/sm_fet_r1d_codec_fix2_final_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "75a20975ea45cea72b8f3ca48d907294a7c987d7",
+      "content_source_commit": "3c545aa31469272be68a9c94ca51fa7c17aa3331",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 34,
+      "integrated_blob_oid": "75a20975ea45cea72b8f3ca48d907294a7c987d7",
+      "integrated_sha256": "ed6c51b8e0c6ef75ee56123d48f6472e62d84b885b382a2370d7e417b287c5f5",
+      "integration_commit": "4abde3c9e2ddf09407074ecca503cb326ba91d24",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-014",
+      "path": "docs/research/wam_biochemical_manipulation_idea_portfolio_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "ff2270d70d8e52b06d7a362d1bd92e9d4c55aff3",
+      "content_source_commit": "2c0dcb01997e727a98c157b45630df4df91b95f1",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 35,
+      "integrated_blob_oid": "ff2270d70d8e52b06d7a362d1bd92e9d4c55aff3",
+      "integrated_sha256": "caa73518336862042cf67a0c23db36f7539c7cc4f977dea7dd7bbcb6e167fa99",
+      "integration_commit": "a8e4573a219f880ad7fc4e56eaba8b89800f0230",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-015",
+      "path": "docs/research/sm_fet_wam_paper_blueprint_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "d72b63ec8605f52fb3881fe55acc1d4e5b175bda",
+      "content_source_commit": "5019c1828cf17e169c51ecf6772ad16b23d51c2d",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 36,
+      "integrated_blob_oid": "d72b63ec8605f52fb3881fe55acc1d4e5b175bda",
+      "integrated_sha256": "7b84c09999a3b46e684ff9c601fa55779e6ef1d47d34ce8d194c67ff171c56d2",
+      "integration_commit": "349d148d7f68b9f2257849627e3444ce789c8980",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-016",
+      "path": "docs/research/sm_fet_minimal_r1d_schema_contract_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "7ed300fa19534dd8f67384f6fa98596d1c64a1e7",
+      "content_source_commit": "c9ce174f8f89f73d11d1def8865c04c66588ef7d",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 37,
+      "integrated_blob_oid": "7ed300fa19534dd8f67384f6fa98596d1c64a1e7",
+      "integrated_sha256": "fd9c6642f2a442a5cd499c9e9bac537effb4767a17bca1470123bbf25abe68ac",
+      "integration_commit": "7779bf2f42f58c4418616968efadfc19e71415b7",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-017",
+      "path": "docs/research/sm_fet_minimal_r1d_freeze_addendum_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "21e9e96a66e14fdcacbed4cf8df7cf6d0296c251",
+      "content_source_commit": "fe24e2fa00dcd4f66f6b7f7415faec8042a7b855",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 38,
+      "integrated_blob_oid": "21e9e96a66e14fdcacbed4cf8df7cf6d0296c251",
+      "integrated_sha256": "400b2a01f4f382272a66fe1599a531a09b7edd6165daacb289b2d2d8db37e621",
+      "integration_commit": "39c6fd885abf505f91aea99c11714466fde00cc9",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-018",
+      "path": "docs/research/sm_fet_minimal_r1d_final_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "cc00ac6fd4856d90fe7c8116e35f9b9f4beebfa8",
+      "content_source_commit": "08b8982380e0b9fd0872739f9d3c6a7c30d86e96",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 39,
+      "integrated_blob_oid": "cc00ac6fd4856d90fe7c8116e35f9b9f4beebfa8",
+      "integrated_sha256": "ce35973d591804d8552d50f3c60feb4e9aac8abdd3160a27afaa0dfe0d745306",
+      "integration_commit": "d1ac9e6f609dccc2bdddd3feb825725a00ec6568",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-019",
+      "path": "docs/research/sm_fet_minimal_r1d_freeze_addendum_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "aa767351589e9af5eec16cd4ccc6e925f43371eb",
+      "content_source_commit": "2743cbdaec18e03a4c42f7444806584488837611",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 40,
+      "integrated_blob_oid": "aa767351589e9af5eec16cd4ccc6e925f43371eb",
+      "integrated_sha256": "f69a428a191c126f804232c07dfc7c29b2d2552c0ad54132f16b3cff56007737",
+      "integration_commit": "94a518b898788f782988f9e58a6e0b31c4a8e334",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-020",
+      "path": "docs/research/sm_fet_minimal_r1d_codec_conformance_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "66877b80f52f643b5636215e74970c4b79832a31",
+      "content_source_commit": "44bdee68c54cd816123ae6017d3e33412fd679d1",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 41,
+      "integrated_blob_oid": "66877b80f52f643b5636215e74970c4b79832a31",
+      "integrated_sha256": "407385ad1cb8234e5e481db63609deeb9751c48f7fa854edde1100cfa767d303",
+      "integration_commit": "134971711c21ca6ed45913c38bf8567181a7f962",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-021",
+      "path": "docs/research/sm_fet_r1d_codec_fix2_final_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "931eb1d6330d7872161d757bb357d82938159262",
+      "content_source_commit": "20421c7502e6fa3febfe2234db9e414594c5f964",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 42,
+      "integrated_blob_oid": "931eb1d6330d7872161d757bb357d82938159262",
+      "integrated_sha256": "c3a27113671f16ef8a50c3ca12514857c8f85fc5c6d8764f0294b1dd49e4b36e",
+      "integration_commit": "c45ad543a46264e76e9f1c955d74a3b930f75206",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-022",
+      "path": "docs/research/idea_f_temporal_contact_pose_tube_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "ed2b7397129f2f5ac9fff32320f24f35938b298e",
+      "content_source_commit": "260ac320565c2a156e0036a638358e790a784110",
+      "exact_source_bytes": false,
+      "index_line_at_generation": 48,
+      "integrated_blob_oid": "500c0cb3e0afbabc563207473552fbd1223e8cac",
+      "integrated_sha256": "a8223807b7afb035a8790860d4013b24391684e10b4c4b41440b6c933766dd13",
+      "integration_commit": "264d257e35d95fc5c1d32ced7504fb70abdf5e4b",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Five leading Markdown hard breaks changed from two trailing spaces to <br>; text, IDs, conclusions, and semantics are unchanged.",
+        "kind": "integration_only_format_normalization",
+        "operations": [
+          {
+            "count": 5,
+            "operation": "markdown_hardbreak_to_html_br"
+          }
+        ],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-023",
+      "path": "docs/research/sm_fet_wam_novelty_adversarial_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "0c2669b2c1eb40edd0f6a841d32185eab16508a9",
+      "content_source_commit": "05698bb8cafbd520a0700466e8d43e422a12588d",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 49,
+      "integrated_blob_oid": "0c2669b2c1eb40edd0f6a841d32185eab16508a9",
+      "integrated_sha256": "0f4a495d43e3f1bb9e6befb47ec22851d42144bed323693c6d088df22452a4de",
+      "integration_commit": "9ef6683ef827e71fcbdf9eb041a0f888a54c9427",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-024",
+      "path": "docs/research/sm_fet_wam_benchmark_and_data_roadmap_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "cfac9c63ee626d663dd5a6a1a2ad7d8f4e0c502a",
+      "content_source_commit": "6a6f0fb72384ca5dcccff251c770f13988eb3702",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 50,
+      "integrated_blob_oid": "cfac9c63ee626d663dd5a6a1a2ad7d8f4e0c502a",
+      "integrated_sha256": "0e561b90ff8c046a3364107519d7eecd525bed96062dedc69bb2ff1db4789d1b",
+      "integration_commit": "69d4a8369338ca7c037d4a6ea997fc4b7ecb621c",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-025",
+      "path": "docs/research/human_robot_tool_use_pair_dataset_survey_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "39a319a483a7f446e7c933538beedbe94792064c",
+      "content_source_commit": "00817c58d85a322c67fafb8ee1ee52e6f89a4616",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 51,
+      "integrated_blob_oid": "39a319a483a7f446e7c933538beedbe94792064c",
+      "integrated_sha256": "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4",
+      "integration_commit": "6f37dda69d74bb4c5b4b42de182432c556a3cc84",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-026",
+      "path": "docs/research/sm_fet_d0_annotation_handbook_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "1c6a1c18bcc282a03e569f9e0e3f0c69af07baf3",
+      "content_source_commit": "24131df4349f0610c361b14d76cbc61c67efef22",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 52,
+      "integrated_blob_oid": "1c6a1c18bcc282a03e569f9e0e3f0c69af07baf3",
+      "integrated_sha256": "91ef005b59313b66d1761b57ea886a27db929284167ff2df3f3c5ab4d8abddc3",
+      "integration_commit": "7a95075fe13a9c4733d8ec9084a4173cb2ae2d4b",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-027",
+      "path": "docs/research/sm_fet_d0_three_episode_observability_audit_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "fc5cc32f163ebe09a126ef7602a2b7822d20bccb",
+      "content_source_commit": "189dfa8a2ca24b1d9e333addb2d393af90704ac6",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 53,
+      "integrated_blob_oid": "fc5cc32f163ebe09a126ef7602a2b7822d20bccb",
+      "integrated_sha256": "ed5e90e9921eceab349c815adc36857a312bd81b4a0d06cfe54b642e6c8820c0",
+      "integration_commit": "2579df65cd204d17c81a37775ae0fa43b1a19404",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-028",
+      "path": "docs/research/sm_fet_d0_observability_independent_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "2de115da2b0ecb85b6cbe1402285357f3f2eec73",
+      "content_source_commit": "b082680a74b1f0720c8b5e1023feeb8b39fd6cb9",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 54,
+      "integrated_blob_oid": "2de115da2b0ecb85b6cbe1402285357f3f2eec73",
+      "integrated_sha256": "8c2b2599e43579652aa2f135acc6aff1271ea712afc1869c44d27e36216133fe",
+      "integration_commit": "7b8f17f6f99134a5d9edc82884446e0521874bfe",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-029",
+      "path": "track_a/sm_fet_d0_calibration_packet_v1/README.md"
+    },
+    {
+      "content_source_blob_oid": "b04459beb5612027d5f7ad889e963bb9ac4e9b5a",
+      "content_source_commit": "80ff5ef47bd25fa056c3b243a624e8991e5c33f9",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 55,
+      "integrated_blob_oid": "b04459beb5612027d5f7ad889e963bb9ac4e9b5a",
+      "integrated_sha256": "ef1b87f7b01805a932995efa5c3f210eb39c3b76e9eeb94bab1cf1d7276030e3",
+      "integration_commit": "6eefc55921a9e63837b948226de73526eb00d233",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-030",
+      "path": "docs/research/sm_fet_d0_calibration_packet_fix3_final_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "22031b6fb800a8fdc8c8c989da877adcb27246ae",
+      "content_source_commit": "fdac965a181e7e3acef3510e788ae4661931197f",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 56,
+      "integrated_blob_oid": "22031b6fb800a8fdc8c8c989da877adcb27246ae",
+      "integrated_sha256": "c1a88439d8486487e85b37607e859c56535383453a59eeb992a04abcec5432c1",
+      "integration_commit": "391443c13b586640bdad7a525afdf83f8751befc",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-031",
+      "path": "docs/research/sm_fet_d0_schema_reduction_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "2140130e00eb4eca21575f3ac56505f9017017cb",
+      "content_source_commit": "febccbb209d429f523562ac0119d06a3c421a6df",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 57,
+      "integrated_blob_oid": "2140130e00eb4eca21575f3ac56505f9017017cb",
+      "integrated_sha256": "2817666763c6a5b3e0b4723c36ecb4c145e86187895fec5596ac1b52268ec23c",
+      "integration_commit": "6b024a29473b9602ca7aa786b5b9b38051f0a68d",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-032",
+      "path": "docs/research/g1_rh56_omnipicker_sm_fet_capability_profile_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "743cb0abc3eb72a724dc6486c64c2e3c5d7c68fa",
+      "content_source_commit": "39adb119b1e039736e5404150ed9f3fa1e10d358",
+      "exact_source_bytes": false,
+      "index_line_at_generation": 58,
+      "integrated_blob_oid": "05698fe371f38ecb67a708720cd9b03cb068b1ce",
+      "integrated_sha256": "192cecd05ba36f64ca72ece03314641130ce566e07b4a0cdc562f907e74ebd5a",
+      "integration_commit": "6226748f0cc201ec3db3cc39a8de362336487c16",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "One empty line at EOF was removed; body text and semantics are unchanged.",
+        "kind": "integration_only_eof_normalization",
+        "operations": [
+          {
+            "count": 1,
+            "operation": "remove_eof_empty_line"
+          }
+        ],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-033",
+      "path": "docs/research/sm_fet_finite_local_frame_design_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "a77beb5918ccecc30f5cd3f94fef745d811f23d2",
+      "content_source_commit": "89396591720035d0427679e07bebfad5fed60023",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 59,
+      "integrated_blob_oid": "a77beb5918ccecc30f5cd3f94fef745d811f23d2",
+      "integrated_sha256": "1745c430f5e49b162ec9f2252c0f7b7634a609f3caa818a876cbca30d0b6909f",
+      "integration_commit": "3625969b76e0e9b64c586a877c554eb8f5ff3d5b",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-034",
+      "path": "docs/research/temporal_event_pairing_wam_meta_synthesis_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "76913c236a364d2e953caae1509359f38edf7e25",
+      "content_source_commit": "52e763c62856c350245bb38ba0509a2e9da497fe",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 60,
+      "integrated_blob_oid": "76913c236a364d2e953caae1509359f38edf7e25",
+      "integrated_sha256": "009d2fb8869e2d00d946e95226ac014ccd95d04f3b717503c79413dcd2924142",
+      "integration_commit": "d2d67350c740dbe30a0592e77b91eb90a68002b5",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-035",
+      "path": "docs/research/human_observational_tool_learning_evidence_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "2fc57453bd904b52362fa41bec452d1c7cdff2c4",
+      "content_source_commit": "2452e60bbaf6edb4714fed7d1397aea6ba9e4111",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 61,
+      "integrated_blob_oid": "2fc57453bd904b52362fa41bec452d1c7cdff2c4",
+      "integrated_sha256": "d7b7d7ff52adb3b873730e2c9dc0bf15f847fcc801e3b4f4291a59d727408968",
+      "integration_commit": "d503bd0745f8c26fefced3faccc1fc4fca548693",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-036",
+      "path": "docs/research/sm_fet_dynamic_focus_token_spec_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "050e41bd3684f3447358c9e700efd3bb3167d421",
+      "content_source_commit": "ca7d641703749a15ff30c644250f5147b5125e72",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 62,
+      "integrated_blob_oid": "050e41bd3684f3447358c9e700efd3bb3167d421",
+      "integrated_sha256": "f277df06a28d71a5c4a9e43cb278ae4239589ae87b45f1f309125d6f053b7792",
+      "integration_commit": "982ba27f2fe44d4a152925520201d2ccb4c4d7f5",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-037",
+      "path": "docs/research/sm_fet_missing_hands_contract_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "7f960146ee8ac6f822057598ec83d365dc004054",
+      "content_source_commit": "9f6eeff6761168048b49101cb5839170ae6b84bc",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 63,
+      "integrated_blob_oid": "7f960146ee8ac6f822057598ec83d365dc004054",
+      "integrated_sha256": "1b757b01aa80e4c55fd36cd7b306e57684448fe9d6d2a82a550ac6069264c698",
+      "integration_commit": "c59523149d27525e8f2edf59b2247f22afb342ec",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-038",
+      "path": "docs/research/sm_fet_missingness_capacity_reconciliation_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "c58032b7ceb34dec4382dc2ccdbc428457a59d03",
+      "content_source_commit": "f795c4f615595d72219e79a0cb43d5adef12b0a0",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 64,
+      "integrated_blob_oid": "c58032b7ceb34dec4382dc2ccdbc428457a59d03",
+      "integrated_sha256": "1f50a4f8ab339c1b462b21d9e65861fb75961ba638139fe312a8c72385171451",
+      "integration_commit": "a1fe59207c58340f484424f2e26d9256462b71c8",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-039",
+      "path": "docs/research/sm_fet_transparent_nonreconstruction_contract_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "ffafe251859174609cbfe64054f39cc4fd00470d",
+      "content_source_commit": "07821f0d3626f16c22cecb54091a058e6f162c42",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 65,
+      "integrated_blob_oid": "ffafe251859174609cbfe64054f39cc4fd00470d",
+      "integrated_sha256": "55ad36f6888bea37ecd66fe8bbc120009124fd181e12cb671a58adc1731d4bad",
+      "integration_commit": "8e2e13e8953548415e509a603c3e114b22b817de",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-040",
+      "path": "docs/research/idea_b_asymmetric_contact_topology_review_20260811.md"
+    },
+    {
+      "content_source_blob_oid": "2726614464642304ecfae4808532547e5646fd21",
+      "content_source_commit": "e212afec9db5198a89930c7ff896e3e49a0c8249",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 66,
+      "integrated_blob_oid": "2726614464642304ecfae4808532547e5646fd21",
+      "integrated_sha256": "7f036c365d885a60787e0a18e933a0246fe26d0a2a68204e98a178723ad3e773",
+      "integration_commit": "e212afec9db5198a89930c7ff896e3e49a0c8249",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-041",
+      "path": "docs/research/idea_c_visibility_contact_aux_review_20260811.md"
+    },
+    {
+      "content_source_blob_oid": "00328c060813d2e869e0359a59bac1b6e0671396",
+      "content_source_commit": "cd6629f5c7fab60cfcaacd394207e817f364876a",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 67,
+      "integrated_blob_oid": "00328c060813d2e869e0359a59bac1b6e0671396",
+      "integrated_sha256": "d09bd4d1181ca2f4c5ad3396a226486cae2831f719fb0055eba0c9b8772ca231",
+      "integration_commit": "613be92980f5dd765b9875409290351eeda437e4",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-042",
+      "path": "docs/research/idea_d_censored_contact_benchmark_review_20260811.md"
+    },
+    {
+      "content_source_blob_oid": "ed4239d93dcf46a6dcabbddef6e131adbe405d29",
+      "content_source_commit": "1534ede3e47b9f26980fc2ddcc5805d88b205d8e",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 68,
+      "integrated_blob_oid": "ed4239d93dcf46a6dcabbddef6e131adbe405d29",
+      "integrated_sha256": "e58a665e232f15855d5810b0d643ad69ccd3273122665143db94e5722aed1423",
+      "integration_commit": "35c733c6056a418074c57ef0a2cfc666d5c7c110",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-043",
+      "path": "docs/research/idea_e_contact_action_consistency_review_20260811.md"
+    },
+    {
+      "content_source_blob_oid": "0c47d34f99368c6bc7d69848d2dc3e44bb1c2f2c",
+      "content_source_commit": "9f60f04cb3d0d6a45ee64ef77f71d04b2d722adb",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 69,
+      "integrated_blob_oid": "0c47d34f99368c6bc7d69848d2dc3e44bb1c2f2c",
+      "integrated_sha256": "ea39d16944c14a0d95604176097aca88dba25717b77659653e3d798a5d94cbf4",
+      "integration_commit": "268b63e70945e7aba4c29c7852a949a314790192",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-044",
+      "path": "docs/research/idea_g_partial_human_robot_alignment_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "b5e763abbbb63b6ae72f76c832b8952f9c1fc06f",
+      "content_source_commit": "0b67bee397f92224096d2b37f1a0cc713a1410f6",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 70,
+      "integrated_blob_oid": "b5e763abbbb63b6ae72f76c832b8952f9c1fc06f",
+      "integrated_sha256": "0b13c6a25913214cb755e2125fbfef60a2f4941027eb2aef5533bf4b876abdb1",
+      "integration_commit": "d891e70b448cb12b651bf4c13d780666b9e10e90",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-045",
+      "path": "docs/research/idea_i_causal_critical_windows_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "71cd8f45c208d961922359247c850afd32c47bf4",
+      "content_source_commit": "23e3834afe3abc389b8968ea95b6a6cf59e91d92",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 71,
+      "integrated_blob_oid": "71cd8f45c208d961922359247c850afd32c47bf4",
+      "integrated_sha256": "b50ce08c14760138c84d27da8bbdf3c74842cd1f4c799b54a0e86f29f0484c25",
+      "integration_commit": "77d047dbf66ff1799c3633dcba469a51f21cb66b",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-046",
+      "path": "docs/research/idea_k_effect_equivalent_interaction_quotient_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "36378851a472d40b318c9de45540ce8c6ed0ce39",
+      "content_source_commit": "190f3023da6ea6e0ee8251da22e2f21efea17bcc",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 77,
+      "integrated_blob_oid": "36378851a472d40b318c9de45540ce8c6ed0ce39",
+      "integrated_sha256": "07a3f65e6f3662dd37c005c78340e99c6c2385e87baa79fa297e663c677f688f",
+      "integration_commit": "714ce7d4eef25a60b3a39315a6a7aacab0e17830",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-047",
+      "path": "docs/research/sm_fet_wam_v2_schema_architecture_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "ba07a5fee44c41f01e4df01bdfdea9329df3bee4",
+      "content_source_commit": "6bc51b90002f7f533d7b1ff523caf562949eab64",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 78,
+      "integrated_blob_oid": "ba07a5fee44c41f01e4df01bdfdea9329df3bee4",
+      "integrated_sha256": "d326d7c730c8152fa838230b23ac4fcabf6f78243ab567fd274e2f945e1e6261",
+      "integration_commit": "517424999c28c3793f1003c2d915de50baf35ad8",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-048",
+      "path": "docs/research/sm_fet_wam_v2_final_architecture_decision_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "15b5da79a2b7848a113290eed2d686caff8226f3",
+      "content_source_commit": "288ef5dcf4e6299871dc50d33caa603e46345fcd",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 79,
+      "integrated_blob_oid": "15b5da79a2b7848a113290eed2d686caff8226f3",
+      "integrated_sha256": "c4f1f811f796e7c8604a0d0510229677693d6d1cc501b78f59f01cd4793e4a92",
+      "integration_commit": "2055341af53e034fe682fbf550e0ce84da2c3f38",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-049",
+      "path": "docs/research/sm_fet_annotation_and_pairing_protocol_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "6bd4eb709c24ff4310803dcb1881fb7adfec998a",
+      "content_source_commit": "d2bf1903227d8398b2c3a229554d861030a881f8",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 80,
+      "integrated_blob_oid": "6bd4eb709c24ff4310803dcb1881fb7adfec998a",
+      "integrated_sha256": "ea6300eba437901c69dbbe211b7aa4e86cd3e363274d5ce890d3a635bf00c52e",
+      "integration_commit": "d2bf1903227d8398b2c3a229554d861030a881f8",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-050",
+      "path": "docs/research/contact_transition_lab_wam_dossier_20260811.md"
+    },
+    {
+      "content_source_blob_oid": "4ac9079df9fdba4b625ea5cd1a03139c3bfcecee",
+      "content_source_commit": "279ddf49faef8dd6f3367d91c44c1c2968839cb7",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 81,
+      "integrated_blob_oid": "4ac9079df9fdba4b625ea5cd1a03139c3bfcecee",
+      "integrated_sha256": "21aaed7ae820e8b3009207efd852a10c226b5b1e6af3f10d6c4619f4e0152a50",
+      "integration_commit": "5c3e08e5fbfaded825c4b26901440c2068a7a78e",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-051",
+      "path": "docs/research/contact_wam_meta_synthesis_20260811.md"
+    },
+    {
+      "content_source_blob_oid": "7cc873fa3e02e6ae7d52c9ce4d5244c800cfc1f9",
+      "content_source_commit": "70af53256e1936236c61883c64c291a887addc90",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 82,
+      "integrated_blob_oid": "7cc873fa3e02e6ae7d52c9ce4d5244c800cfc1f9",
+      "integrated_sha256": "c6caa21b01a9a00f0d8a9de35ea0c6954d61d6a43f77bb0f38d2d091adb7a2ef",
+      "integration_commit": "e037bbd6793b1fd6f9f195cb499f528165215142",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-052",
+      "path": "docs/research/idea_a_finite_contact_wam_review_20260811.md"
+    },
+    {
+      "content_source_blob_oid": "596e8b182278ce7937b27f4f78d69c1fc72cba59",
+      "content_source_commit": "8f0432aa98fab8920f99495db3fc452a57503abc",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 83,
+      "integrated_blob_oid": "596e8b182278ce7937b27f4f78d69c1fc72cba59",
+      "integrated_sha256": "8a875aa8d5ed00b5e963e5de56c173f783854ba3a9baa4469eb337941aa3345d",
+      "integration_commit": "afd813184c1facac20d9e78e60b06306e2e9714a",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-053",
+      "path": "docs/research/idea_h_event_state_transition_wam_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "9be008229c1a2572b7af5abcf3857fbf25259010",
+      "content_source_commit": "85dc53c02a10609dde5777364fdd26daad453a4a",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 84,
+      "integrated_blob_oid": "9be008229c1a2572b7af5abcf3857fbf25259010",
+      "integrated_sha256": "4929c82ba335d1624d14e0cbf32be5354736075b7cc2e4a3b026174915b75e7e",
+      "integration_commit": "b3e223058f7754dce432d6141ca0949c9f230a5e",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-054",
+      "path": "docs/research/idea_j_pose_contact_change_signature_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "3ef22a7bd89dad929307f7c5cff3a81115e8bd6d",
+      "content_source_commit": "f2059a0e276bf4eecd70af010f6c4df8396438c6",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 90,
+      "integrated_blob_oid": "3ef22a7bd89dad929307f7c5cff3a81115e8bd6d",
+      "integrated_sha256": "40fc630829969c34016ae65e033fcb109222b181c1f69c207522eeec72caa95c",
+      "integration_commit": "4569c1fb3a037f2ee790bc9baa585a27b98fc3e7",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-055",
+      "path": "docs/research/idea_l_sparse_interaction_motif_dictionary_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "c8b687f145e4165cada9263015eb7af854e92ee8",
+      "content_source_commit": "006198f2aeb5e72e009a09a8449352f1d7c48b12",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 91,
+      "integrated_blob_oid": "c8b687f145e4165cada9263015eb7af854e92ee8",
+      "integrated_sha256": "e7d36f8054813169adc4548345875ce71dd207a9c43b86f101b153dc0916ec02",
+      "integration_commit": "31dc4e0557df6035929c58cd29eb208d61ad7520",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-056",
+      "path": "docs/research/sm_fet_minimal_r1a_schema_capacity_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "97cd5d257056bf1545137b83dbe32302b4c3fb03",
+      "content_source_commit": "e31208172d194511e7fc95acd6075635c249c335",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 92,
+      "integrated_blob_oid": "97cd5d257056bf1545137b83dbe32302b4c3fb03",
+      "integrated_sha256": "11631de5f8014d6f3ae951e9b0845f05f6cbdf3c80e4d48e4384f577eb838c34",
+      "integration_commit": "ff9c4d499040a1956089ea83a84599eeba59781a",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-057",
+      "path": "docs/research/sm_fet_minimal_r1b_schema_capacity_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "4c973dcc83b848ea3d1ed9af17e7fe289d86a94c",
+      "content_source_commit": "144d050ddfcb3d4a3fa0dc5f299754177c63f04b",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 93,
+      "integrated_blob_oid": "4c973dcc83b848ea3d1ed9af17e7fe289d86a94c",
+      "integrated_sha256": "66ca1c3c0311f46278a7547be21e5562d3b56fdde307c153eae401724b809f41",
+      "integration_commit": "9b3332e30915f0a17e35089546b64a025fe1d7db",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-058",
+      "path": "docs/research/sm_fet_minimal_r1b_control_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "a3d096e3076348839a4322d592afbaa3b17db704",
+      "content_source_commit": "49667be32d15bd95fd2bde610b3e251c2fcc8474",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 94,
+      "integrated_blob_oid": "a3d096e3076348839a4322d592afbaa3b17db704",
+      "integrated_sha256": "7aae28fe1e5bfe2c9203e3dbddc4a20e44cecd4ff325ca80155517aaf0f92b6c",
+      "integration_commit": "b371483a301f736cc6e35db179ea9c1d817c9bf2",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-059",
+      "path": "docs/research/sm_fet_minimal_r1b_crossdomain_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "d480a5f136f30a942d2f1bd454089ecee9dbf0c8",
+      "content_source_commit": "39bc2b4b1c4fa822cc5565e8d23081f628723151",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 95,
+      "integrated_blob_oid": "d480a5f136f30a942d2f1bd454089ecee9dbf0c8",
+      "integrated_sha256": "9b755a8b7f9dd84f91380b60de0f051bb3ddb23061f59a08abfb7c95b4dab1a5",
+      "integration_commit": "0f30e7fcdfd355054a7d7ead1332b6d96d7c3ce6",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-060",
+      "path": "docs/research/sm_fet_minimal_r1c_schema_capacity_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "fd0eef071eff9979592c2c2e1b4ba248bfd4b689",
+      "content_source_commit": "57434759a479aa3ec5d4f730778d0180de9ae06a",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 96,
+      "integrated_blob_oid": "fd0eef071eff9979592c2c2e1b4ba248bfd4b689",
+      "integrated_sha256": "57fdccc007bce94f5d79c0e10721b3dbd40fc94ced16d2d7af9255c589360bb5",
+      "integration_commit": "b3195da970402ebe29a2b9a48e914e8affa2eae1",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-061",
+      "path": "docs/research/sm_fet_minimal_r1c_final_review_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "a77beb5918ccecc30f5cd3f94fef745d811f23d2",
+      "content_source_commit": "89396591720035d0427679e07bebfad5fed60023",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 97,
+      "integrated_blob_oid": "a77beb5918ccecc30f5cd3f94fef745d811f23d2",
+      "integrated_sha256": "1745c430f5e49b162ec9f2252c0f7b7634a609f3caa818a876cbca30d0b6909f",
+      "integration_commit": "3625969b76e0e9b64c586a877c554eb8f5ff3d5b",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-062",
+      "path": "docs/research/temporal_event_pairing_wam_meta_synthesis_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "7f960146ee8ac6f822057598ec83d365dc004054",
+      "content_source_commit": "9f6eeff6761168048b49101cb5839170ae6b84bc",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 98,
+      "integrated_blob_oid": "7f960146ee8ac6f822057598ec83d365dc004054",
+      "integrated_sha256": "1b757b01aa80e4c55fd36cd7b306e57684448fe9d6d2a82a550ac6069264c698",
+      "integration_commit": "c59523149d27525e8f2edf59b2247f22afb342ec",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-063",
+      "path": "docs/research/sm_fet_missingness_capacity_reconciliation_20260812.md"
+    },
+    {
+      "content_source_blob_oid": "c58032b7ceb34dec4382dc2ccdbc428457a59d03",
+      "content_source_commit": "f795c4f615595d72219e79a0cb43d5adef12b0a0",
+      "exact_source_bytes": true,
+      "index_line_at_generation": 99,
+      "integrated_blob_oid": "c58032b7ceb34dec4382dc2ccdbc428457a59d03",
+      "integrated_sha256": "1f50a4f8ab339c1b462b21d9e65861fb75961ba638139fe312a8c72385171451",
+      "integration_commit": "a1fe59207c58340f484424f2e26d9256462b71c8",
+      "link_ordinal_on_line": 1,
+      "normalization": {
+        "description": "Integrated bytes exactly equal content source commit bytes.",
+        "kind": "none",
+        "operations": [],
+        "semantic_change": false
+      },
+      "occurrence_id": "index-link-064",
+      "path": "docs/research/sm_fet_transparent_nonreconstruction_contract_20260812.md"
+    }
+  ],
+  "coverage": {
+    "exact_source_byte_occurrences": 62,
+    "markdown_link_occurrences": 64,
+    "missing_paths": 0,
+    "normalized_occurrences": 2,
+    "unique_linked_paths": 48
+  },
+  "date": "2026-08-12",
+  "generated_against_commit": "c85173af4971fa3b624fc451726297b534b122ae",
+  "hash_algorithm": "sha256",
+  "index_path": "docs/research/WAM_BIOCHEMICAL_IDEA_INDEX_20260812.md",
+  "normalization_contract": {
+    "all_other_artifacts_require_exact_source_bytes": true,
+    "allowed_normalized_paths": [
+      "docs/research/sm_fet_finite_local_frame_design_20260812.md",
+      "docs/research/sm_fet_wam_novelty_adversarial_review_20260812.md"
+    ],
+    "semantic_change": false
+  },
+  "schema_id": "wam_biochemical_idea_provenance_v1"
+}
