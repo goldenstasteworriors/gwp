@@ -118,7 +118,10 @@ def main() -> None:
             chunk = 0
             while step < args.max_steps and not success:
                 request = {
-                    "image": observation["pixels"]["image"],
+                    # Official LeRobot LIBERO recordings use the visualization
+                    # convention, which flips the raw robosuite observation on
+                    # both image axes. Match the training-video orientation.
+                    "image": observation["pixels"]["image"][::-1, ::-1].copy(),
                     "state": policy_state(observation),
                     "prompt_key": f"{args.suite}:{task_id}",
                     "task_id": task_id,
