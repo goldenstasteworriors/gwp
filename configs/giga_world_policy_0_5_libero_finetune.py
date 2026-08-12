@@ -26,7 +26,12 @@ def _bool(name: str, default: bool) -> bool:
 
 
 num_frames = 48
-data_path = _required("GWP_LIBERO_DATA_PATH")
+data_paths_value = _env("GWP_LIBERO_DATA_PATHS")
+if data_paths_value is None:
+    data_paths_value = _required("GWP_LIBERO_DATA_PATH")
+data_paths = [path.strip() for path in data_paths_value.split(",") if path.strip()]
+if not data_paths:
+    raise RuntimeError("GWP_LIBERO_DATA_PATH or GWP_LIBERO_DATA_PATHS must contain a dataset path")
 norm_stats_path = _required("GWP_NORM_STATS_PATH")
 transformer_pretrained = _required("GWP05_TRANSFORMER_PRETRAINED")
 wan_pretrained = _env("GWP_WAN_PRETRAINED", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
@@ -65,6 +70,7 @@ data_or_config = [
         t5_cache_size=4096,
         robotype="franka",
     )
+    for data_path in data_paths
 ]
 
 config = dict(
@@ -92,7 +98,7 @@ config = dict(
                 num_frames=num_frames,
                 fps=20,
                 is_train=True,
-                norm_path=[{"path": norm_stats_path, "data_paths": [data_path]}],
+                norm_path=[{"path": norm_stats_path, "data_paths": data_paths}],
                 robotype_to_embodiment_id={"franka": 0},
                 robotype_default_embodiment_id=0,
                 model_action_dim=16,
