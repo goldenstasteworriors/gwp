@@ -144,6 +144,8 @@ config = dict(
         expand_timesteps=True,
         enable_gradient_checkpointing=True,
         skip_action_expert=False,
+        visual_loss_weight=float(_env("GWP_VISUAL_LOSS_WEIGHT", "1.0")),
+        action_loss_weight=float(_env("GWP_ACTION_LOSS_WEIGHT", "1.0")),
         consequence_loss_weight=consequence_weight,
         consequence_gradient_mode=(
             "policy_only" if consequence_mode == "off" else consequence_mode

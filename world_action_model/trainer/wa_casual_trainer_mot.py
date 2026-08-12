@@ -22,6 +22,8 @@ class CasualWATrainerMoT(Trainer):
         self.state_repeats = model_config.get("state_repeats", 1)
         self.action_dim = int(model_config.get("action_dim", 14))
         self.num_embodiments = int(model_config.get("num_embodiments", 1))
+        self.visual_loss_weight = float(model_config.get("visual_loss_weight", 1.0))
+        self.action_loss_weight = float(model_config.get("action_loss_weight", 1.0))
         self.consequence_loss_weight = float(model_config.get("consequence_loss_weight", 0.0))
         self.consequence_gradient_mode = str(model_config.get("consequence_gradient_mode", "policy_only"))
         self.consequence_interval = int(model_config.get("consequence_interval", 1))
@@ -175,8 +177,8 @@ class CasualWATrainerMoT(Trainer):
 
         action_loss = (action_pred.float() - action_target.float()).pow(2).mean()
         losses = {
-            "visual_loss": visual_loss,
-            "action_loss": action_loss,
+            "visual_loss": self.visual_loss_weight * visual_loss,
+            "action_loss": self.action_loss_weight * action_loss,
         }
         if self._should_compute_consequence_loss():
             predicted_clean_action = noisy_action.float() - action_sigma.float() * action_pred.float()
