@@ -2,10 +2,10 @@
 
 ## 使用规则
 
-- 本索引只描述研究文档，不代表代码实现、模型训练、GPU/服务器使用或硬件部署许可。
+- 本索引描述研究文档与明确列出的 CPU/packet 工程 artifact 状态；它不代表模型训练、GPU/服务器使用或硬件部署许可。
 - 总体 `idea_id`：`b4ec9e69-e9aa-4025-8d79-e36df14e0a5e`。
 - 最终 portfolio critic `discussion_id`：`240c8a16-b6a2-4119-918f-711590af88ea`。
-- 裁决优先级：minimal-r1d final addendum review > r1d normative addendum > r1d schema contract > r1d conditional review > r1c/r1b/r1a 审计链 > standard-r1 历史规范 > 最终 portfolio / paper story > 专题 contract > 单独 Idea memo > temporal meta / op22 历史总览。
+- 裁决优先级：minimal-r1d codec fix2 final review > r1d final addendum review > r1d normative addendum > r1d schema contract > r1d conditional review > r1c/r1b/r1a 审计链 > standard-r1 历史规范 > 最终 portfolio / paper story > 专题 contract > 单独 Idea memo > temporal meta / op22 历史总览。
 - 表中的 `source commit` 指产生所收录最终研究 bytes 的原始来源提交；canonical 已有且无需重复导入的文档会同时注明其 canonical 最终 bytes 提交。
 - `Conditional Go` 只允许进入相应数据、标注或实验 gate；不等于允许直接实现大模型、训练或部署。
 
@@ -13,8 +13,8 @@
 
 1. `281.932700038062 bit` 已先被 standard-r1 的 `207.749746919520 bit` 纠正；但 standard-r1 现又被降为高表达 **baseline**，不再是主候选。
 2. `HAND_UNRESOLVED` action-visible actor 是候选 r2，不是现行规范。r2 的 `210.24289126401328 bit` 口径及其 action admission 已被 r1 裁决否决；现行做法是 annotation-side `CONFIRMED_PRESENT + REVIEWED_UNKNOWN`、actor loss mask、packet fail-closed 与 `HOLD/REOBSERVE`。
-3. 当前唯一主结构是 `sm_fet_hard_grammar_v2_minimal_r1d_struct_v1`：书面 hardware-family structural grammar **Doc structural Freeze**，精确容量 `96.99142134161319 bit`、97-bit 最小索引、32-byte wire / 5 tokens；CPU codec/codebook/public-state conformance 仍为 **PENDING**。
-4. 真实 `G1 + RH56DFTP + OmniPicker` executable profile 仍为 **NO-GO / UNDEFINED**。`43/50/58` 的 `1V/13P/4U` 只是 coordinator-only blind-set proposal，不是 annotation、GT、calibration、D0/D1 evidence 或 gate 结果。
+3. 当前唯一主结构是 `sm_fet_hard_grammar_v2_minimal_r1d_struct_v1`：书面 hardware-family structural grammar **Doc structural Freeze**，精确容量 `96.99142134161319 bit`、97-bit 最小索引、32-byte wire / 5 tokens；fix2 的 frozen structural codec/checker gates 已获 **CPU-conformant Freeze Go**。
+4. 真实 `G1 + RH56DFTP + OmniPicker` executable profile 仍为 **NO-GO / UNDEFINED**；CPU codec Go 不得外推为真实 profile、训练或部署 Go。D0 packet 的 source/assignment/submission/end-to-end **engineering Go** 也不等于真人 gate：真人 distribution、independent annotation、submission/lock 及 D0 均为 **NOT RUN / 未通过**；`43/50/58` 的 `1V/13P/4U` 仍只是 coordinator-only proposal。
 
 ## 当前结构裁决与 supersession 链
 
@@ -24,7 +24,7 @@
 | minimal-r1a | [D0 schema reduction](./sm_fet_d0_schema_reduction_review_20260812.md)、[r1a schema/capacity](./sm_fet_minimal_r1a_schema_capacity_20260812.md) | `fdac965a181e7e3acef3510e788ae4661931197f`, `006198f2aeb5e72e009a09a8449352f1d7c48b12` | `20.46269497000547 bit`；**No-Go / 过弱**，不能覆盖通用执行 locator 与双约束 | 被 minimal-r1b 取代 |
 | minimal-r1b | [r1b schema](./sm_fet_minimal_r1b_schema_capacity_20260812.md)、[control review](./sm_fet_minimal_r1b_control_review_20260812.md)、[cross-domain review](./sm_fet_minimal_r1b_crossdomain_review_20260812.md) | `e31208172d194511e7fc95acd6075635c249c335`, `144d050ddfcb3d4a3fa0dc5f299754177c63f04b`, `49667be32d15bd95fd2bde610b3e251c2fcc8474` | `81.47790257814123 bit` structural candidate；**No-Go**：function、full frame、part、compound 与旁路合同未闭合 | 被 minimal-r1c 取代 |
 | minimal-r1c | [r1c candidate](./sm_fet_minimal_r1c_schema_capacity_20260812.md)、[r1c final review](./sm_fet_minimal_r1c_final_review_20260812.md) | `39bc2b4b1c4fa822cc5565e8d23081f628723151`, `57434759a479aa3ec5d4f730778d0180de9ae06a` | `96.67105236912121 bit`；最终 structural freeze **No-Go** | 五类合同 blocker 由 minimal-r1d 修订；r1c 已 superseded |
-| **minimal-r1d** | [r1d contract](./sm_fet_minimal_r1d_schema_contract_20260812.md)、[conditional review](./sm_fet_minimal_r1d_final_review_20260812.md)、[normative addendum](./sm_fet_minimal_r1d_freeze_addendum_20260812.md)、[final addendum review](./sm_fet_minimal_r1d_freeze_addendum_review_20260812.md) | `5019c1828cf17e169c51ecf6772ad16b23d51c2d`, `fe24e2fa00dcd4f66f6b7f7415faec8042a7b855`, `c9ce174f8f89f73d11d1def8865c04c66588ef7d`, `08b8982380e0b9fd0872739f9d3c6a7c30d86e96` | **当前唯一主结构：Doc structural Freeze**；`96.99142134161319 bit`；CPU conformance PENDING；G1 executable profile NO-GO / UNDEFINED | 取代 r1a/r1b/r1c；任何 field/topology 改动必须升 schema 并重新计容 |
+| **minimal-r1d** | [r1d contract](./sm_fet_minimal_r1d_schema_contract_20260812.md)、[normative addendum](./sm_fet_minimal_r1d_freeze_addendum_20260812.md)、[CPU codec conformance](./sm_fet_minimal_r1d_codec_conformance_20260812.md)、[codec fix2 final review](./sm_fet_r1d_codec_fix2_final_review_20260812.md) | 书面链 `5019c1828cf17e169c51ecf6772ad16b23d51c2d`, `c9ce174f8f89f73d11d1def8865c04c66588ef7d`, `08b8982380e0b9fd0872739f9d3c6a7c30d86e96`；codec 链 `dec1988465cf444f47859f5acb97a390d1f56d5a`, `aa13981e5959611ad39574dca381fdede48db343`, `2743cbdaec18e03a4c42f7444806584488837611`；最终审计 `44bdee68c54cd816123ae6017d3e33412fd679d1` | **当前唯一主结构：Doc structural Freeze + CPU-conformant Freeze Go**；`96.99142134161319 bit`；G1 executable profile **NO-GO**，states/bits **UNDEFINED** | 取代 r1a/r1b/r1c；CPU Go 只限 frozen structural codec/checker gates；任何 field/topology 改动必须升 schema 并重新计容 |
 
 ## HEADLINE
 
@@ -36,6 +36,8 @@
 | [minimal-r1d Structural Freeze Addendum](./sm_fet_minimal_r1d_freeze_addendum_20260812.md) | 未声明（归属总体 SM-FET） | `c9ce174f8f89f73d11d1def8865c04c66588ef7d` | **Normative addendum**；书面闭合 rank/unrank、partial frame、resource target、JSON、codebook 与 CPU golden gate 合同 | 对主合同歧义具有规范优先级，不改变 field/topology/capacity；CPU 执行仍 pending |
 | [minimal-r1d 最终独立复审](./sm_fet_minimal_r1d_final_review_20260812.md) | 未声明（归属总体 SM-FET） | `fe24e2fa00dcd4f66f6b7f7415faec8042a7b855` | **历史 Conditional Freeze review**；确认 `96.99142134161319 bit`，列出六项冻结前条件 | 六项书面缺口由 `c9ce174` addendum 闭合；最终状态以后续 `08b8982` 为准 |
 | [minimal-r1d Freeze Addendum 最终复审](./sm_fet_minimal_r1d_freeze_addendum_review_20260812.md) | 未声明（归属总体 SM-FET） | `08b8982380e0b9fd0872739f9d3c6a7c30d86e96` | **最终 Doc structural Freeze**；CPU conformance **PENDING**；G1 executable profile **NO-GO**、states/bits **UNDEFINED** | 当前最高结构裁决；不授权实现、训练、真机或把 structural bits 称为部署容量 |
+| [minimal-r1d CPU Codec Conformance](./sm_fet_minimal_r1d_codec_conformance_20260812.md) | 未声明（归属总体 SM-FET） | final codec `2743cbdaec18e03a4c42f7444806584488837611`（初稿 `dec1988465cf444f47859f5acb97a390d1f56d5a`，fix1 `aa13981e5959611ad39574dca381fdede48db343`） | **CPU-conformant for frozen structural codec/checker gates**；stdlib / CPU only | 关闭上一行 review 的 CPU `PENDING`；不产生真实 G1 codebook/profile，不授权训练或部署 |
+| [minimal-r1d Codec Fix2 最终独立复审](./sm_fet_r1d_codec_fix2_final_review_20260812.md) | 未声明（归属总体 SM-FET） | `44bdee68c54cd816123ae6017d3e33412fd679d1`（被审 codec `2743cbdaec18e03a4c42f7444806584488837611`） | **CPU-conformant Freeze Go**，P0=0/P1=0；G1 profile **No-Go / UNDEFINED** | 当前最高 CPU codec 裁决；仅覆盖 frozen structural codec/checker gates |
 | [Idea F：Temporal Contact-Pose Tube](./idea_f_temporal_contact_pose_tube_review_20260812.md) | idea `a78673af-f56e-4ad1-9974-beee1edb765b`; discussion `8562848c-0b71-485e-abff-064f0900159c` | `20421c7502e6fa3febfe2234db9e414594c5f964` | **HEADLINE 概念来源**；独立“首次时序 hand-contact trajectory”主张 No-Go | 早期 packet 与容量均过时；当前结构实例必须引用 minimal-r1d |
 
 ## SUPPORTING
@@ -48,6 +50,8 @@
 | [D0 Annotation Handbook](./sm_fet_d0_annotation_handbook_20260812.md) | 未声明 | `00817c58d85a322c67fafb8ee1ee52e6f89a4616` | **Supporting annotation handbook**；不产生 GT，D0/D1 均未通过，blind 不得抢跑 | 字段与 82-code 操作细节面向 standard-r1，需为 minimal-r1d 另行修订后才可执行 |
 | [D0 三段 Blind-Set Proposal Probe（fix1）](./sm_fet_d0_three_episode_observability_audit_20260812.md) | 未声明 | `24131df4349f0610c361b14d76cbc61c67efef22`（初稿 `664dfc6c5baa10a709b2996178a7238f48247f20`） | **Coordinator-only proposal**；43/50/58 得到 `1V/13P/4U`，不生成 GT、不形成 calibration、**不计 D0/D1** | fix1 依据独立复审修订初稿；不得分发给未来 blind A/B 或升级为 oracle evidence |
 | [D0 Observability Independent Review](./sm_fet_d0_observability_independent_review_20260812.md) | 未声明 | `189dfa8a2ca24b1d9e333addb2d393af90704ac6` | **Supporting independent audit**；确认 `1V/13P/4U` 仅为第二位 proposal taxonomy，D0 仍未通过 | 其纠正已吸收到 proposal fix1；不能替代 checker/round-trip/capacity receipt |
+| [D0 Calibration Packet v1](../../track_a/sm_fet_d0_calibration_packet_v1/README.md) | 未声明 | final packet `b082680a74b1f0720c8b5e1023feeb8b39fd6cb9`（链 `3082f05d30c4a685a9303c95ae0d62fc251be2f2`, `9dba875af67e05d4e72a1011cb8a1ae63c22d09e`, `c5e63590ec5535068db937ee46d0c064d25e6943`, `b082680a74b1f0720c8b5e1023feeb8b39fd6cb9`） | source / assignment / submission / end-to-end packet **Engineering Go** | 只是 metadata-only 工程包；真人 distribution、annotation、submission/lock 和 D0 均未执行；README 中的 codec pending 是 packet 产生时点的历史口径，已被 codec fix2 final review 更新 |
+| [D0 Packet Fix3 最终独立复审](./sm_fet_d0_calibration_packet_fix3_final_review_20260812.md) | 未声明 | `80ff5ef47bd25fa056c3b243a624e8991e5c33f9`（被审 packet `b082680a74b1f0720c8b5e1023feeb8b39fd6cb9`） | **Engineering Go**；真人 distribution / independent annotation / submission / lock / D0 **NOT RUN / 未通过** | 当前最高 packet 工程裁决；不得把 fixture 或 self-test 写成真人证据 |
 | [D0 Schema Reduction Review](./sm_fet_d0_schema_reduction_review_20260812.md) | idea `b4ec9e69-e9aa-4025-8d79-e36df14e0a5e`; discussion `126b612c-3da6-4a77-8526-0394e60c9be0` | `fdac965a181e7e3acef3510e788ae4661931197f` | **Supporting structural reduction audit**；判定 standard-r1 过度复杂并提出 minimal-r1a | r1a 后被证明过弱；本 memo 只保留 standard-r1 降级和分层原则 |
 | [G1/RH56/Omni Capability Profile](./g1_rh56_omnipicker_sm_fet_capability_profile_20260812.md) | idea `ca118643-f979-44e8-9526-50957b0ca236`; discussion `5eabd03f-c496-4d06-b538-762b92bae3df` | `febccbb209d429f523562ac0119d06a3c421a6df` | **Supporting semantic registry design**；型号拓扑可记，真实任务 binding 仍需 calibration | executable profile instance、exact deployed reachability、训练和部署均 No-Go；由 r1d 合同继承其分层边界 |
 | [Finite Local Frame Design](./sm_fet_finite_local_frame_design_20260812.md) | idea `b6764f3e-92e1-41f1-bc95-2ea6709c43ac`; discussion `22cac0b2-03d8-4e4d-8c0e-d4f9c52e0733` | `39adb119b1e039736e5404150ed9f3fa1e10d358` | **Supporting locator design**；axis+roll full frame 与有限 surface path 的来源审计 | r1b 单-axis locator 被否决；最终结构已由 r1c/r1d 吸收并精确计容 |
@@ -95,9 +99,10 @@
 
 ## 当前统一状态
 
-- **已冻结且仅冻结书面结构**：minimal-r1d 主合同 + normative addendum，hardware-family structural capacity `96.99142134161319 bit`。
-- **下一机械 gate**：CPU codec/codebook/public-state conformance 与 golden vectors仍 **PENDING**；未执行前不得把 Doc structural Freeze 写成实现通过。
-- **D0/D1仍未通过**：episode 43/50/58 的 `1V/13P/4U` 只是 blind coordinator proposal，不是 annotation、GT、calibration、D0/D1 evidence；且 standard-r1 handbook/protocol不能原样充当 r1d checker/annotation contract。
-- **Conditional Go**：r1d CPU contract、合法 calibration/blind annotation 与后续 D0/D1 gate通过后，才讨论36 human + 36目标机器人同任务pilot及180条pair gold。
+- **结构与 CPU codec：Go**：minimal-r1d 主合同 + normative addendum 为 Doc structural Freeze，hardware-family structural capacity `96.99142134161319 bit`；fix2 frozen structural codec/checker gates 为 **CPU-conformant Freeze Go**。
+- **G1 profile：No-Go / undefined**：真实 G1 metric tables、codebook、resource/capability/runtime receipts 未建立，executable profile states/bits 均 **UNDEFINED**；不得把 structural capacity 或 CPU self-test 写成部署容量。
+- **D0 packet engineering：Go**：source、assignment、submission 与 end-to-end packet checker 的工程门已闭合。
+- **真人流程与 D0：Not Run**：distribution、independent annotation、submission/lock、A/B comparison/discussion 尚未发生，D0 未通过；episode 43/50/58 的 `1V/13P/4U` 仍只是 blind coordinator proposal。
+- **Conditional Go**：只允许进入受控真人 D0 分发/标注流程；必须等 D0/D1 gate 通过后，才讨论36 human + 36目标机器人同任务pilot及180条pair gold。
 - **公开数据边界**：公开集不替代 D2 主检验；RH20T 只作为 `D2-X primary proxy`，不得填入目标12 cells或36+36 gold。
 - **现在 No-Go**：G1 executable profile及其states/bits（当前UNDEFINED）、实现/训练大WAM、GPU/服务器训练、目标硬件部署、当前66+88正配对、透明3D重建，以及任何未经gate的论文收益claim。
