@@ -152,8 +152,18 @@ def render_state(env: Any, obs: dict[str, Any], robot_ids: list[int], gripper_id
     camera_position = sim.data.cam_xpos[camera_id].copy()
     camera_rotation = sim.data.cam_xmat[camera_id].reshape(3, 3).copy()
     eef_position = np.asarray(obs["robot_state"]["eef"]["pos"], dtype=np.float64)
+    eef_rotation = np.asarray(obs["robot_state"]["eef"]["mat"], dtype=np.float64).reshape(3, 3)
     eef_pixel, valid = project_world_points(
         eef_position,
+        camera_position,
+        camera_rotation,
+        float(sim.model.cam_fovy[camera_id]),
+        rgb.shape[:2],
+    )
+    axis_length_m = 0.06
+    eef_axis_points = eef_position[None, :] + eef_rotation.T * axis_length_m
+    eef_axis_pixels, axes_visible = project_world_points(
+        eef_axis_points,
         camera_position,
         camera_rotation,
         float(sim.model.cam_fovy[camera_id]),
@@ -167,8 +177,11 @@ def render_state(env: Any, obs: dict[str, Any], robot_ids: list[int], gripper_id
         "gripper_mask": gripper_mask,
         "gripper_centroid": centroid(gripper_mask),
         "eef_position": eef_position,
+        "eef_rotation": eef_rotation,
         "eef_pixel": eef_pixel,
+        "eef_axis_pixels": eef_axis_pixels,
         "eef_visible": bool(valid),
+        "eef_axes_visible": axes_visible,
     }
 
 
@@ -202,6 +215,16 @@ def transform_point(point: np.ndarray, homography: np.ndarray) -> np.ndarray:
     homogeneous = np.array([point[0], point[1], 1.0], dtype=np.float64)
     transformed = homography @ homogeneous
     return transformed[:2] / transformed[2]
+
+
+def transform_points(points: np.ndarray, homography: np.ndarray) -> np.ndarray:
+    return np.stack([transform_point(point, homography) for point in np.asarray(points)], axis=0)
+
+
+def rotation_error_degrees(predicted: np.ndarray, target: np.ndarray) -> float:
+    relative = np.asarray(predicted, dtype=np.float64).T @ np.asarray(target, dtype=np.float64)
+    cosine = np.clip((np.trace(relative) - 1.0) * 0.5, -1.0, 1.0)
+    return float(np.rad2deg(np.arccos(cosine)))
 
 
 def vector_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, float]:
@@ -292,7 +315,13 @@ def main() -> None:
         ) > 0
         jittered_eef = transform_point(pred["eef_pixel"], jitter_h)
         registered_eef = transform_point(jittered_eef, registration_h)
+        jittered_axes = transform_points(pred["eef_axis_pixels"], jitter_h)
+        registered_axes = transform_points(jittered_axes, registration_h)
         eef_rollout_error = float(np.linalg.norm(registered_eef - gt["eef_pixel"]))
+        eef_frame_endpoint_error = float(
+            np.linalg.norm(registered_axes - gt["eef_axis_pixels"], axis=-1).mean()
+        )
+        eef_rotation_error = rotation_error_degrees(pred["eef_rotation"], gt["eef_rotation"])
 
         gt_projected_effect = gt["eef_pixel"] - gt_states[0]["eef_pixel"]
         gt_observed_effect = gt["gripper_centroid"] - gt_states[0]["gripper_centroid"]
@@ -307,12 +336,16 @@ def main() -> None:
             "registered_mask": registered_metrics,
             "registration": registration,
             "eef_rollout_error_px": eef_rollout_error,
+            "eef_frame_endpoint_error_px": eef_frame_endpoint_error,
+            "eef_rotation_error_deg": eef_rotation_error,
             "gt_eef_projection_vs_gripper_video": projection_vs_video,
             "predicted_vs_gt_eef_effect": rollout_effect,
             "gt_eef_position": gt["eef_position"],
             "predicted_eef_position": pred["eef_position"],
             "gt_eef_pixel": gt["eef_pixel"],
             "registered_predicted_eef_pixel": registered_eef,
+            "gt_eef_axis_pixels": gt["eef_axis_pixels"],
+            "registered_predicted_eef_axis_pixels": registered_axes,
         }
         results.append(row)
         overlay = overlay_image(
@@ -325,6 +358,12 @@ def main() -> None:
         "registered_mask_iou_mean": float(np.mean([row["registered_mask"]["iou"] for row in nonzero])),
         "raw_mask_iou_mean": float(np.mean([row["raw_mask"]["iou"] for row in nonzero])),
         "eef_rollout_error_px_mean": float(np.mean([row["eef_rollout_error_px"] for row in nonzero])),
+        "eef_frame_endpoint_error_px_mean": float(
+            np.mean([row["eef_frame_endpoint_error_px"] for row in nonzero])
+        ),
+        "eef_rotation_error_deg_mean": float(
+            np.mean([row["eef_rotation_error_deg"] for row in nonzero])
+        ),
         "projection_vs_gripper_endpoint_error_px_mean": float(
             np.mean([row["gt_eef_projection_vs_gripper_video"]["endpoint_error_px"] for row in nonzero])
         ),
