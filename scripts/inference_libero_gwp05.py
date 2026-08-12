@@ -30,7 +30,7 @@ for path in [
 os.environ.setdefault("GIGA_MODELS_LIGHT_IMPORT", "1")
 
 from giga_models.sockets import RobotInferenceServer  # noqa: E402
-from inference_openloop_gwp0 import WAPipeline, resolve_torch_dtype  # noqa: E402
+from inference_openloop import WAPipeline, resolve_torch_dtype  # noqa: E402
 from world_action_model.models import CasualWorldActionTransformer_MoT  # noqa: E402
 
 
