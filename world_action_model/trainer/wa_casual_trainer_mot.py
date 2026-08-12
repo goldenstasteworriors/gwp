@@ -6,6 +6,7 @@ from diffusers.models import AutoencoderKLWan
 from diffusers.video_processor import VideoProcessor
 from einops import rearrange
 from giga_models import utils as gm_utils
+from world_action_model.alignment import policy_only_surrogate
 from world_action_model.models import CasualWorldActionTransformer_MoT
 from giga_train import ModuleDict, Trainer
 
@@ -21,6 +22,21 @@ class CasualWATrainerMoT(Trainer):
         self.state_repeats = model_config.get("state_repeats", 1)
         self.action_dim = int(model_config.get("action_dim", 14))
         self.num_embodiments = int(model_config.get("num_embodiments", 1))
+        self.consequence_loss_weight = float(model_config.get("consequence_loss_weight", 0.0))
+        self.consequence_gradient_mode = str(model_config.get("consequence_gradient_mode", "policy_only"))
+        self.consequence_interval = int(model_config.get("consequence_interval", 1))
+        self.consequence_start_step = int(model_config.get("consequence_start_step", 0))
+        self.consequence_visual_sigma = float(model_config.get("consequence_visual_sigma", 1.0))
+        valid_gradient_modes = {"policy_only", "joint", "video_only"}
+        if self.consequence_gradient_mode not in valid_gradient_modes:
+            raise ValueError(
+                f"consequence_gradient_mode={self.consequence_gradient_mode!r} must be one of "
+                f"{sorted(valid_gradient_modes)}"
+            )
+        if self.consequence_interval <= 0:
+            raise ValueError("consequence_interval must be positive")
+        if not 0.0 < self.consequence_visual_sigma <= 1.0:
+            raise ValueError("consequence_visual_sigma must be in (0, 1]")
 
         vae_pretrained = model_config.get("vae_pretrained", os.path.join(pretrained, "vae"))
         vae_dtype = model_config.get("vae_dtype", torch.float32)
@@ -158,10 +174,55 @@ class CasualWATrainerMoT(Trainer):
         visual_loss = ((visual_pred.float() - visual_target.float()) * first_frame_mask).pow(2).mean()
 
         action_loss = (action_pred.float() - action_target.float()).pow(2).mean()
-        return {
+        losses = {
             "visual_loss": visual_loss,
             "action_loss": action_loss,
         }
+        if self._should_compute_consequence_loss():
+            predicted_clean_action = noisy_action.float() - action_sigma.float() * action_pred.float()
+            consequence_action = predicted_clean_action
+            if self.consequence_gradient_mode == "video_only":
+                consequence_action = consequence_action.detach()
+
+            consequence_sigma = self.consequence_visual_sigma
+            consequence_future_latents = (
+                visual_noise[:, :, 1:] * consequence_sigma
+                + visual_latents[:, :, 1:] * (1.0 - consequence_sigma)
+            ).to(self.dtype)
+            consequence_timestep = torch.zeros_like(timestep)
+            consequence_visual_timestep = int(round(1000.0 * consequence_sigma))
+            consequence_timestep[:, num_state_tokens + num_action_tokens + num_clean_latent_tokens :] = (
+                consequence_visual_timestep
+            )
+
+            consequence_visual_pred, _ = transformer(
+                ref_latents=ref_latents,
+                noisy_latents=consequence_future_latents,
+                timestep=consequence_timestep,
+                encoder_hidden_states=prompt_embeds,
+                return_dict=False,
+                action=consequence_action.to(self.dtype),
+                state=state,
+                embodiment_id=embodiment_id,
+            )
+            raw_consequence_loss = (
+                (consequence_visual_pred.float() - visual_target.float()) * first_frame_mask
+            ).pow(2).mean()
+
+            if self.consequence_gradient_mode == "policy_only":
+                consequence_loss = policy_only_surrogate(raw_consequence_loss, predicted_clean_action)
+            else:
+                consequence_loss = raw_consequence_loss
+            losses["consequence_loss"] = self.consequence_loss_weight * consequence_loss
+        return losses
+
+    def _should_compute_consequence_loss(self) -> bool:
+        if self.consequence_loss_weight <= 0.0:
+            return False
+        step = int(getattr(self, "_cur_step", 0))
+        if step < self.consequence_start_step:
+            return False
+        return (step - self.consequence_start_step) % self.consequence_interval == 0
 
     def forward_vae(self, images):
         images = images.to(self.vae.dtype)
