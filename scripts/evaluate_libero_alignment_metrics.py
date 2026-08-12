@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--predicted-actions", type=Path)
     parser.add_argument("--camera-jitter-px", type=float, default=3.0)
     parser.add_argument("--camera-jitter-deg", type=float, default=0.6)
+    parser.add_argument(
+        "--num-steps-wait",
+        type=int,
+        default=10,
+        help="No-op settling steps before rollout; 10 matches the official LeRobot LIBERO evaluator.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()
@@ -245,7 +251,7 @@ def main() -> None:
         init_states=True,
         episode_index=task_episode_rank,
         n_envs=1,
-        num_steps_wait=0,
+        num_steps_wait=args.num_steps_wait,
     )
     gt_env = LiberoEnv(**common)
     pred_env = LiberoEnv(**common)
@@ -331,6 +337,7 @@ def main() -> None:
         "action_source": str(args.predicted_actions) if args.predicted_actions else args.perturbation,
         "camera_jitter_px": args.camera_jitter_px,
         "camera_jitter_deg": args.camera_jitter_deg,
+        "num_steps_wait": args.num_steps_wait,
         "aggregate": aggregate,
         "horizons": results,
     }
