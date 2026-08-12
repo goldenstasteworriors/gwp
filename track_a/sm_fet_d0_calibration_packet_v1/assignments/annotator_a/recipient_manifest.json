@@ -4,8 +4,8 @@
   "manifest_self_hash": "excluded_to_avoid_circular_hash",
   "files_sha256": {
     "ANNOTATION_HANDBOOK.md": "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4",
-    "TASK_ONTOLOGY.json": "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a",
-    "assignment_receipt.json": "54e17f8254ca74357d016dabcf94c6e250fb3bc2eff152b920dac779aa16c8b3",
+    "TASK_ONTOLOGY.json": "ccb600e7ccbe2762ab6903df0c206026306cd9a8b0fdeba12d6999a01ef7a372",
+    "assignment_receipt.json": "d2f0f1d3031acbc0e7f7f175b699184b7cfa016c63c6b4f5311ea2028ce30ca7",
     "coverage.csv": "e6bd9eb229102a8999971286be463c338952214e6c3022f8225ce9ab7a3eb9c8",
     "event_edges_v1.csv": "b5af024dcc7305fc946a9b48a35bc795472e477a2ecf286130804472d7382993",
     "event_node_snapshots_v1.csv": "4026cdc8a83a2c0a04f39260dbd403d120140a3bb62757a2a71ce27f012ab1ad",
@@ -14,10 +14,10 @@
     "media_allowlist.csv": "bcb9dd81e8a4800717c037ec1866a2d1ce3f76d7aca75bb3b9750c5ead1c3486",
     "pose_keys_2d_v1.csv": "85d138ee6d946f0035253dc839a5a1ae1af33e4bc2b4f806486a46c1b2ff583c",
     "recipient_exact_allowlist.json": "f561a36ab8f638168d73451adcb6d74921320deeea3cb5ba28066a6ef94e543d",
-    "schema_manifest.json": "8f33609a7c320052781b930543e46d174ae31f0528dd02e03e610df73e9802b7",
+    "schema_manifest.json": "0f5d757edcb912b6c9e12f271e314c760e5e4c148c7a49b56131e5a22383dd31",
     "segments.csv": "d3b900c4a607a1afb87e77e2f491e453f7abb5acffa90663ea39b6283cda31ee",
-    "session.json": "a9220d8d57875b8c78130ff7aa32d1f76c9bc255de7503b21a0a78b0444ae51c",
-    "submission_receipt.json": "d50b090882485f1a54839c3a8c91a579047f8ea1765b02424aea7475346ef8fb",
+    "session.json": "5d61da3a2b1c926cda4f94832115186589cd4da3351de3a95a88b81b718ab87e",
+    "submission_receipt.json": "119bd940d64bfd522e7c4109cccbbc34b4353e37c3d377437bcb33a1b7be4445",
     "task_manifest.csv": "22de1250aef781ff6c09bc340f55af9c288e4330cf784a5ec1bc885a241a4706"
   }
 }

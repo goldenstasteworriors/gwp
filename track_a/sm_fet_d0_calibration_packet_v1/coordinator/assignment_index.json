@@ -1,29 +1,29 @@
 {
   "index_schema_version": "sm_fet_d0_assignment_index_v1_fix2",
   "packet_schema_version": "sm_fet_d0_calibration_packet_v1_fix2",
-  "schema_manifest_sha256": "8f33609a7c320052781b930543e46d174ae31f0528dd02e03e610df73e9802b7",
+  "schema_manifest_sha256": "0f5d757edcb912b6c9e12f271e314c760e5e4c148c7a49b56131e5a22383dd31",
   "recipients": {
     "annotator_a": {
       "packet_id": "sm-fet-d0-calibration-a-v1-fix2",
       "annotation_role": "independent_a",
       "annotator_id": "d0cal-annotator-a",
       "annotation_session_id": "d0cal-session-a-20260812",
-      "assignment_receipt_sha256": "54e17f8254ca74357d016dabcf94c6e250fb3bc2eff152b920dac779aa16c8b3",
-      "recipient_manifest_sha256": "febc2298ab7f104b9089cc1ef2b10b7a30958ef2d011fbe6141f06deba4c7bfc",
+      "assignment_receipt_sha256": "d2f0f1d3031acbc0e7f7f175b699184b7cfa016c63c6b4f5311ea2028ce30ca7",
+      "recipient_manifest_sha256": "53d2109f152977e965e9353105e5a9a2214c04cbfd89cb6ba441e5493d21ccb3",
       "identity_sha256": "6ab11d38602811bd04fa51c2bdea57feaee8c1472e1576d26fcf5d70667dddb9",
-      "session_sha256": "a9220d8d57875b8c78130ff7aa32d1f76c9bc255de7503b21a0a78b0444ae51c",
-      "submission_receipt_sha256": "d50b090882485f1a54839c3a8c91a579047f8ea1765b02424aea7475346ef8fb"
+      "session_sha256": "5d61da3a2b1c926cda4f94832115186589cd4da3351de3a95a88b81b718ab87e",
+      "submission_receipt_sha256": "119bd940d64bfd522e7c4109cccbbc34b4353e37c3d377437bcb33a1b7be4445"
     },
     "annotator_b": {
       "packet_id": "sm-fet-d0-calibration-b-v1-fix2",
       "annotation_role": "independent_b",
       "annotator_id": "d0cal-annotator-b",
       "annotation_session_id": "d0cal-session-b-20260812",
-      "assignment_receipt_sha256": "543786f9e7be710113bf41027edf9f4631dcf500d1448eb1e91c7c61b3c4eae7",
-      "recipient_manifest_sha256": "67a712e1b5eb6a547665bea9f5cf00aae15d00faf0614f296e7e6f32e33d5ba1",
+      "assignment_receipt_sha256": "f2f6877d558d2ee69610b1fa49c54761ea66a413b09fa81f8039ee1578876e1b",
+      "recipient_manifest_sha256": "5b6d8f7535966086f0bf4f7709d3bdac351dfccdd153f105544b0d31c5d5eecf",
       "identity_sha256": "37c286fedcda2aac706d7c0ff9a8cd51b3f86360ce66bb7dc01f2c86192734aa",
-      "session_sha256": "67660f858718b56af73f3ec968a0b0ab522a9b475fa4cdd3c85d22e39ea71d40",
-      "submission_receipt_sha256": "8a87af0de178ddc398d2bf56f761be14bb882e00506843db3e0f725aefcadbb7"
+      "session_sha256": "df0781ef2d7645e9bd2605c61bb503b6c0565f599cd9217603116a20e7e7a862",
+      "submission_receipt_sha256": "a7259dd04fbdd197f78e252cd4f2419d216258b3c690917700534b74571781df"
     }
   },
   "required_packet_root_mode": "0700",

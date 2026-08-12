@@ -71,6 +71,10 @@ Git 中的 coordinator source bundle 是：
   与初始 submission receipt SHA-256，避免 recipient 自行改写 manifest 与 receipt 后仍被接受；
 - `frozen_inputs/ANNOTATION_HANDBOOK.md` 与 `frozen_inputs/TASK_ONTOLOGY.json`：实际冻结字节；每套
   recipient root 均有独立 regular-file 副本，assignment receipt 绑定其 recipient path、bytes 与 SHA-256；
+  ontology 以 minimal-r1d human shared semantic JSON 和 handbook 为权威，role 的 ordinal/node-slot/
+  focus-code 顺序固定为 `MANIPULATED_OR_SOURCE(1/0/1)`、`TOOL(2/1/2)`、
+  `RECEPTACLE_OR_DESTINATION(3/2/3)`、`FIXTURE_OR_SUPPORT(4/3/4)`；禁止旧 token
+  `TOOL_OR_MEDIATOR`、`SUPPORT_OR_CONTEXT`；
 - `task_manifest.csv`：三段的中性任务绑定，无 selection stratum、event hint 或 semantic proposal；
 - `media_allowlist.csv`：仅中性媒体 ID、文件名、bytes、SHA-256、帧数、时长、fps、尺寸和 codec；
 - `schema_manifest.json`：冻结全部八张 CSV 的 exact ordered header、header SHA-256、schema version
@@ -172,6 +176,8 @@ python scripts/contact_labels/check_sm_fet_d0_calibration_packet_v1.py \
   metadata；stdlib source phase 不解析视频容器，实际媒体 bytes/SHA 由 distribution phase 重算；
 - 六张 annotation CSV 必须只有 exact UTF-8 header 和 LF，零 data row；source identity/session
   template 必须 unassigned；
+- checker 必须解析 ontology 的 exact role enum/order/ID/meaning，并逐条核对 handbook 固定顺序、
+  schema role contract 与 events/node snapshots/edge/segment worksheet role fields；只匹配 SHA 不算通过；
 - 扫描 header 与所有文本，拒绝绝对 source/HDF5 路径、proposal value、GT/adjudicated value、
   timing hint 和受禁证据引用。
 
@@ -197,6 +203,9 @@ python scripts/contact_labels/check_sm_fet_d0_calibration_packet_v1.py \
 - 六张表的 primary ID 非空且唯一，所有 foreign key 同 episode 闭合；
 - `label_origin` 只接受 `human_independent_calibration`，`source_proposal_id` 必须为空；拒绝
   proposal、model、adjudicated 或 GT row。
+- `events_v1.focus_role`、node snapshot `node_role/node_slot`、edge primary/secondary role 与 segment
+  object role 必须使用 canonical minimal-r1d enum；每个实际 node snapshot group 必须完整含 slot `0..3`
+  及其固定 role，旧 role token、交换 slot 或自由整数全部拒绝。
 
 此外 checker 对 `events.coverage_id`、`segments.coverage_id`、segment onset/release event、
 node/edge/pose event 与 `edge.contact_segment_id` 做同 episode 唯一引用闭合。assignment phase

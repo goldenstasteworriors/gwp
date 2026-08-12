@@ -9,8 +9,8 @@
   "closed_at_utc": "",
   "protocol_sha256": "c4f1f811f796e7c8604a0d0510229677693d6d1cc501b78f59f01cd4793e4a92",
   "handbook_sha256": "27e70a8b4ff69d4aae369dfb11e229e8daccda750befcdfc964182f4e70436c4",
-  "task_ontology_sha256": "546acd3d5a3cc3be529fc7c20b458065502a198126d62cf49d71b27ae1518f1a",
+  "task_ontology_sha256": "ccb600e7ccbe2762ab6903df0c206026306cd9a8b0fdeba12d6999a01ef7a372",
   "task_manifest_sha256": "22de1250aef781ff6c09bc340f55af9c288e4330cf784a5ec1bc885a241a4706",
   "media_allowlist_sha256": "bcb9dd81e8a4800717c037ec1866a2d1ce3f76d7aca75bb3b9750c5ead1c3486",
-  "schema_manifest_sha256": "8f33609a7c320052781b930543e46d174ae31f0528dd02e03e610df73e9802b7"
+  "schema_manifest_sha256": "0f5d757edcb912b6c9e12f271e314c760e5e4c148c7a49b56131e5a22383dd31"
 }

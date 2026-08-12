@@ -9,6 +9,40 @@
     "lineterminator": "LF",
     "bom_allowed": false
   },
+  "role_contract": {
+    "authority": "minimal-r1d frozen human shared semantic JSON plus D0 annotation handbook",
+    "human_shared_semantic_schema_id": "sm_fet_r1d_shared_semantic_key_v1",
+    "canonical_role_enum": [
+      "MANIPULATED_OR_SOURCE",
+      "TOOL",
+      "RECEPTACLE_OR_DESTINATION",
+      "FIXTURE_OR_SUPPORT"
+    ],
+    "ordinal_to_role": {
+      "1": "MANIPULATED_OR_SOURCE",
+      "2": "TOOL",
+      "3": "RECEPTACLE_OR_DESTINATION",
+      "4": "FIXTURE_OR_SUPPORT"
+    },
+    "node_slot_to_role": {
+      "0": "MANIPULATED_OR_SOURCE",
+      "1": "TOOL",
+      "2": "RECEPTACLE_OR_DESTINATION",
+      "3": "FIXTURE_OR_SUPPORT"
+    },
+    "worksheet_value_enums": {
+      "events_v1.csv.focus_role": "canonical_role_enum",
+      "event_node_snapshots_v1.csv.node_role": "canonical_role_enum",
+      "event_node_snapshots_v1.csv.node_slot": "node_slot_to_role key",
+      "event_edges_v1.csv.primary_role": "canonical_role_enum",
+      "event_edges_v1.csv.secondary_role": "NONE or canonical_role_enum",
+      "segments.csv.object_role": "canonical_role_enum"
+    },
+    "forbidden_legacy_role_tokens": [
+      "TOOL_OR_MEDIATOR",
+      "SUPPORT_OR_CONTEXT"
+    ]
+  },
   "csv_files": {
     "task_manifest.csv": {
       "kind": "immutable_manifest",
