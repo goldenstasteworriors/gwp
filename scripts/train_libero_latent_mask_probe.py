@@ -38,6 +38,11 @@ from world_action_model.alignment import (
 CACHE_SCHEMA = "libero-demonstration-robot-mask-v1"
 REGISTRATION_SCHEMA = "libero-demonstration-mask-registration-audit-v1"
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]
+PROBE_VIEW_KEYS = (
+    "observation.images.image",
+    "observation.images.wrist_image",
+)
+PROBE_VIEW_CONCAT_MODE = "horizontal"
 
 
 def parse_args() -> argparse.Namespace:
@@ -130,9 +135,8 @@ class DemoMaskDataset(Dataset):
             repo_id,
             root=self.dataset_root,
             delta_timestamps={
-                "observation.images.image": [
-                    horizon / metadata.fps for horizon in EXPECTED_HORIZONS
-                ]
+                key: [horizon / metadata.fps for horizon in EXPECTED_HORIZONS]
+                for key in PROBE_VIEW_KEYS
             },
             episodes=[int(record["episode_index"]) for record in records],
             video_backend="pyav",
@@ -159,17 +163,29 @@ class DemoMaskDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         record = self.records[index]
         sample = self.dataset[self.sample_indices[index]]
-        images = sample["observation.images.image"].to(dtype=torch.float32)
+        views = [sample[key].to(dtype=torch.float32) for key in PROBE_VIEW_KEYS]
+        if any(view.shape != views[0].shape for view in views[1:]):
+            raise ValueError(
+                f"Probe view shapes differ for episode {record['episode_index']}: "
+                f"{[tuple(view.shape) for view in views]}"
+            )
+        images = torch.cat(views, dim=-1)
         with np.load(self.root / str(record["cache_file"]), allow_pickle=False) as cache:
             masks = torch.from_numpy(cache["robot_mask"].copy()).to(dtype=torch.float32)
             gripper_masks = torch.from_numpy(cache["gripper_mask"].copy()).to(
                 dtype=torch.float32
             )
+        unknown_width = int(masks.shape[-1]) * (len(PROBE_VIEW_KEYS) - 1)
+        valid = torch.ones_like(masks)
+        masks = F.pad(masks, (0, unknown_width), value=0.0)
+        gripper_masks = F.pad(gripper_masks, (0, unknown_width), value=0.0)
+        valid = F.pad(valid, (0, unknown_width), value=0.0)
         return {
             "images": images,
             "initial_mask": masks[0],
             "future_masks": masks[1:],
             "future_gripper_masks": gripper_masks[1:],
+            "future_mask_valid": valid[1:],
             "episode_index": torch.tensor(int(record["episode_index"])),
         }
 
@@ -220,6 +236,7 @@ def evaluate(
         probabilities = logits.sigmoid().cpu().numpy()
         targets = batch["future_masks"].numpy()
         grippers = batch["future_gripper_masks"].numpy()
+        valid = batch["future_mask_valid"].numpy()
         initial = batch["initial_mask"].numpy()
         if probabilities.shape != targets.shape:
             probabilities = F.interpolate(
@@ -239,6 +256,7 @@ def evaluate(
                     prediction,
                     targets[batch_index],
                     initial[batch_index],
+                    valid_masks=valid[batch_index],
                     target_gripper_masks=grippers[batch_index],
                     horizons=EXPECTED_HORIZONS[1:],
                     threshold=threshold,
@@ -334,7 +352,17 @@ def main() -> None:
     training_masks = []
     for record in train_records:
         with np.load(train_root / str(record["cache_file"]), allow_pickle=False) as cache:
-            training_masks.append(cache["robot_mask"][1:].copy())
+            masks = cache["robot_mask"][1:].copy()
+            training_masks.append(
+                np.pad(
+                    masks,
+                    (
+                        (0, 0),
+                        (0, 0),
+                        (0, masks.shape[-1] * (len(PROBE_VIEW_KEYS) - 1)),
+                    ),
+                )
+            )
     mean_mask = per_horizon_mean_mask_baseline(np.stack(training_masks), args.threshold)
 
     history = []
@@ -345,9 +373,11 @@ def main() -> None:
             latents = encode_video(vae, batch["images"], latents_mean, latents_std)
             logits = probe(latents[:, :, 1:].to(dtype=torch.float32))
             target = batch["future_masks"].to(device=device, dtype=torch.float32)
+            valid = batch["future_mask_valid"].to(device=device, dtype=torch.float32)
             if logits.shape[-2:] != target.shape[-2:]:
                 target = F.interpolate(target, size=logits.shape[-2:], mode="nearest")
-            loss = masked_bce_dice_loss(logits, target, torch.ones_like(target))
+                valid = F.interpolate(valid, size=logits.shape[-2:], mode="nearest")
+            loss = masked_bce_dice_loss(logits, target, valid)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
@@ -404,6 +434,9 @@ def main() -> None:
             "heldout": heldout_registration["thresholds"],
         },
         "vae": str(args.vae.resolve()),
+        "input_views": list(PROBE_VIEW_KEYS),
+        "view_concat_mode": PROBE_VIEW_CONCAT_MODE,
+        "mask_supervision_view": PROBE_VIEW_KEYS[0],
         "probe": str(probe_dir),
         "probe_config_sha256": sha256_file(probe_dir / probe.CONFIG_NAME),
         "probe_weights_sha256": sha256_file(probe_dir / probe.WEIGHTS_NAME),
