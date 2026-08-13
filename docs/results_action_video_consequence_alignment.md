@@ -192,6 +192,8 @@ GigaTrain 在 `Trainer.__init__` 中先调用 `set_seed(seed)`，随后才在 `p
 
 Open-loop 动作误差仅作为控制变化的诊断，不作为策略优劣的主结论。新版 `evaluate_libero_open_loop.py` 固定保存预测与 expert action、对应 SHA256 和完整 policy 协议，除 MSE 外报告 MAE、translation/rotation/gripper 分量、gripper 符号一致率、动作越界与 clip 后误差，以及与 mask 对齐的 1/12/24/36/48-step prefix 指标；`scripts/compare_libero_open_loop.py` 只接受相同 episode、相同 expert target 和相同采样协议，并对每项 left-vs-right 诊断做 task-stratified paired bootstrap。这样闭环收益若来自 gripper、连续控制或单纯 clipping，可以被区分，但 expert action 多解问题仍由闭环评测兜底。
 
+Mechanism gate 通过后，baseline/matched/full 分别由 `scripts/evaluate_libero_policy_bundle.py` 在独占 GPU 与端口上运行同一套 held-out open-loop 和 LIBERO-Spatial 10-task × 10-rollout closed-loop。Bundle 拒绝 tracked-dirty 工作树与不完整 checkpoint，固定单个 inference server 的 checkpoint/seed/dtype/sampling steps，记录 Git commit、checkpoint config/weight sizes、VAE config、norm stats、dataset info、episode split 和两个 summary 的 SHA256；三组完成后再由两个 paired comparator 读取，避免 open-loop 与 closed-loop 意外使用不同 policy 配置。
+
 mini MoT 的 mask-only backward 已确认这条机制在计算图上成立：mask head、visual patch embedding、action encoder、state encoder 和 joint-attention blocks 的梯度绝对值和均非零；未调用的 action decoder 与 RGB `proj_out` 梯度为 0。也就是说 mask supervision 会训练“如何把动作 token 作为未来视觉 consequence 的条件”以及共享交互层，但不会把 mask loss 直接当成 action decoder 的目标；动作输出是否改善仍必须由 matched-data control 和控制评测决定。
 
 服务器CPU机制审计进一步验证了两项不变量：future visual token可以读取完整48-step action chunk，而state/action/ref token均不能读取future visual noise；双视图训练中右侧wrist的valid mask为0，其logit梯度严格为0，改变右半屏伪target也不改变loss。因而当前分支既有动作到未来视觉的信息通路，也不会把未知wrist区域错误监督成背景。
