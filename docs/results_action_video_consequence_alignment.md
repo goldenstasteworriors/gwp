@@ -264,6 +264,8 @@ action-gap 中 expert action 的语义也做了真实数据核对：episode 0 �
 
 为尽快得到可证伪的服务器预实验，而不是再次承担一次无恢复点的 30k 风险，新共同 baseline 固定为官方 GWP-0.5 初始化上的 6k dual-view fine-tune：GPU 3/4/5（GPU 2 已被无关任务占用）、单卡 batch 4、action weight 5、visual weight 1、seed 6666。它由 user systemd unit `gwp-baseline6k-op95.service` 托管，输出到 `libero_standard4_gwp05_preliminary_6k_3gpu_2cam_bf16`，末尾只保留 BF16 transformer、无 EMA，并立即剥离 optimizer，以同时解决会话 SIGTERM 与磁盘预算问题。该版本明确标记为 preliminary，不替代未来 30k 正式结论。Stage-1 runner 新增默认开启的 `GWP_CF_REQUIRE_BASELINE_EVAL=1`；只有该预实验显式设为 0 时，才把 baseline 的预先 400-rollout 评测推迟到 mechanism gate 之后的 paired baseline/matched/full bundle，正式默认协议不变。
 
+该 6k baseline 随后在 step 420 的 loss 与内存仍有限时，由 rank 0 收到外部 `SIGKILL`；主机同时仍有约 957 GiB available RAM，kernel journal 无 OOM、GPU Xid 或 retired-page 错误，因此没有证据把它归因为模型数值或主机内存故障。约 91 秒后另一个 7-GPU 训练启动并占用 GPU 3/4/5，这与外部抢占解释相符，但仅凭时间关系不能确定信号来源。GigaTrain 的 `Launcher.launch()` 还暴露出一个独立可靠性错误：Accelerate 子进程非零退出后，launcher 会正常返回，使 systemd 把失败误记为成功。commit `60400b1` 已改为抛出 `CalledProcessError`，并用 `/bin/false`/`/bin/true` 的无 GPU 单元路径验证失败透传与成功返回。此次 step 420 前没有 checkpoint，故不能恢复；GPU 3/4/5 被现有任务占用期间不重启，也不抢占他人进程。下一次只改变运行可靠性协议：缩短 checkpoint interval、保留最新可恢复 optimizer state，并在重启前等待三张 GPU 全部空闲；不同时改变 baseline 的数据、batch、loss 权重或 seed。
+
 ## 结果位置
 
 - Spatial 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_spatial_1000step/<method>/`
