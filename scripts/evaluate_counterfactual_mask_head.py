@@ -72,8 +72,13 @@ def read_manifest(cache_root: Path) -> dict[str, Any]:
     if not manifest_path.is_file():
         raise FileNotFoundError(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "libero-counterfactual-robot-mask-v1":
+    if manifest.get("schema_version") != "libero-counterfactual-robot-mask-v2":
         raise ValueError(f"Unsupported cache schema: {manifest.get('schema_version')!r}")
+    if (
+        manifest.get("image_orientation")
+        != "lerobot_libero_visualization_flip_height_width"
+    ):
+        raise ValueError("Counterfactual masks are not aligned to the training-video orientation")
     if [int(value) for value in manifest.get("horizons", [])] != [0, 12, 24, 36, 48]:
         raise ValueError(f"Unexpected cache horizons: {manifest.get('horizons')}")
     return manifest

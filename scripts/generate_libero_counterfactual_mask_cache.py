@@ -20,7 +20,8 @@ import numpy as np
 import pandas as pd
 
 
-SCHEMA_VERSION = "libero-counterfactual-robot-mask-v1"
+SCHEMA_VERSION = "libero-counterfactual-robot-mask-v2"
+IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EPISODE_PATTERN = re.compile(r"episode_(\d+)$")
 
 
@@ -160,7 +161,11 @@ def capture_state(
     height: int,
 ) -> dict[str, np.ndarray]:
     sim = env._env.sim
-    segmentation = np.flipud(
+    # LeRobot's LIBERO recordings use LiberoEnv.render(), which rotates the
+    # raw robosuite/OpenGL observation by 180 degrees (flip H and W).  Apply
+    # the identical visualization convention to geometry targets so masks
+    # and the RGB tokens supervised by GWP share one pixel coordinate frame.
+    segmentation = np.flip(
         np.asarray(
             sim.render(
                 width=width,
@@ -168,7 +173,8 @@ def capture_state(
                 camera_name=camera_name,
                 segmentation=True,
             )
-        )
+        ),
+        axis=(0, 1),
     )
     geom_ids = segmentation[..., 1]
     camera_id = sim.model.camera_name2id(camera_name)
@@ -312,6 +318,7 @@ def main() -> None:
         "action_chunk_index": 0,
         "horizons": horizons,
         "camera_name": args.camera_name,
+        "image_orientation": IMAGE_ORIENTATION,
         "image_size": [args.height, args.width],
         "num_steps_wait": args.num_steps_wait,
         "seed": args.seed,

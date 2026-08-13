@@ -14,7 +14,8 @@ from giga_datasets.datasets.lerobot_dataset import FastLeRobotDataset, _LeRobotD
 
 _SUBTASK_MARKER_RE = re.compile(r"\bsubtask\s*:\s*", flags=re.IGNORECASE)
 _T5_LOAD_FROM_CHOICES = ("dir", "pkl", "path")
-_COUNTERFACTUAL_MASK_SCHEMA = "libero-counterfactual-robot-mask-v1"
+_COUNTERFACTUAL_MASK_SCHEMA = "libero-counterfactual-robot-mask-v2"
+_COUNTERFACTUAL_MASK_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 
 
 def _sha256_file(path: str | os.PathLike) -> str:
@@ -87,6 +88,11 @@ class WAMLeRobotDataset(BaseDataset):
             )
         if manifest.get("rgb_supervision") is not None:
             raise ValueError("Counterfactual mask cache must not contain RGB supervision")
+        if manifest.get("image_orientation") != _COUNTERFACTUAL_MASK_ORIENTATION:
+            raise ValueError(
+                "Counterfactual mask cache does not use the LeRobot LIBERO "
+                "visualization orientation"
+            )
         if int(manifest.get("action_chunk_index", -1)) != 0:
             raise ValueError("Only action_chunk_index=0 counterfactual caches are supported")
         manifest_horizons = [int(value) for value in manifest.get("horizons", [])]

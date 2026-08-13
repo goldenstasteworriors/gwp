@@ -15,7 +15,8 @@ from typing import Any
 
 
 VARIANTS = ("matched", "full")
-EXPECTED_CACHE_SCHEMA = "libero-counterfactual-robot-mask-v1"
+EXPECTED_CACHE_SCHEMA = "libero-counterfactual-robot-mask-v2"
+EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EXPECTED_TRAIN_EPISODES = 200
 EXPECTED_HELDOUT_EPISODES = 50
 
@@ -86,6 +87,8 @@ def validate_cache_manifest(
     manifest = load_json(manifest_path)
     if manifest.get("schema_version") != EXPECTED_CACHE_SCHEMA:
         raise ValueError(f"Unexpected cache schema: {manifest_path}")
+    if manifest.get("image_orientation") != EXPECTED_IMAGE_ORIENTATION:
+        raise ValueError(f"Cache/training image orientation mismatch: {manifest_path}")
     if int(manifest.get("num_episodes", -1)) != expected_count:
         raise ValueError(
             f"{manifest_path}: expected {expected_count} episodes, "

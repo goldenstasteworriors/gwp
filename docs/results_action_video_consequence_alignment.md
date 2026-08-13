@@ -113,6 +113,8 @@ Object 上的微小改善来自夹爪项（0.0407 vs 0.0484），但平移和旋
 
 当前单 episode 链路已经验证：四个未来 mask 的 robot pixels 为 4960、6522、7093、7648。相对 horizon 0，变化像素占各未来 robot mask 的 52.3%、65.1%、76.0%、88.5%；gripper mask 与初态的 IoU 分别为 0.104、0、0、0。因此该样本不是简单复制静态机器人基座即可解决，但这不能替代多 episode 的 held-out 检验。
 
+方向审计发现 v1 cache 只对 raw MuJoCo segmentation 做了竖直翻转，而 LeRobot LIBERO 训练视频来自 `LiberoEnv.render()`，其明确同时翻转高、宽两个轴；因此 v1 mask 与视频 token 存在左右镜像错位，不能用于训练。cache schema 已升级为 `libero-counterfactual-robot-mask-v2`，生成器对 segmentation 同时执行 H/W flip，并在 manifest 写入 `image_orientation=lerobot_libero_visualization_flip_height_width`；dataset、preflight、launcher 和 evaluator 都会拒绝旧方向 cache。前述像素数和同一 cache 内的 IoU 比例在整体镜像下不变，只可继续作为动态性诊断，正式训练必须重新生成 v2 cache。
+
 同一真实 cache 上的 `copy-initial` 受控测试进一步说明不能只看 full mask：12/24/36/48 step 的 full robot IoU 分别为 0.5575、0.4313、0.3524、0.2715，平均仍有 0.4032；但四个时刻的 dynamic IoU 和 new-occupancy IoU 均为 0。gripper-region recall 从 0.5156 降至 0.0459、0.0389、0.0136，平均仅 0.1535。评价实现位于 `world_action_model/alignment/geometry.py`，并显式报告 empty-union fraction，避免空动态区域悄悄抬高均值。
 
 ### 必须报告的 mask 指标与对照

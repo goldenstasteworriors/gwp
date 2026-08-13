@@ -16,7 +16,8 @@ import numpy as np
 
 
 SPLIT_SCHEMA = "libero-counterfactual-split-v1"
-CACHE_SCHEMA = "libero-counterfactual-robot-mask-v1"
+CACHE_SCHEMA = "libero-counterfactual-robot-mask-v2"
+EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]
 
 
@@ -79,6 +80,8 @@ def audit_cache(
         raise ValueError(f"Unexpected cache schema in {manifest_path}")
     if manifest.get("rgb_supervision") is not None:
         raise ValueError(f"Counterfactual cache must not contain RGB targets: {manifest_path}")
+    if manifest.get("image_orientation") != EXPECTED_IMAGE_ORIENTATION:
+        raise ValueError(f"Cache/training image orientation mismatch: {manifest_path}")
     if [int(value) for value in manifest.get("horizons", [])] != EXPECTED_HORIZONS:
         raise ValueError(f"Unexpected horizons in {manifest_path}")
     if Path(manifest["dataset_root"]).resolve() != Path(split_manifest["dataset_root"]).resolve():
@@ -170,7 +173,14 @@ def audit_cache(
         "action_clipped_fraction": float(clipped_values / action_values),
         "metadata": {
             key: manifest.get(key)
-            for key in ("suite", "policy_id", "camera_name", "image_size", "num_steps_wait")
+            for key in (
+                "suite",
+                "policy_id",
+                "camera_name",
+                "image_orientation",
+                "image_size",
+                "num_steps_wait",
+            )
         },
     }
 
