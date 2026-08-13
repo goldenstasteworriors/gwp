@@ -36,6 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-inference-steps", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260813)
     parser.add_argument("--server-timeout", type=int, default=600)
+    parser.add_argument("--wait-for-checkpoint", type=int, default=0, metavar="SECONDS")
+    parser.add_argument("--training-pid", type=int, default=None)
     return parser.parse_args()
 
 
@@ -62,9 +64,33 @@ def terminate(process: subprocess.Popen) -> None:
         process.wait(timeout=30)
 
 
+def process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def wait_for_checkpoint(path: Path, timeout: int, training_pid: int | None) -> None:
+    if path.is_dir():
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if training_pid is not None and not process_alive(training_pid):
+            raise RuntimeError(f"Training process {training_pid} exited before checkpoint appeared: {path}")
+        time.sleep(60)
+        if path.is_dir():
+            return
+    raise TimeoutError(f"Checkpoint did not appear within {timeout}s: {path}")
+
+
 def main() -> None:
     args = parse_args()
     project_root = Path(__file__).resolve().parents[1]
+    wait_for_checkpoint(args.checkpoint, args.wait_for_checkpoint, args.training_pid)
     if args.output_dir.exists():
         raise FileExistsError(f"Refusing to overwrite evaluation output: {args.output_dir}")
     args.output_dir.mkdir(parents=True)
