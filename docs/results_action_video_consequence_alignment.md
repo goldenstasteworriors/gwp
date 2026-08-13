@@ -164,7 +164,7 @@ cache schema 现升级为 `libero-counterfactual-robot-mask-v3`：生成器必�
 
 服务器当前单个 FP32 5B transformer checkpoint 约 23 GB，且框架的 `checkpoint_save_optimizer=False` 不会删除唯一/最新 checkpoint 的 optimizer。为避免两个对照挤满磁盘，stage-1 明确设置 `GWP_WITH_EMA=0`、`GWP_CHECKPOINT_MODEL_DTYPE=bf16` 和 `GWP_STRIP_OPTIMIZER_AFTER_CHECKPOINT=1`：只将推理模型浮点张量以 BF16 保存，并在保存后移除本次运行的 optimizer/DeepSpeed resumability state。原始30k baseline checkpoint不受影响；stage-1 checkpoint不能用于精确恢复 optimizer，但可直接用于推理和 held-out 评测。
 
-第一阶段机制 gate 为 held-out `correct - shuffled` 的 dynamic IoU、new-occupancy IoU 和 gripper recall 均为正，并且 correct-action 超过两个 action-independent baseline。未通过时停止增加训练预算，先检查 action conditioning 或更换监督表示；通过后才比较同预算动作误差和 LIBERO success rate。
+第一阶段机制 gate 要求 held-out `correct - shuffled` 的 dynamic IoU、new-occupancy IoU 和 gripper recall 均为正，correct-action 超过 copy-initial 与 train-mean 两个 action-independent baseline，并且 full 的正确动作指标与动作敏感性都超过 matched compute control。报告另给出三类配对效应的 95% bootstrap 区间；未通过硬 gate 时停止增加训练预算，先检查 action conditioning 或更换监督表示，通过后才比较同预算动作误差和 LIBERO success rate。
 
 正式训练前必须在含 LIBERO/HDF5 依赖的 `gigaworld-libero-eval` 环境运行 `scripts/preflight_counterfactual_stage1.py`。它逐个重新验证 raw HDF5 哈希、语言到 suite task 的对应、完整 demo action 匹配、`states[0]` 与 frame-0 state、预测与NPZ哈希、action clipping关系、horizon、二值mask、gripper包含关系和有限值，并验证split零重叠、policy/dataset一致、tracked Git状态干净以及checkpoint空间预算。只有生成 `status: passed` 的审计报告才允许启动两组训练。
 
