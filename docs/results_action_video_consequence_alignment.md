@@ -119,7 +119,11 @@ Object 上的微小改善来自夹爪项（0.0407 vs 0.0484），但平移和旋
 
 方向审计发现 v1 cache 只对 raw MuJoCo segmentation 做了竖直翻转，而 LeRobot LIBERO 训练视频来自 `LiberoEnv.render()`，其明确同时翻转高、宽两个轴；因此 v1 mask 与视频 token 存在左右镜像错位，不能用于训练。v2 修正了 H/W flip，但随后初态溯源审计发现 v2 仍把“同 task 内 LeRobot episode rank”当成 `.pruned_init` 编号。服务器 episode 0 的 v2 horizon-0 EEF 与数据集首帧相差约 6.46 mm；枚举 50 个 `.pruned_init` 也只能找到约 1 mm 的近邻，因为这些文件本来就是独立采样的评测初态，并非 demonstration state。因此 v1/v2 都被拒绝用于正式训练。
 
-cache schema 现升级为 `libero-counterfactual-robot-mask-v3`：生成器必须读取原始 LIBERO `<task>_demo.hdf5`，对 raw action 做与 LeRobot 转换相同的 no-op 过滤，并把 raw gripper `{-1,+1}` 转成 LeRobot `{1,0}`，再用完整 action 序列唯一匹配 demo。task 0 的 LeRobot episode 0 唯一匹配 `demo_40`，110-step action 最大误差为 `2.90e-8`；从 `demo_40/states[0]` 初始化并执行 10 个 settling no-op 后，8D frame-0 state 的 L2 误差为 `1.06e-7`。v3 将 raw HDF5/demo/state 哈希及两侧 frame-0 state 写入 cache，生成时和 preflight 都以 `source_state_max_abs <= 1e-5` 为硬门禁。mask 仍采用与训练视频相同的 H/W flip。只有通过这两类门禁的 v3 cache 才能进入 stage-1。
+cache schema 现升级为 `libero-counterfactual-robot-mask-v3`：生成器必须读取原始 LIBERO `<task>_demo.hdf5`，对 raw action 做与 LeRobot 转换相同的 no-op 过滤，并把 raw gripper `{-1,+1}` 转成 LeRobot `{1,0}`，再用完整 action 序列唯一匹配 demo。审计还发现 LeRobot 的 `task_index` 顺序与 LIBERO suite 顺序不同；v3 从 `meta/episodes` 读取语言指令，再与 suite task language 做唯一精确匹配，同时记录 dataset task index 和 LIBERO task index，禁止按整数直接对应。
+
+服务器 v3 smoke 中，dataset task 0 被正确映射到 LIBERO task 6；LeRobot episode 0 唯一匹配 raw `demo_40`，110-step action、10-step settling 后的 8D frame-0 state 最大误差和 L2 误差在 float32 下均为 0。v3 将 raw HDF5/demo/state 哈希及两侧 frame-0 state 写入 cache，生成时和 preflight 都以 `source_state_max_abs <= 1e-5` 为硬门禁。mask 仍采用与训练视频相同的 H/W flip。只有通过这三类门禁的 v3 cache 才能进入 stage-1。
+
+该 v3 smoke 的 horizon 0/12/24/36/48 robot pixels 为 4211/5060/6618/7186/7763，相对初态的 dynamic pixels 为 2679/4335/5489/6886。`copy-initial` 的 full IoU 均值仍有 0.3999，但 dynamic IoU 和 new-occupancy IoU 都为 0、gripper-region recall 均值仅 0.1510；因此正式 mechanism gate 继续要求 action-dependent 的 dynamic/new-occupancy/gripper 指标，不能只看 full mask。
 
 服务器的LIBERO配置不在默认 `~/.libero`，而在数据盘的 `datasets/libero_config/config.yaml`。cache生成和闭环评测脚本会在导入LIBERO前从dataset父目录非交互地发现并验证该配置；cache manifest记录配置路径与SHA256，preflight拒绝配置缺失或生成后发生变化的cache，避免长时间watcher最终因交互提示或仿真资产路径漂移失败。
 
@@ -162,7 +166,7 @@ cache schema 现升级为 `libero-counterfactual-robot-mask-v3`：生成器必�
 
 第一阶段机制 gate 为 held-out `correct - shuffled` 的 dynamic IoU、new-occupancy IoU 和 gripper recall 均为正，并且 correct-action 超过两个 action-independent baseline。未通过时停止增加训练预算，先检查 action conditioning 或更换监督表示；通过后才比较同预算动作误差和 LIBERO success rate。
 
-正式训练前必须运行 `scripts/preflight_counterfactual_stage1.py`。它逐个复核 train/held-out cache 的预测与NPZ哈希、action clipping关系、horizon、二值mask、gripper包含关系和有限值，并验证split零重叠、policy/dataset一致、tracked Git状态干净以及checkpoint空间预算。只有生成 `status: passed` 的审计报告才允许启动两组训练。
+正式训练前必须在含 LIBERO/HDF5 依赖的 `gigaworld-libero-eval` 环境运行 `scripts/preflight_counterfactual_stage1.py`。它逐个重新验证 raw HDF5 哈希、语言到 suite task 的对应、完整 demo action 匹配、`states[0]` 与 frame-0 state、预测与NPZ哈希、action clipping关系、horizon、二值mask、gripper包含关系和有限值，并验证split零重叠、policy/dataset一致、tracked Git状态干净以及checkpoint空间预算。只有生成 `status: passed` 的审计报告才允许启动两组训练。
 
 两组训练统一通过 `scripts/launch_counterfactual_stage1_train.py` 启动。launcher 只接受当前 Git commit 生成且输入未变更的 passed preflight 报告，固定 GPU 2–5、200 steps、单卡 batch 1、梯度累积 4、seed 6666 和 mask weight 0.1，并为两组生成相同的 `comparison_id`。`matched` 与 `full` 的唯一训练差异分别为 `mask weight=0 + compute-control=1` 和 `mask weight=0.1 + compute-control=0`；若另一组 manifest 的公共设置不同则拒绝启动。
 
