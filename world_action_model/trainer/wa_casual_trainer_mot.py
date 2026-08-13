@@ -11,6 +11,20 @@ from world_action_model.alignment import masked_bce_dice_loss, policy_only_surro
 from world_action_model.models import CasualWorldActionTransformer_MoT
 from giga_train import ModuleDict, Trainer
 
+
+def set_counterfactual_mask_trainable_scope(transformer, scope: str) -> int:
+    """Apply the mask mechanism-control freeze and return trainable parameters."""
+
+    if scope not in {"all", "head_only"}:
+        raise ValueError(f"Unsupported counterfactual mask trainable scope: {scope!r}")
+    if scope == "head_only":
+        if transformer.counterfactual_mask_head is None:
+            raise ValueError("head_only requires an enabled counterfactual mask head")
+        transformer.requires_grad_(False)
+        transformer.counterfactual_mask_head.requires_grad_(True)
+    return sum(parameter.numel() for parameter in transformer.parameters() if parameter.requires_grad)
+
+
 class CasualWATrainerMoT(Trainer):
     """WAM pretraining trainer for the Mixture-of-Transformers policy."""
 
@@ -45,6 +59,9 @@ class CasualWATrainerMoT(Trainer):
         self.counterfactual_mask_start_step = int(
             model_config.get("counterfactual_mask_start_step", 0)
         )
+        self.counterfactual_mask_trainable_scope = str(
+            model_config.get("counterfactual_mask_trainable_scope", "all")
+        )
         valid_gradient_modes = {"policy_only", "joint", "video_only"}
         if self.consequence_gradient_mode not in valid_gradient_modes:
             raise ValueError(
@@ -59,6 +76,15 @@ class CasualWATrainerMoT(Trainer):
             raise ValueError("counterfactual_mask_loss_weight must be non-negative")
         if self.counterfactual_mask_interval <= 0:
             raise ValueError("counterfactual_mask_interval must be positive")
+        if self.counterfactual_mask_trainable_scope not in {"all", "head_only"}:
+            raise ValueError(
+                "counterfactual_mask_trainable_scope must be one of all, head_only"
+            )
+        if (
+            self.counterfactual_mask_trainable_scope == "head_only"
+            and self.counterfactual_mask_loss_weight <= 0.0
+        ):
+            raise ValueError("head_only requires positive counterfactual mask supervision")
         if self.counterfactual_mask_loss_weight > 0.0 and self.consequence_loss_weight > 0.0:
             raise ValueError(
                 "Counterfactual mask supervision cannot be combined with the legacy demo-RGB "
@@ -97,6 +123,14 @@ class CasualWATrainerMoT(Trainer):
             skip_action_expert=model_config.get("skip_action_expert", False),
             strict_load=model_config.get("strict_load", False),
         )
+        trainable_parameters = set_counterfactual_mask_trainable_scope(
+            transformer, self.counterfactual_mask_trainable_scope
+        )
+        if self.counterfactual_mask_trainable_scope == "head_only":
+            print(
+                "Counterfactual mask trainable scope: head_only "
+                f"({trainable_parameters:,} parameters)"
+            )
         transformer.to(self.device)
         if model_config.get("enable_gradient_checkpointing", True):
             transformer.enable_gradient_checkpointing()

@@ -66,6 +66,15 @@ counterfactual_mask_weight = (
     if counterfactual_mask_cache_paths
     else 0.0
 )
+counterfactual_mask_trainable_scope = _env(
+    "GWP_COUNTERFACTUAL_MASK_TRAINABLE_SCOPE", "all"
+)
+if counterfactual_mask_trainable_scope not in {"all", "head_only"}:
+    raise ValueError(
+        "GWP_COUNTERFACTUAL_MASK_TRAINABLE_SCOPE must be one of all, head_only"
+    )
+if counterfactual_mask_trainable_scope == "head_only" and counterfactual_mask_weight <= 0.0:
+    raise ValueError("head_only requires positive counterfactual mask supervision")
 
 view_keys = [
     key.strip()
@@ -207,6 +216,7 @@ config = dict(
         counterfactual_mask_start_step=int(
             _env("GWP_COUNTERFACTUAL_MASK_START_STEP", "0")
         ),
+        counterfactual_mask_trainable_scope=counterfactual_mask_trainable_scope,
     ),
     optimizers=dict(type="CAME8Bit", lr=6e-5, weight_decay=1e-2),
     schedulers=dict(type="ConstantScheduler"),
