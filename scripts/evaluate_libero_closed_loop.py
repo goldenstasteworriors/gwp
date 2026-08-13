@@ -35,6 +35,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=11421)
     parser.add_argument("--seed", type=int, default=20260813)
+    parser.add_argument("--policy-checkpoint", type=Path)
+    parser.add_argument("--policy-num-inference-steps", type=int)
+    parser.add_argument("--policy-model-dtype")
+    parser.add_argument("--policy-seed", type=int)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()
 
@@ -198,10 +202,28 @@ def main() -> None:
         for task_id in args.task_ids
     }
     summary = {
+        "schema_version": "libero-closed-loop-v2",
         "suite": args.suite,
         "num_rollouts": len(rows),
         "success_rate": float(np.mean([row["success"] for row in rows])),
         "success_rate_by_task": by_task,
+        "protocol": {
+            "dataset_root": str(args.dataset_root.resolve()),
+            "task_ids": [int(task_id) for task_id in args.task_ids],
+            "rollouts_per_task": int(args.rollouts_per_task),
+            "max_steps": int(args.max_steps),
+            "replan_steps": int(args.replan_steps),
+            "num_views": int(args.num_views),
+            "seed": int(args.seed),
+            "policy_checkpoint": (
+                str(args.policy_checkpoint.resolve())
+                if args.policy_checkpoint is not None
+                else None
+            ),
+            "policy_num_inference_steps": args.policy_num_inference_steps,
+            "policy_model_dtype": args.policy_model_dtype,
+            "policy_seed": args.policy_seed,
+        },
         "rollouts": rows,
     }
     summary_path = args.output_dir / "summary.json"

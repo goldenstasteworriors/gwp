@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rollouts-per-task", type=int, default=10)
     parser.add_argument("--replan-steps", type=int, default=10)
     parser.add_argument("--num-inference-steps", type=int, default=10)
+    parser.add_argument("--model-dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
     parser.add_argument("--seed", type=int, default=20260813)
     parser.add_argument("--server-timeout", type=int, default=600)
     parser.add_argument("--wait-for-checkpoint", type=int, default=0, metavar="SECONDS")
@@ -124,6 +125,7 @@ def main() -> None:
                 "--device", f"cuda:{gpu_id}",
                 "--num-views", "2",
                 "--num-inference-steps", str(args.num_inference_steps),
+                "--model-dtype", args.model_dtype,
                 "--seed", str(args.seed),
             ]
             servers.append(subprocess.Popen(command, cwd=project_root, stdout=log_file, stderr=subprocess.STDOUT))
@@ -149,6 +151,10 @@ def main() -> None:
                 "--num-views", "2",
                 "--port", str(port),
                 "--seed", str(args.seed),
+                "--policy-checkpoint", str(args.checkpoint),
+                "--policy-num-inference-steps", str(args.num_inference_steps),
+                "--policy-model-dtype", args.model_dtype,
+                "--policy-seed", str(args.seed),
                 "--output-dir", str(suite_output),
             ]
             process = subprocess.Popen(
@@ -181,13 +187,23 @@ def main() -> None:
                 "num_rollouts": num_rollouts,
                 "success_rate": success_rate,
                 "success_rate_by_task": summary["success_rate_by_task"],
+                "protocol": summary.get("protocol"),
             }
             total_success += success_rate * num_rollouts
             total_rollouts += num_rollouts
         aggregate = {
+            "schema_version": "libero-standard4-closed-loop-v2",
             "checkpoint": str(args.checkpoint),
             "num_rollouts": total_rollouts,
             "success_rate": total_success / total_rollouts,
+            "protocol": {
+                "rollouts_per_task": int(args.rollouts_per_task),
+                "replan_steps": int(args.replan_steps),
+                "num_views": 2,
+                "num_inference_steps": int(args.num_inference_steps),
+                "model_dtype": args.model_dtype,
+                "seed": int(args.seed),
+            },
             "suites": suites,
         }
         path = args.output_dir / "summary.json"

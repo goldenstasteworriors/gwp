@@ -188,6 +188,8 @@ GigaTrain 在 `Trainer.__init__` 中先调用 `set_seed(seed)`，随后才在 `p
 
 两组训练与 held-out 评测完成后使用 `scripts/audit_counterfactual_stage1_pair.py` 做只读审计：它验证 preflight/launch 哈希、公共配置、仅允许的三个环境差异（输出目录、mask weight、compute-control）、初始 mask-head 哈希、step-200 compact checkpoint、50/200 held-out/train cache 和 taskwise derangement，并独立重算 mechanism gate。除 full 必须优于 shuffled/copy-initial/train-mean 外，gate 还要求 full 的正确动作指标和 `correct-shuffled` 动作敏感性都优于 matched compute control，避免把随机 mask head 或共享 backbone 原有的动作敏感性误报为学到的对齐；两组评测同时保留逐样本结果，并以固定 seed 做 10,000 次配对 bootstrap，报告动作敏感性、full 对 matched 的正确动作提升和敏感性提升的 95% 区间。科学 gate 失败会被记录为 `mechanism_gate.status=failed`，但与产物损坏导致的 audit failure 明确区分。
 
+机制 gate 通过后的控制收益必须在相同 suite/task/init-state/rollout index 上配对评价。新版 `evaluate_libero_closed_loop.py` 在 summary 中固定记录 dataset、task ids、rollout 数、max/replan steps、视图数、环境与policy seed、checkpoint、动作采样步数和model dtype；`scripts/compare_libero_paired_rollouts.py` 拒绝 rollout key、任务描述或科学协议不同的输入，并报告 paired wins/losses/ties、exact two-sided McNemar p 值、逐任务差异以及固定 seed 的 10,000 次 task-stratified paired bootstrap 95% 区间。旧版 baseline summary 若缺少协议字段仍可按 rollout key 比较，但报告会明确标记 protocol 未完整验证，不能把它与 matched/full 的严格配对比较混为同等级证据。
+
 mini MoT 的 mask-only backward 已确认这条机制在计算图上成立：mask head、visual patch embedding、action encoder、state encoder 和 joint-attention blocks 的梯度绝对值和均非零；未调用的 action decoder 与 RGB `proj_out` 梯度为 0。也就是说 mask supervision 会训练“如何把动作 token 作为未来视觉 consequence 的条件”以及共享交互层，但不会把 mask loss 直接当成 action decoder 的目标；动作输出是否改善仍必须由 matched-data control 和控制评测决定。
 
 服务器CPU机制审计进一步验证了两项不变量：future visual token可以读取完整48-step action chunk，而state/action/ref token均不能读取future visual noise；双视图训练中右侧wrist的valid mask为0，其logit梯度严格为0，改变右半屏伪target也不改变loss。因而当前分支既有动作到未来视觉的信息通路，也不会把未知wrist区域错误监督成背景。
