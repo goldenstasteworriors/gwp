@@ -45,10 +45,10 @@ if [ -e "$worktree_path" ]; then
   printf 'failed_existing_worktree\n' > "$status_path"
   exit 1
 fi
-git --git-dir="$project_root/.git" worktree add --detach "$worktree_path" "$target_commit"
+git -C "$project_root" worktree add --detach "$worktree_path" "$target_commit"
 
 cleanup() {
-  git --git-dir="$project_root/.git" worktree remove --force "$worktree_path" || true
+  git -C "$project_root" worktree remove --force "$worktree_path" || true
 }
 trap cleanup EXIT
 
