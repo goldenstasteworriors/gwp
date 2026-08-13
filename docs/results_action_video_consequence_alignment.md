@@ -148,6 +148,8 @@ Object 上的微小改善来自夹爪项（0.0407 vs 0.0484），但平移和旋
 2. `counterfactual-mask full`：数据、初始化、步数、batch、随机种子均相同，增加 mask BCE+Dice，允许 mask 梯度更新共享 backbone 和 mask head。
 3. 暂不立即运行 `head-only`。只有 full 方法在 held-out 上的 correct-action 指标明显优于 shuffled-action，并且优于 copy-initial/mean-mask，才运行 head-only 来判断收益是否只来自新 head。
 
+第一阶段使用的是30k baseline在固定初态预测后缓存的 action chunk，训练时不重新调用当前动作头，也不让 mask loss 对 action tensor 求梯度。因此它只检验“共享backbone能否学习 baseline policy 分布上的反事实动作后果”，不是在线动作—视频闭环对齐。若机制 gate 和控制评测均成立，下一次最小增量才从更新后的 full policy 重新导出 action/mask cache，再做一轮相同 matched/full 比较；若缓存刷新后收益保持，才能声称该方法能迭代适应当前策略分布。
+
 服务器当前单个 FP32 5B transformer checkpoint 约 23 GB，且框架的 `checkpoint_save_optimizer=False` 不会删除唯一/最新 checkpoint 的 optimizer。为避免两个对照挤满磁盘，stage-1 明确设置 `GWP_WITH_EMA=0`、`GWP_CHECKPOINT_MODEL_DTYPE=bf16` 和 `GWP_STRIP_OPTIMIZER_AFTER_CHECKPOINT=1`：只将推理模型浮点张量以 BF16 保存，并在保存后移除本次运行的 optimizer/DeepSpeed resumability state。原始30k baseline checkpoint不受影响；stage-1 checkpoint不能用于精确恢复 optimizer，但可直接用于推理和 held-out 评测。
 
 第一阶段机制 gate 为 held-out `correct - shuffled` 的 dynamic IoU、new-occupancy IoU 和 gripper recall 均为正，并且 correct-action 超过两个 action-independent baseline。未通过时停止增加训练预算，先检查 action conditioning 或更换监督表示；通过后才比较同预算动作误差和 LIBERO success rate。
@@ -161,6 +163,8 @@ GigaTrain 在 `Trainer.__init__` 中先调用 `set_seed(seed)`，随后才在 `p
 两组训练与 held-out 评测完成后使用 `scripts/audit_counterfactual_stage1_pair.py` 做只读审计：它验证 preflight/launch 哈希、公共配置、仅允许的三个环境差异（输出目录、mask weight、compute-control）、初始 mask-head 哈希、step-200 compact checkpoint、50/200 held-out/train cache 和 taskwise derangement，并独立重算 mechanism gate。科学 gate 失败会被记录为 `mechanism_gate.status=failed`，但与产物损坏导致的 audit failure 明确区分。
 
 mini MoT 的 mask-only backward 已确认这条机制在计算图上成立：mask head、visual patch embedding、action encoder、state encoder 和 joint-attention blocks 的梯度绝对值和均非零；未调用的 action decoder 与 RGB `proj_out` 梯度为 0。也就是说 mask supervision 会训练“如何把动作 token 作为未来视觉 consequence 的条件”以及共享交互层，但不会把 mask loss 直接当成 action decoder 的目标；动作输出是否改善仍必须由 matched-data control 和控制评测决定。
+
+服务器CPU机制审计进一步验证了两项不变量：future visual token可以读取完整48-step action chunk，而state/action/ref token均不能读取future visual noise；双视图训练中右侧wrist的valid mask为0，其logit梯度严格为0，改变右半屏伪target也不改变loss。因而当前分支既有动作到未来视觉的信息通路，也不会把未知wrist区域错误监督成背景。
 
 ## 结果位置
 
