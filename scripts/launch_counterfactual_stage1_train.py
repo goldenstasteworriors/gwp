@@ -15,10 +15,25 @@ from typing import Any
 
 
 VARIANTS = ("matched", "full")
+ALIGNMENT_MODES = ("hidden_head", "clean_latent_probe")
 EXPECTED_CACHE_SCHEMA = "libero-counterfactual-robot-mask-v3"
 EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EXPECTED_TRAIN_EPISODES = 200
 EXPECTED_HELDOUT_EPISODES = 50
+EXPECTED_REGISTRATION_THRESHOLDS = {
+    "position_error_mm.p95": 5.0,
+    "rotation_error_deg.p95": 2.0,
+    "gripper_max_abs.p95": 0.003,
+    "best_shift_magnitude_px.p95": 4.0,
+    "full_rgb_mae.p95": 10.0,
+    "best_shift_robot_rgb_mae.p95": 15.0,
+}
+EXPECTED_PROBE_MINIMUMS = {
+    "full_iou": 0.65,
+    "dynamic_iou": 0.40,
+    "new_occupancy_iou": 0.40,
+    "gripper_region_recall": 0.70,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,6 +42,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--variant", choices=VARIANTS, required=True)
     parser.add_argument("--wan-pretrained", type=Path, required=True)
     parser.add_argument("--norm-stats", type=Path, required=True)
+    parser.add_argument(
+        "--alignment-mode", choices=ALIGNMENT_MODES, default="hidden_head"
+    )
+    parser.add_argument("--mask-probe-report", type=Path)
+    parser.add_argument("--action-gap-report", type=Path)
     parser.add_argument("--gpu-ids", type=int, nargs="+", default=[2, 3, 4, 5])
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--batch-size-per-gpu", type=int, default=1)
@@ -118,6 +138,205 @@ def latest_input_mtime_ns(paths: list[Path]) -> int:
     return latest
 
 
+def manifest_episode_indices(manifest: dict[str, Any]) -> list[int]:
+    records = list(manifest.get("episodes", []))
+    if len(records) != int(manifest.get("num_episodes", -1)) or not records:
+        raise ValueError("Invalid cache episode records")
+    return [int(record["episode_index"]) for record in records]
+
+
+def validate_clean_latent_gates(
+    args: argparse.Namespace,
+    checkpoint: Path,
+    vae: Path,
+    heldout_cache: Path,
+    heldout_manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    if args.alignment_mode == "hidden_head":
+        if args.mask_probe_report is not None or args.action_gap_report is not None:
+            raise ValueError(
+                "Probe/action-gap reports are only valid with clean_latent_probe"
+            )
+        return None
+    if args.mask_probe_report is None or args.action_gap_report is None:
+        raise ValueError(
+            "clean_latent_probe requires --mask-probe-report and --action-gap-report"
+        )
+
+    probe_report_path = args.mask_probe_report.resolve()
+    gap_report_path = args.action_gap_report.resolve()
+    probe_report = load_json(probe_report_path)
+    gap_report = load_json(gap_report_path)
+    if probe_report.get("schema_version") != "libero-latent-mask-probe-training-v1":
+        raise ValueError(f"Unexpected probe report schema: {probe_report_path}")
+    expected_probe_checks = {
+        f"{prefix}.{metric}"
+        for metric in EXPECTED_PROBE_MINIMUMS
+        for prefix in ("absolute", "beats_copy_initial", "beats_train_mean")
+    }
+    probe_checks = probe_report.get("checks", {})
+    if (
+        probe_report.get("status") != "passed"
+        or set(probe_checks) != expected_probe_checks
+        or not all(value is True for value in probe_checks.values())
+    ):
+        raise RuntimeError(f"Latent-mask probe gate did not pass: {probe_report_path}")
+    probe_root = Path(str(probe_report.get("probe"))).resolve()
+    probe_config = probe_root / "config.json"
+    probe_weights = probe_root / "model.safetensors"
+    if not probe_config.is_file() or not probe_weights.is_file():
+        raise FileNotFoundError(f"Incomplete latent-mask probe: {probe_root}")
+    if sha256_file(probe_config) != probe_report.get("probe_config_sha256"):
+        raise ValueError("Probe config changed after held-out gate")
+    if sha256_file(probe_weights) != probe_report.get("probe_weights_sha256"):
+        raise ValueError("Probe weights changed after held-out gate")
+    probe_config_value = load_json(probe_config)
+    expected_probe_config = {
+        "class_name": "LatentRobotMaskProbe",
+        "latent_channels": 48,
+        "frames_per_latent": 4,
+        "spatial_scale": 8,
+        "hidden_channels": 128,
+        "approved_for_alignment": True,
+    }
+    if probe_config_value != expected_probe_config:
+        raise ValueError(
+            f"Unexpected approved probe config: {probe_config_value}, "
+            f"expected {expected_probe_config}"
+        )
+    if int(probe_report.get("probe_parameters", -1)) != 88448:
+        raise ValueError("Unexpected latent-mask probe parameter count")
+    if probe_report.get("input_views") != [
+        "observation.images.image",
+        "observation.images.wrist_image",
+    ]:
+        raise ValueError("Probe was not trained on the fixed two-view input")
+    if probe_report.get("view_concat_mode") != "horizontal":
+        raise ValueError("Probe view layout is not horizontal")
+    if probe_report.get("mask_supervision_view") != "observation.images.image":
+        raise ValueError("Probe mask supervision is not restricted to agent-view")
+    if Path(str(probe_report.get("vae"))).resolve() != vae:
+        raise ValueError("Probe gate used a different VAE")
+    if int(probe_report.get("seed", -1)) != 20260813:
+        raise ValueError("Probe gate used a different seed")
+    expected_probe_hyperparameters = {
+        "batch_size": 4,
+        "epochs": 20,
+        "learning_rate": 1e-3,
+        "weight_decay": 1e-4,
+        "threshold": 0.5,
+    }
+    if probe_report.get("hyperparameters") != expected_probe_hyperparameters:
+        raise ValueError("Probe gate used a different fixed training protocol")
+    if probe_report.get("minimums") != EXPECTED_PROBE_MINIMUMS:
+        raise ValueError("Probe gate used different held-out minimums")
+    registration_thresholds = probe_report.get("registration_thresholds", {})
+    if set(registration_thresholds) != {"train", "heldout"} or any(
+        registration_thresholds.get(split) != EXPECTED_REGISTRATION_THRESHOLDS
+        for split in ("train", "heldout")
+    ):
+        raise ValueError("Probe gate used different registration thresholds")
+
+    if gap_report.get("schema_version") != "clean-latent-action-conditioning-gap-v1":
+        raise ValueError(f"Unexpected action-gap report schema: {gap_report_path}")
+    expected_gap_checks = {
+        f"{prefix}.{metric}"
+        for metric in (
+            "dynamic_iou",
+            "new_occupancy_iou",
+            "gripper_region_recall",
+        )
+        for prefix in (
+            "expert_action_sensitive",
+            "expert_sensitivity_exceeds_policy",
+        )
+    }
+    gap_checks = gap_report.get("checks", {})
+    if (
+        gap_report.get("status") != "passed"
+        or gap_report.get("alignment_training_allowed") is not True
+        or set(gap_checks) != expected_gap_checks
+        or not all(value is True for value in gap_checks.values())
+    ):
+        raise RuntimeError(f"Expert-policy action gap did not pass: {gap_report_path}")
+    if Path(str(gap_report.get("checkpoint"))).resolve() != checkpoint:
+        raise ValueError("Action-gap report used a different baseline checkpoint")
+    if Path(str(gap_report.get("vae"))).resolve() != vae:
+        raise ValueError("Action-gap report used a different VAE")
+    dataset_root = Path(str(heldout_manifest.get("dataset_root"))).resolve()
+    if Path(str(gap_report.get("dataset"))).resolve() != dataset_root:
+        raise ValueError("Action-gap report used a different held-out dataset")
+    if Path(str(gap_report.get("counterfactual_cache"))).resolve() != heldout_cache:
+        raise ValueError("Action-gap report used a different held-out cache")
+    if gap_report.get("counterfactual_manifest_sha256") != sha256_file(
+        heldout_cache / "manifest.json"
+    ):
+        raise ValueError("Held-out counterfactual cache changed after action-gap gate")
+    if Path(str(gap_report.get("mask_probe"))).resolve() != probe_root:
+        raise ValueError("Action-gap report used a different mask probe")
+    if gap_report.get("mask_probe_config_sha256") != sha256_file(probe_config):
+        raise ValueError("Action-gap/probe config hash mismatch")
+    if gap_report.get("mask_probe_weights_sha256") != sha256_file(probe_weights):
+        raise ValueError("Action-gap/probe weights hash mismatch")
+    heldout_episodes = manifest_episode_indices(heldout_manifest)
+    if [int(value) for value in gap_report.get("episodes", [])] != heldout_episodes:
+        raise ValueError("Action-gap report used different held-out episodes/order")
+    if gap_report.get("input_views") != probe_report.get("input_views"):
+        raise ValueError("Action-gap/probe input views differ")
+    if gap_report.get("view_concat_mode") != probe_report.get("view_concat_mode"):
+        raise ValueError("Action-gap/probe view layouts differ")
+    if int(gap_report.get("num_samples", -1)) != EXPECTED_HELDOUT_EPISODES:
+        raise ValueError("Action-gap report did not use all held-out episodes")
+    if int(gap_report.get("seed", -1)) != 20260813:
+        raise ValueError("Action-gap report used a different seed")
+    if float(gap_report.get("threshold", -1.0)) != 0.5:
+        raise ValueError("Action-gap report used a different mask threshold")
+    if int(gap_report.get("bootstrap_samples", -1)) != 10000:
+        raise ValueError("Action-gap report used a different bootstrap count")
+    if gap_report.get("noise_pairing") != (
+        "same future noise for expert/policy and correct/shuffled"
+    ):
+        raise ValueError("Action-gap report did not use paired future noise")
+    if gap_report.get("shuffle_semantics") != "cyclic derangement within task":
+        raise ValueError("Action-gap report used different shuffled-action controls")
+    demonstration_cache = Path(str(gap_report.get("demonstration_cache"))).resolve()
+    demonstration_registration = Path(
+        str(gap_report.get("demonstration_registration"))
+    ).resolve()
+    if Path(str(probe_report.get("heldout_cache"))).resolve() != demonstration_cache:
+        raise ValueError("Probe/action-gap demonstration caches differ")
+    if probe_report.get("heldout_manifest_sha256") != gap_report.get(
+        "demonstration_manifest_sha256"
+    ):
+        raise ValueError("Probe/action-gap demonstration manifests differ")
+    if (
+        Path(str(probe_report.get("heldout_registration"))).resolve()
+        != demonstration_registration
+    ):
+        raise ValueError("Probe/action-gap registration reports differ")
+    if probe_report.get("heldout_registration_sha256") != gap_report.get(
+        "demonstration_registration_sha256"
+    ):
+        raise ValueError("Probe/action-gap registration hashes differ")
+    return {
+        "probe_report": str(probe_report_path),
+        "probe_report_sha256": sha256_file(probe_report_path),
+        "probe_root": str(probe_root),
+        "probe_config_sha256": sha256_file(probe_config),
+        "probe_weights_sha256": sha256_file(probe_weights),
+        "action_gap_report": str(gap_report_path),
+        "action_gap_report_sha256": sha256_file(gap_report_path),
+        "demonstration_cache": str(demonstration_cache),
+        "demonstration_manifest_sha256": gap_report[
+            "demonstration_manifest_sha256"
+        ],
+        "demonstration_registration": str(demonstration_registration),
+        "demonstration_registration_sha256": gap_report[
+            "demonstration_registration_sha256"
+        ],
+    }
+
+
 def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, str]]:
     report_path = args.preflight_report.resolve()
     report = load_json(report_path)
@@ -160,6 +379,7 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
     output_dir = Path(str(report.get(output_key))).resolve()
     counterpart_dir = Path(str(report.get(counterpart_key))).resolve()
     wan_pretrained = args.wan_pretrained.resolve()
+    vae = wan_pretrained / "vae"
     norm_stats = args.norm_stats.resolve()
 
     for directory in (checkpoint, train_cache, heldout_cache, wan_pretrained):
@@ -182,33 +402,62 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         EXPECTED_TRAIN_EPISODES,
         checkpoint,
     )
-    validate_cache_manifest(
+    heldout_manifest = validate_cache_manifest(
         heldout_cache,
         report["heldout_cache"],
         EXPECTED_HELDOUT_EPISODES,
         checkpoint,
     )
     dataset_root = Path(str(train_manifest["dataset_root"])).resolve()
+    if Path(str(heldout_manifest["dataset_root"])).resolve() != dataset_root:
+        raise ValueError("Train/held-out caches use different datasets")
+    clean_latent_gates = validate_clean_latent_gates(
+        args,
+        checkpoint,
+        vae,
+        heldout_cache,
+        heldout_manifest,
+    )
 
     t5_embedding_dir = dataset_root / "t5_embedding"
     if not t5_embedding_dir.is_dir():
         raise FileNotFoundError(t5_embedding_dir)
 
     output_device = os.stat(output_dir.parent).st_dev
-    for source in (
+    stage_sources = [
         checkpoint,
         train_cache,
         heldout_cache,
         dataset_root,
         wan_pretrained,
         norm_stats,
-    ):
+    ]
+    if clean_latent_gates is not None:
+        stage_sources.extend(
+            [
+                Path(clean_latent_gates["probe_report"]),
+                Path(clean_latent_gates["probe_root"]),
+                Path(clean_latent_gates["action_gap_report"]),
+                Path(clean_latent_gates["demonstration_cache"]),
+                Path(clean_latent_gates["demonstration_registration"]),
+            ]
+        )
+    for source in stage_sources:
         if os.stat(source).st_dev != output_device:
             raise ValueError(f"Large stage-one source/output crosses filesystems: {source}")
 
-    latest_mtime = latest_input_mtime_ns(
-        [checkpoint, train_cache, heldout_cache, split_manifest]
-    )
+    latest_mtime_paths = [checkpoint, train_cache, heldout_cache, split_manifest]
+    if clean_latent_gates is not None:
+        latest_mtime_paths.extend(
+            [
+                Path(clean_latent_gates["probe_report"]),
+                Path(clean_latent_gates["probe_root"]),
+                Path(clean_latent_gates["action_gap_report"]),
+                Path(clean_latent_gates["demonstration_cache"]),
+                Path(clean_latent_gates["demonstration_registration"]),
+            ]
+        )
+    latest_mtime = latest_input_mtime_ns(latest_mtime_paths)
     if report_path.stat().st_mtime_ns < latest_mtime:
         raise RuntimeError(
             "A checkpoint/cache/split input is newer than the preflight report; "
@@ -278,7 +527,12 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         * args.gradient_accumulation_steps
     )
     common = {
-        "protocol": "counterfactual-mask-stage1-v1",
+        "protocol": (
+            "counterfactual-clean-latent-stage1-v1"
+            if args.alignment_mode == "clean_latent_probe"
+            else "counterfactual-mask-stage1-v1"
+        ),
+        "alignment_mode": args.alignment_mode,
         "project_root": str(project_root),
         "preflight_report": str(report_path),
         "preflight_report_sha256": sha256_file(report_path),
@@ -301,6 +555,8 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         "python": sys.executable,
         "required_env_name": args.required_env_name,
     }
+    if clean_latent_gates is not None:
+        common["clean_latent_gates"] = clean_latent_gates
     comparison_id = sha256_json(common)
 
     env_overrides = {
@@ -332,6 +588,12 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         "GWP_COUNTERFACTUAL_MASK_INTERVAL": "1",
         "GWP_COUNTERFACTUAL_MASK_START_STEP": "0",
         "GWP_COUNTERFACTUAL_MASK_TRAINABLE_SCOPE": "all",
+        "GWP_COUNTERFACTUAL_MASK_ALIGNMENT_MODE": args.alignment_mode,
+        "GWP_COUNTERFACTUAL_MASK_PROBE_PRETRAINED": (
+            clean_latent_gates["probe_root"]
+            if clean_latent_gates is not None
+            else ""
+        ),
         "GWP_COUNTERFACTUAL_MASK_BCE_WEIGHT": "1.0",
         "GWP_COUNTERFACTUAL_MASK_DICE_WEIGHT": "1.0",
         "GWP_SEED": str(args.seed),
@@ -358,6 +620,12 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         "comparison_id": comparison_id,
         "common": common,
         "variant_settings": {
+            "alignment_mode": args.alignment_mode,
+            "mask_probe": (
+                clean_latent_gates["probe_root"]
+                if clean_latent_gates is not None
+                else None
+            ),
             "counterfactual_mask_weight": float(
                 env_overrides["GWP_COUNTERFACTUAL_MASK_WEIGHT"]
             ),

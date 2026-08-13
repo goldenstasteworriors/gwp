@@ -252,7 +252,11 @@ clean-latent 正式训练还增加一个训练前 action-conditioning gap gate�
 
 action-gap 中 expert action 的语义也做了真实数据核对：episode 0 的 raw HDF5 action 经相同 no-op filter、gripper `{-1,+1}→{1,0}` 转换后，与 LeRobot parquet 的前 48 步逐元素完全一致（转换前与 q01/q99 归一化后 `max_abs` 均为 0）。因此 expert/policy 差异不会来自两套 action 编码。
 
+`scripts/launch_counterfactual_stage1_train.py` 现将 `clean_latent_probe` 作为独立协议，而不是给 hidden-head launcher 临时塞一个 probe 路径。clean-latent 启动必须同时提供 passed probe report 和 passed action-gap report；launcher 会重新核验 checkpoint/VAE、200/50 episode 顺序、双视图布局、probe config/weights 与所有 cache/report SHA256，并锁定 probe 训练参数、注册阈值、held-out 最低指标、action-gap seed/threshold/10,000 次 bootstrap 以及 paired-noise/taskwise-derangement 语义。任一 report 为空、字段缺失、哈希漂移或 gate 失败都会拒绝训练。上述 provenance 进入 matched/full 共用的 `comparison_id`，并将已批准 probe 的绝对路径写入训练环境；默认 `hidden_head` 不接受 probe/gap 参数，避免两条挂载点误配。
+
 旧 Stage-1 evaluator 曾在 eval mode 向 `_forward_inference` 传入仅训练路径支持的 `output_action/output_visual` 参数；mini MoT 实测会报 `unexpected keyword argument`。旧等待型 pipeline 在任何正式 action/cache/matched/full 产物生成前已终止并归档到 `counterfactual_mask_stage1_v3_pipeline_30k_ema_superseded_02a9b97_20260813T1007Z`，没有删除。新 pipeline 固定到已同时通过 hidden-head 与 clean-latent 前向 smoke 的 commit `6bfd735`，代码记录、preflight、训练、held-out evaluator 与 post-gate target 使用同一 commit；当前结果根仍为 `counterfactual_mask_stage1_v3_pipeline_30k_ema`。
+
+30k 共同 baseline 在 2026-08-13 10:28 UTC 于 step 17,940 收到 SIGTERM；日志最后一个完整 step 的 loss 有限，但进程未正常完成。该次运行只在 step 30,000 保存，因此 `models/` 为空，自动 evaluator 明确报出“training process exited before a complete checkpoint appeared”，compactor 也以缺少目标 checkpoint 失败。Stage-1 和 probe watcher 仍分别停在 `waiting_checkpoint`/`waiting_dependencies`，没有把这次中断误当成可用 baseline，也尚未产生正式 matched/full 或 clean-latent 结果。下一次启动前必须先解决长任务生命周期和同盘仅余约 84 GiB、无法安全同时保留大型可恢复 checkpoint 的问题；不会从 step 17,940 的日志伪造恢复点。
 
 ## 结果位置
 
