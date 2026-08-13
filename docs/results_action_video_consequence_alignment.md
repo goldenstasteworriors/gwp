@@ -104,6 +104,36 @@ Object 上的微小改善来自夹爪项（0.0407 vs 0.0484），但平移和旋
 
 只有当新方法在多个 suite 上改善闭环 success rate，并且优于 `joint`/`video_only`，才能支持“视频 consequence 改善动作”的核心因果叙事；只改善 MSE 或 EEF 误差时，结论应降级为 trajectory regularization。
 
+## 反事实机器人 mask 方案（进行中）
+
+前面的 `policy_only`、`joint`、`video_only` 都把预测动作条件下的视频输出与专家动作产生的真实未来视频比较，反事实目标不成立。新版不再使用这项 loss，而是把监督拆成两条语义独立的数据流：
+
+1. Demo branch：真实动作条件下继续使用真实未来 RGB flow supervision，保留原始 GWP 的视频辅助任务。
+2. Counterfactual branch：缓存策略预测的 48-step action chunk，从同一 LIBERO 初态执行该动作，在 12/24/36/48 step 渲染 robot mask；未来 visual latent 从纯噪声开始，只从 future visual tokens 预测这四张 mask，不读取专家未来 RGB，也不经过 RGB `proj_out`。
+
+当前单 episode 链路已经验证：四个未来 mask 的 robot pixels 为 4960、6522、7093、7648。相对 horizon 0，变化像素占各未来 robot mask 的 52.3%、65.1%、76.0%、88.5%；gripper mask 与初态的 IoU 分别为 0.104、0、0、0。因此该样本不是简单复制静态机器人基座即可解决，但这不能替代多 episode 的 held-out 检验。
+
+### 必须报告的 mask 指标与对照
+
+训练 loss 下降不能作为方法有效的证据。held-out cache 至少需要报告：
+
+1. `full robot IoU/Dice`：预测未来 robot mask 与同一预测动作 rollout 得到的 target 比较。
+2. `dynamic mask IoU`：分别计算预测/target mask 相对初态 mask 的 XOR，再比较两者，防止模型只复制静态机器人区域。
+3. `new occupancy IoU`：仅比较未来新出现的机器人像素 `M_future & ~M_initial`。
+4. `gripper-region recall`：target gripper mask 被预测 robot mask 覆盖的比例，避免大面积机械臂和基座掩盖末端错误。
+5. 分 horizon 报告 12/24/36/48 step，而不是只给平均值。
+
+必要对照为：
+
+- `copy-initial`：四个时刻都复制 horizon-0 robot mask。
+- `per-horizon mean mask`：不看动作，只输出训练集每个 horizon 的平均 mask。
+- `shuffle-action`：保持初态不变，打乱 batch 内动作；正确模型的 mask 指标应显著下降。
+- `zero/noise-action`：从相同初态执行零动作或扰动动作，检验 head 是否真的读取 action consequence。
+- `head-only`：冻结 backbone，只训练 mask head；若与全量更新相同，则不能声称 backbone 学到了额外未来信息。
+- `GT-action mask`：用专家动作对应 mask 训练，区分“mask 辅助任务本身”与“适应策略动作分布”的收益。
+
+控制结论仍以同预算、同初始化的 LIBERO success rate 为准。只有当 counterfactual mask 方法同时优于原始 GWP、`head-only` 和 `GT-action mask`，并且 held-out shuffle-action 检验成立时，才支持“让视频/共享 backbone 适应动作头的预测分布，从而改善控制”的叙事。
+
 ## 结果位置
 
 - Spatial 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_spatial_1000step/<method>/`
