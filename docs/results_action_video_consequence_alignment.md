@@ -194,6 +194,8 @@ Open-loop 动作误差仅作为控制变化的诊断，不作为策略优劣的�
 
 Mechanism gate 通过后，baseline/matched/full 分别由 `scripts/evaluate_libero_policy_bundle.py` 在独占 GPU 与端口上运行同一套 held-out open-loop 和 LIBERO-Spatial 10-task × 10-rollout closed-loop。Bundle 拒绝 tracked-dirty 工作树与不完整 checkpoint，固定单个 inference server 的 checkpoint/seed/dtype/sampling steps，记录 Git commit、checkpoint config/weight sizes、VAE config、norm stats、dataset info、episode split 和两个 summary 的 SHA256；三组完成后再由两个 paired comparator 读取，避免 open-loop 与 closed-loop 意外使用不同 policy 配置。
 
+`scripts/run_counterfactual_stage1_postgate_control.sh` 固定到显式 `GWP_CF_TARGET_COMMIT`，等待 Stage-1 pipeline 正常退出后先验证 pair audit；机制 gate 失败时以 `stopped_mechanism_gate_failed` 正常停止，不同步代码也不占 GPU，只有 gate 通过才 fast-forward 到固定 commit 并在 GPU 2/3/4 并行运行三个 bundle。最终 `scripts/audit_counterfactual_control_evaluations.py` 验证 bundle、checkpoint、split 与 summary 哈希，并从原始 summaries 独立重算四份 paired comparison；仅当 full 相对 matched 的闭环成功率差为正且 paired wins 多于 losses，才允许继续 head-only 与 GT-action control，统计显著性另以 McNemar p 值和 task-stratified CI 单独报告，不用一次小样本正差值冒充显著结论。
+
 mini MoT 的 mask-only backward 已确认这条机制在计算图上成立：mask head、visual patch embedding、action encoder、state encoder 和 joint-attention blocks 的梯度绝对值和均非零；未调用的 action decoder 与 RGB `proj_out` 梯度为 0。也就是说 mask supervision 会训练“如何把动作 token 作为未来视觉 consequence 的条件”以及共享交互层，但不会把 mask loss 直接当成 action decoder 的目标；动作输出是否改善仍必须由 matched-data control 和控制评测决定。
 
 服务器CPU机制审计进一步验证了两项不变量：future visual token可以读取完整48-step action chunk，而state/action/ref token均不能读取future visual noise；双视图训练中右侧wrist的valid mask为0，其logit梯度严格为0，改变右半屏伪target也不改变loss。因而当前分支既有动作到未来视觉的信息通路，也不会把未知wrist区域错误监督成背景。
