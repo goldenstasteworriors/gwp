@@ -1,4 +1,5 @@
 import functools
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -12,6 +13,22 @@ from giga_models import utils as gm_utils
 from world_action_model.alignment import masked_bce_dice_loss, policy_only_surrogate
 from world_action_model.models import CasualWorldActionTransformer_MoT
 from giga_train import ModuleDict, Trainer
+
+
+def module_state_sha256(module: torch.nn.Module) -> str:
+    """Hash a module state without changing parameters or consuming RNG."""
+
+    digest = hashlib.sha256()
+    for name, tensor in sorted(module.state_dict().items()):
+        value = tensor.detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(value.dtype).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(",".join(str(size) for size in value.shape).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
 
 
 def set_counterfactual_mask_trainable_scope(transformer, scope: str) -> int:
@@ -174,6 +191,15 @@ class CasualWATrainerMoT(Trainer):
             skip_action_expert=model_config.get("skip_action_expert", False),
             strict_load=model_config.get("strict_load", False),
         )
+        self.counterfactual_mask_head_initial_sha256 = None
+        if transformer.counterfactual_mask_head is not None:
+            self.counterfactual_mask_head_initial_sha256 = module_state_sha256(
+                transformer.counterfactual_mask_head
+            )
+            self.print(
+                "Counterfactual mask head initial SHA256: %s",
+                self.counterfactual_mask_head_initial_sha256,
+            )
         trainable_parameters = set_counterfactual_mask_trainable_scope(
             transformer, self.counterfactual_mask_trainable_scope
         )
