@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -29,6 +30,7 @@ import torch.nn.functional as F  # noqa: E402
 from diffusers.models import AutoencoderKLWan  # noqa: E402
 
 from world_action_model.alignment import (  # noqa: E402
+    LatentRobotMaskProbe,
     copy_initial_mask_baseline,
     counterfactual_mask_metrics,
     per_horizon_mean_mask_baseline,
@@ -48,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--norm-stats", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--alignment-mode",
+        choices=("hidden_head", "clean_latent_probe"),
+        default="hidden_head",
+    )
+    parser.add_argument("--mask-probe", type=Path)
     parser.add_argument("--mean-mask-cache", type=Path)
     parser.add_argument(
         "--view-keys",
@@ -65,6 +73,14 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_dtype(name: str) -> torch.dtype:
     return {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[name]
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def read_manifest(cache_root: Path) -> dict[str, Any]:
@@ -256,6 +272,8 @@ def predict_mask_logits(
     sample: dict[str, torch.Tensor],
     future_noise: torch.Tensor,
     dtype: torch.dtype,
+    alignment_mode: str,
+    mask_probe: LatentRobotMaskProbe | None,
 ) -> torch.Tensor:
     state = sample["state"].unsqueeze(0).to(device=ref_latents.device, dtype=dtype)
     prompt = sample["prompt_embeds"].unsqueeze(0).to(device=ref_latents.device, dtype=dtype)
@@ -278,20 +296,41 @@ def predict_mask_logits(
         dtype=dtype,
     )
     timestep[:, num_state_tokens + num_action_tokens + frame_tokens :] = 1000
+    common = {
+        "ref_latents": ref_latents.to(dtype=dtype),
+        "noisy_latents": future_noise,
+        "timestep": timestep,
+        "encoder_hidden_states": prompt,
+        "return_dict": True,
+        "action": action,
+        "state": state,
+        "embodiment_id": embodiment_id,
+        "output_action": False,
+    }
+    if alignment_mode == "hidden_head":
+        output = transformer(
+            **common,
+            output_counterfactual_mask=True,
+            output_visual=False,
+        )
+        return output["counterfactual_mask_logits"].float()
+    if alignment_mode != "clean_latent_probe":
+        raise ValueError(f"Unsupported alignment mode: {alignment_mode!r}")
+    if mask_probe is None:
+        raise ValueError("clean_latent_probe evaluation requires a frozen mask probe")
     output = transformer(
-        ref_latents=ref_latents.to(dtype=dtype),
-        noisy_latents=future_noise,
-        timestep=timestep,
-        encoder_hidden_states=prompt,
-        return_dict=True,
-        action=action,
-        state=state,
-        embodiment_id=embodiment_id,
-        output_counterfactual_mask=True,
-        output_action=False,
-        output_visual=False,
+        **common,
+        output_counterfactual_mask=False,
+        output_visual=True,
     )
-    return output["counterfactual_mask_logits"].float()
+    predicted_flow = output.sample[:, :, 1:].float()
+    if predicted_flow.shape != future_noise.shape:
+        raise ValueError(
+            "Predicted flow/future-noise shape mismatch: "
+            f"{tuple(predicted_flow.shape)} vs {tuple(future_noise.shape)}"
+        )
+    predicted_clean = future_noise.float() - predicted_flow
+    return mask_probe(predicted_clean).float()
 
 
 def resize_mask(mask: torch.Tensor, size: tuple[int, int]) -> np.ndarray:
@@ -402,6 +441,13 @@ def main() -> None:
         raise FileExistsError(f"Refusing to overwrite evaluation output: {args.output}")
     if args.max_samples is not None and args.max_samples <= 0:
         raise ValueError("--max-samples must be positive")
+    if args.alignment_mode == "clean_latent_probe":
+        if args.mask_probe is None or not args.mask_probe.is_dir():
+            raise FileNotFoundError(
+                "--mask-probe is required for clean_latent_probe evaluation"
+            )
+    elif args.mask_probe is not None:
+        raise ValueError("--mask-probe is only valid with clean_latent_probe")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -425,10 +471,26 @@ def main() -> None:
         args.checkpoint, torch_dtype=dtype
     ).to(device)
     transformer.eval()
-    if int(transformer.config.counterfactual_mask_frames_per_latent) <= 0:
+    if (
+        args.alignment_mode == "hidden_head"
+        and int(transformer.config.counterfactual_mask_frames_per_latent) <= 0
+    ):
         raise ValueError("Checkpoint does not contain an enabled counterfactual mask head")
+    mask_probe = None
+    if args.alignment_mode == "clean_latent_probe":
+        mask_probe = LatentRobotMaskProbe.from_pretrained(args.mask_probe).to(
+            device=device, dtype=torch.float32
+        )
+        mask_probe.requires_grad_(False).eval()
     vae = AutoencoderKLWan.from_pretrained(args.vae, torch_dtype=dtype).to(device)
     vae.eval()
+    if mask_probe is not None:
+        if mask_probe.latent_channels != int(vae.config.z_dim):
+            raise ValueError("Mask probe/VAE latent channel mismatch")
+        if mask_probe.frames_per_latent != int(vae.config.scale_factor_temporal):
+            raise ValueError("Mask probe/VAE temporal scale mismatch")
+        if mask_probe.spatial_scale != int(vae.config.scale_factor_spatial):
+            raise ValueError("Mask probe/VAE spatial scale mismatch")
     latent_mean = torch.tensor(vae.config.latents_mean, device=device, dtype=dtype).view(
         1, vae.config.z_dim, 1, 1, 1
     )
@@ -483,6 +545,8 @@ def main() -> None:
                 sample,
                 future_noise,
                 dtype,
+                args.alignment_mode,
+                mask_probe,
             )
             size = tuple(logits.shape[-2:])
             correct = evaluate_prediction(
@@ -507,6 +571,8 @@ def main() -> None:
                     sample,
                     future_noise,
                     dtype,
+                    args.alignment_mode,
+                    mask_probe,
                 )
                 shuffled = evaluate_prediction(
                     shuffled_logits.sigmoid()[0].cpu().numpy(),
@@ -541,6 +607,7 @@ def main() -> None:
             )
         }
     report = {
+        "alignment_mode": args.alignment_mode,
         "checkpoint": str(args.checkpoint.resolve()),
         "vae": str(args.vae.resolve()),
         "dataset": str(args.dataset.resolve()),
@@ -560,6 +627,19 @@ def main() -> None:
         "seed": args.seed,
         "threshold": args.threshold,
         "mask_resolution": list(size),
+        "mask_probe": (
+            str(args.mask_probe.resolve()) if args.mask_probe is not None else None
+        ),
+        "mask_probe_config_sha256": (
+            sha256_file(args.mask_probe / LatentRobotMaskProbe.CONFIG_NAME)
+            if args.mask_probe is not None
+            else None
+        ),
+        "mask_probe_weights_sha256": (
+            sha256_file(args.mask_probe / LatentRobotMaskProbe.WEIGHTS_NAME)
+            if args.mask_probe is not None
+            else None
+        ),
         "aggregate": aggregate,
         "correct_minus_shuffled": sensitivity,
     }
