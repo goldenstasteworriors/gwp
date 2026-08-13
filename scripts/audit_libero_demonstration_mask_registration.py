@@ -62,6 +62,23 @@ def axis_angle_to_matrix(value: np.ndarray) -> np.ndarray:
     return np.eye(3) + np.sin(angle) * cross + (1.0 - np.cos(angle)) * (cross @ cross)
 
 
+def quaternion_to_axis_angle(quaternion: np.ndarray) -> np.ndarray:
+    quaternion = np.asarray(quaternion, dtype=np.float64)
+    if quaternion.shape != (4,):
+        raise ValueError(f"Expected quaternion shape (4,), got {quaternion.shape}")
+    norm = float(np.linalg.norm(quaternion))
+    if norm <= 1e-12:
+        raise ValueError("Cannot convert a zero quaternion")
+    quaternion = quaternion / norm
+    if quaternion[3] < 0.0:
+        quaternion = -quaternion
+    w = float(np.clip(quaternion[3], -1.0, 1.0))
+    denominator = float(np.sqrt(max(0.0, 1.0 - w * w)))
+    if denominator <= 1e-10:
+        return np.zeros(3, dtype=np.float64)
+    return quaternion[:3] / denominator * (2.0 * np.arccos(w))
+
+
 def rotation_error_degrees(left: np.ndarray, right: np.ndarray) -> float:
     relative = np.asarray(left, dtype=np.float64).T @ np.asarray(right, dtype=np.float64)
     cosine = float(np.clip((np.trace(relative) - 1.0) * 0.5, -1.0, 1.0))
@@ -158,6 +175,10 @@ def main() -> None:
         "registration_audit_only_not_a_probe_or_video_target"
     ):
         raise ValueError("Rendered RGB is not explicitly restricted to registration audit")
+    if manifest.get("eef_rotation_source") != (
+        "observation.robot_state.eef.quat_xyzw"
+    ):
+        raise ValueError("Replay rotation is not tied to the logged EEF quaternion frame")
     horizons = [int(value) for value in manifest.get("horizons", [])]
     if horizons != [0, 12, 24, 36, 48]:
         raise ValueError(f"Unexpected horizons: {horizons}")
@@ -207,6 +228,7 @@ def main() -> None:
             robot_mask = cache["robot_mask"].astype(bool)
             replay_position = cache["eef_position"].copy()
             replay_rotation = cache["eef_rotation"].copy()
+            replay_quaternion = cache["eef_quaternion_xyzw"].copy()
             replay_gripper = cache["gripper_qpos"].copy()
         sample = dataset[source_to_index[source_key]]
         real_rgb = sample["observation.images.image"].detach().cpu().numpy()
@@ -223,6 +245,8 @@ def main() -> None:
             raise ValueError(f"Robot-mask/RGB shape mismatch in {cache_path}")
         if real_state.shape != (len(horizons), 8):
             raise ValueError(f"Unexpected real state shape: {real_state.shape}")
+        if replay_quaternion.shape != (len(horizons), 4):
+            raise ValueError(f"Unexpected replay quaternion shape: {replay_quaternion.shape}")
 
         for horizon_index, horizon in enumerate(horizons):
             mask = robot_mask[horizon_index]
@@ -233,6 +257,17 @@ def main() -> None:
                 mask,
                 args.max_shift_px,
             )
+            quaternion_rotation = axis_angle_to_matrix(
+                quaternion_to_axis_angle(replay_quaternion[horizon_index])
+            )
+            rotation_consistency_max_abs = float(
+                np.max(np.abs(replay_rotation[horizon_index] - quaternion_rotation))
+            )
+            if rotation_consistency_max_abs > 1e-5:
+                raise ValueError(
+                    f"Replay rotation/quaternion mismatch in {cache_path} at "
+                    f"horizon {horizon}: {rotation_consistency_max_abs}"
+                )
             row = {
                 "episode_index": episode,
                 "task_index": int(record["task_index"]),
@@ -242,9 +277,10 @@ def main() -> None:
                     * np.linalg.norm(replay_position[horizon_index] - real_state[horizon_index, :3])
                 ),
                 "rotation_error_deg": rotation_error_degrees(
-                    replay_rotation[horizon_index],
+                    quaternion_rotation,
                     axis_angle_to_matrix(real_state[horizon_index, 3:6]),
                 ),
+                "rotation_consistency_max_abs": rotation_consistency_max_abs,
                 "gripper_max_abs": float(
                     np.max(
                         np.abs(

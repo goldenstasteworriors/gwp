@@ -304,6 +304,26 @@ def quaternion_to_axis_angle(quaternion: np.ndarray) -> np.ndarray:
     return quaternion[:3] / denominator * (2.0 * np.arccos(w))
 
 
+def quaternion_xyzw_to_matrix(quaternion: np.ndarray) -> np.ndarray:
+    """Convert the observed end-effector quaternion, stored as xyzw, to SO(3)."""
+
+    quaternion = np.asarray(quaternion, dtype=np.float64)
+    if quaternion.shape != (4,):
+        raise ValueError(f"Expected quaternion shape (4,), got {quaternion.shape}")
+    norm = float(np.linalg.norm(quaternion))
+    if norm <= 1e-12:
+        raise ValueError("Cannot convert a zero quaternion")
+    x, y, z, w = quaternion / norm
+    return np.asarray(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
 def flatten_observation_state(obs: dict[str, Any]) -> np.ndarray:
     return np.concatenate(
         [
@@ -375,12 +395,20 @@ def capture_state(
     )
     geom_ids = segmentation[..., 1]
     camera_id = sim.model.camera_name2id(camera_name)
+    eef_quaternion = np.asarray(
+        obs["robot_state"]["eef"]["quat"], dtype=np.float32
+    ).copy()
     return {
         "robot_mask": np.isin(geom_ids, robot_ids).astype(np.uint8),
         "gripper_mask": np.isin(geom_ids, gripper_ids).astype(np.uint8),
         "qpos": np.asarray(sim.data.qpos, dtype=np.float32).copy(),
         "eef_position": np.asarray(obs["robot_state"]["eef"]["pos"], dtype=np.float32),
-        "eef_rotation": np.asarray(obs["robot_state"]["eef"]["mat"], dtype=np.float32).reshape(3, 3),
+        # ``eef.mat`` comes from the operational-space controller and has a
+        # fixed tool-frame offset relative to the observed robot0_eef_quat.
+        # LeRobot's observation.state is built from the latter, so record and
+        # compare that physical observation rather than the controller frame.
+        "eef_quaternion_xyzw": eef_quaternion,
+        "eef_rotation": quaternion_xyzw_to_matrix(eef_quaternion).astype(np.float32),
         "camera_position": np.asarray(sim.data.cam_xpos[camera_id], dtype=np.float32).copy(),
         "camera_rotation": np.asarray(sim.data.cam_xmat[camera_id], dtype=np.float32).reshape(3, 3).copy(),
         "camera_fovy": np.asarray(sim.model.cam_fovy[camera_id], dtype=np.float32),

@@ -248,6 +248,7 @@ def main() -> None:
         "num_steps_wait": source_manifest["num_steps_wait"],
         "seed": args.seed,
         "source_state_atol": args.source_state_atol,
+        "eef_rotation_source": "observation.robot_state.eef.quat_xyzw",
         "num_episodes": len(output_records),
         "episodes": output_records,
     }
