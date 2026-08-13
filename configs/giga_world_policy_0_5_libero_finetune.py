@@ -37,6 +37,16 @@ transformer_pretrained = _required("GWP05_TRANSFORMER_PRETRAINED")
 wan_pretrained = _env("GWP_WAN_PRETRAINED", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 project_dir = _env("GWP05_PROJECT_DIR", "outputs/gwp0_5_libero_finetune")
 gpu_ids = _int_list("GWP_GPU_IDS", "0,1,2,3,4,5,6,7")
+checkpoint_model_dtype = _env("GWP_CHECKPOINT_MODEL_DTYPE", "original").lower()
+if checkpoint_model_dtype not in {"original", "bf16", "fp16"}:
+    raise ValueError(
+        "GWP_CHECKPOINT_MODEL_DTYPE must be one of original, bf16, fp16"
+    )
+with_ema = _bool("GWP_WITH_EMA", True)
+if checkpoint_model_dtype != "original" and with_ema:
+    raise ValueError(
+        "Compact checkpoint casting requires GWP_WITH_EMA=0; EMA uses a separate state dict"
+    )
 
 consequence_mode = _env("GWP_CONSEQUENCE_MODE", "off")
 if consequence_mode not in {"off", "policy_only", "joint", "video_only"}:
@@ -232,10 +242,14 @@ config = dict(
         checkpoint_safe_serialization=False,
         checkpoint_strict=False,
         disable_checkpoint=_bool("GWP_DISABLE_CHECKPOINT", False),
+        checkpoint_model_dtype=checkpoint_model_dtype,
+        strip_optimizer_after_checkpoint=_bool(
+            "GWP_STRIP_OPTIMIZER_AFTER_CHECKPOINT", False
+        ),
         log_with=None,
         log_interval=int(_env("GWP_LOG_INTERVAL", "20")),
         seed=int(_env("GWP_SEED", "6666")),
-        with_ema=_bool("GWP_WITH_EMA", True),
+        with_ema=with_ema,
         activation_checkpointing=True,
         activation_class_names=["WanAttention"],
     ),

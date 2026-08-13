@@ -1,5 +1,7 @@
 import functools
 import os
+import shutil
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -23,6 +25,46 @@ def set_counterfactual_mask_trainable_scope(transformer, scope: str) -> int:
         transformer.requires_grad_(False)
         transformer.counterfactual_mask_head.requires_grad_(True)
     return sum(parameter.numel() for parameter in transformer.parameters() if parameter.requires_grad)
+
+
+def cast_checkpoint_state_dict(
+    state_dict: dict[str, torch.Tensor], dtype_name: str
+) -> dict[str, torch.Tensor]:
+    """Cast floating model tensors for an inference-oriented compact checkpoint."""
+
+    dtype_name = str(dtype_name).lower()
+    if dtype_name == "original":
+        return state_dict
+    dtype_by_name = {"bf16": torch.bfloat16, "fp16": torch.float16}
+    if dtype_name not in dtype_by_name:
+        raise ValueError(
+            f"checkpoint_model_dtype must be one of original, bf16, fp16; got {dtype_name!r}"
+        )
+    dtype = dtype_by_name[dtype_name]
+    return {
+        key: value.to(dtype=dtype) if torch.is_floating_point(value) else value
+        for key, value in state_dict.items()
+    }
+
+
+def strip_optimizer_state(checkpoint_dir: str | os.PathLike) -> list[str]:
+    """Remove only resumability state from one checkpoint created by this run."""
+
+    checkpoint = Path(checkpoint_dir)
+    removed: list[str] = []
+    for path in sorted(checkpoint.glob("optimizer*.bin")):
+        if path.is_file():
+            path.unlink()
+            removed.append(path.name)
+    for path in sorted(checkpoint.glob("optimizer_*")):
+        if path.is_dir():
+            shutil.rmtree(path)
+            removed.append(path.name + "/")
+    deepspeed_state = checkpoint / "pytorch_model"
+    if deepspeed_state.is_dir():
+        shutil.rmtree(deepspeed_state)
+        removed.append(deepspeed_state.name + "/")
+    return removed
 
 
 class CasualWATrainerMoT(Trainer):
@@ -370,6 +412,32 @@ class CasualWATrainerMoT(Trainer):
         if bool(self.kwargs.get("disable_checkpoint", False)):
             return
         super().save_checkpoint_step()
+        if not bool(self.kwargs.get("strip_optimizer_after_checkpoint", False)):
+            return
+        self.accelerator.wait_for_everyone()
+        checkpoint_dir = os.path.join(
+            self.model_dir,
+            f"checkpoint_epoch_{self.cur_epoch}_step_{self.cur_step}",
+        )
+        if self.is_main_process and os.path.isdir(checkpoint_dir):
+            removed = strip_optimizer_state(checkpoint_dir)
+            if removed:
+                self.logger.info(
+                    "Stripped optimizer state from %s: %s", checkpoint_dir, removed
+                )
+        self.accelerator.wait_for_everyone()
+
+    def save_model_hook(self, models, weights, output_dir) -> None:
+        dtype_name = str(self.kwargs.get("checkpoint_model_dtype", "original")).lower()
+        if dtype_name != "original":
+            if len(weights) != 1:
+                raise RuntimeError(
+                    "Compact checkpoint casting requires exactly one gathered model state dict"
+                )
+            weights[0] = cast_checkpoint_state_dict(weights[0], dtype_name)
+            if self.is_main_process:
+                self.logger.info("Cast checkpoint model tensors to %s", dtype_name)
+        super().save_model_hook(models, weights, output_dir)
 
     def forward_vae(self, images):
         images = images.to(self.vae.dtype)
