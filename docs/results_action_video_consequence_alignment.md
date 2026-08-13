@@ -238,6 +238,12 @@ robot trajectory + scene -> contact / object response -> future observation
 
 实现位置为 `world_action_model/alignment/latent_mask_probe.py`、`world_action_model/trainer/wa_casual_trainer_mot.py` 和 `configs/giga_world_policy_0_5_libero_finetune.py`。默认 `GWP_COUNTERFACTUAL_MASK_ALIGNMENT_MODE=hidden_head`，所以该实现不会改变正在等待的 Stage-1；只有显式设置 `clean_latent_probe` 并提供冻结 probe checkpoint 才会启用。
 
+为训练这个 probe，新增了与 counterfactual cache 隔离的 demonstration-mask cache：它从已经审计过的 episode→raw-demo 唯一匹配出发，以 raw simulator 语义的 expert action（保留 `{-1,+1}` gripper，不使用 LeRobot 的 `{1,0}` 编码）重放同一初态，在 0/12/24/36/48 渲染 robot/gripper mask。cache 中的 replay RGB 被 manifest 硬标记为 `registration_audit_only_not_a_probe_or_video_target`，只用于证明 replay mask 与 LeRobot 中真实 demo 视频的时空位置一致，不能成为反事实 RGB target。
+
+注册门在看到正式结果前固定为：position error p95≤5 mm、rotation error p95≤2°、gripper max-abs p95≤0.003、机器人区域最佳平移 p95≤4 px、全图 RGB MAE p95≤10/255、最佳平移后的 robot-region RGB MAE p95≤15/255。实现于 `scripts/audit_libero_demonstration_mask_registration.py`。probe 训练器 `scripts/train_libero_latent_mask_probe.py` 拒绝任何未通过注册门的 train/held-out cache；训练后的 held-out probe 门固定为 full IoU≥0.65、dynamic/new-occupancy IoU≥0.40、gripper recall≥0.70，且这四项同时超过 copy-initial 和 train-mean。失败 probe 会保留作负结果，但 checkpoint 写入 `approved_for_alignment=false`，`LatentRobotMaskProbe.from_pretrained` 会硬拒绝加载。
+
+服务器已排队一个单 episode 注册 smoke，固定 commit `b508ec4`、GPU 5，并等待现有 Stage-1 与 post-gate watcher 全部退出后才执行；状态位于 `/home/ubuntu/project/WM/gwp-action-video-results/clean_latent_probe_registration_smoke_op81/status`。只有该 smoke 通过上述固定门，才生成完整 200/50 demonstration-mask cache；不会先跑大规模数据再根据结果放宽标准。
+
 ## 结果位置
 
 - Spatial 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_spatial_1000step/<method>/`
