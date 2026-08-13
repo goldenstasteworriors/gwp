@@ -309,6 +309,7 @@ CUDA_VISIBLE_DEVICES="$RENDER_GPU" "$POLICY_PYTHON" -B \
     --mean-mask-cache "$CACHE_TRAIN" \
     --device cuda:0 \
     --model-dtype bf16 \
+    --save-per-sample \
     > "$RESULT_ROOT/logs/matched_eval.log" 2>&1
 
 status evaluating_full
@@ -323,6 +324,7 @@ CUDA_VISIBLE_DEVICES="$RENDER_GPU" "$POLICY_PYTHON" -B \
     --mean-mask-cache "$CACHE_TRAIN" \
     --device cuda:0 \
     --model-dtype bf16 \
+    --save-per-sample \
     > "$RESULT_ROOT/logs/full_eval.log" 2>&1
 
 status auditing_pair

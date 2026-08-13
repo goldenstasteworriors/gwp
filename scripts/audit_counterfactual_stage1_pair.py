@@ -216,6 +216,20 @@ def validate_evaluation(
         raise ValueError(f"Missing correct-minus-shuffled: {evaluation_path}")
     for key in GATE_KEYS:
         finite_metric(sensitivity, key, "correct_minus_shuffled")
+    per_sample = evaluation.get("per_sample")
+    if not isinstance(per_sample, list) or len(per_sample) != 50:
+        raise ValueError(f"Evaluation must retain 50 per-sample records: {evaluation_path}")
+    if [row.get("index") for row in per_sample] != list(range(50)):
+        raise ValueError(f"Evaluation per-sample order is invalid: {evaluation_path}")
+    for index, row in enumerate(per_sample):
+        for mode in ("correct_action", "shuffled_action"):
+            result = row.get(mode)
+            if not isinstance(result, dict) or not isinstance(result.get("mean"), dict):
+                raise ValueError(
+                    f"Missing per-sample {mode} result at index {index}: {evaluation_path}"
+                )
+            for key in GATE_KEYS:
+                finite_metric(result["mean"], key, f"per_sample[{index}].{mode}.mean")
     return evaluation
 
 
@@ -230,6 +244,7 @@ def recompute_gate(
     mean_mask = full_aggregate["per_horizon_mean_mask"]["mean"]
     matched_correct = matched["aggregate"]["correct_action"]["mean"]
     sensitivity = full["correct_minus_shuffled"]
+    matched_sensitivity = matched["correct_minus_shuffled"]
 
     checks: dict[str, bool] = {}
     for key in GATE_KEYS:
@@ -239,6 +254,12 @@ def recompute_gate(
         )
         checks[f"correct_beats_mean_mask.{key}"] = (
             float(correct[key]) > float(mean_mask[key])
+        )
+        checks[f"correct_beats_matched_correct.{key}"] = (
+            float(correct[key]) > float(matched_correct[key])
+        )
+        checks[f"sensitivity_beats_matched_sensitivity.{key}"] = (
+            float(sensitivity[key]) > float(matched_sensitivity[key])
         )
     return {
         "status": "passed" if all(checks.values()) else "failed",
@@ -250,8 +271,15 @@ def recompute_gate(
         "correct_minus_shuffled": {
             key: float(sensitivity[key]) for key in GATE_KEYS
         },
+        "matched_correct_minus_shuffled": {
+            key: float(matched_sensitivity[key]) for key in GATE_KEYS
+        },
         "full_minus_matched_correct": {
             key: float(correct[key]) - float(matched_correct[key]) for key in GATE_KEYS
+        },
+        "full_minus_matched_sensitivity": {
+            key: float(sensitivity[key]) - float(matched_sensitivity[key])
+            for key in GATE_KEYS
         },
     }
 
