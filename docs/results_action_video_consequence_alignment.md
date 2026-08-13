@@ -113,6 +113,8 @@ Object 上的微小改善来自夹爪项（0.0407 vs 0.0484），但平移和旋
 
 当前单 episode 链路已经验证：四个未来 mask 的 robot pixels 为 4960、6522、7093、7648。相对 horizon 0，变化像素占各未来 robot mask 的 52.3%、65.1%、76.0%、88.5%；gripper mask 与初态的 IoU 分别为 0.104、0、0、0。因此该样本不是简单复制静态机器人基座即可解决，但这不能替代多 episode 的 held-out 检验。
 
+同一真实 cache 上的 `copy-initial` 受控测试进一步说明不能只看 full mask：12/24/36/48 step 的 full robot IoU 分别为 0.5575、0.4313、0.3524、0.2715，平均仍有 0.4032；但四个时刻的 dynamic IoU 和 new-occupancy IoU 均为 0。gripper-region recall 从 0.5156 降至 0.0459、0.0389、0.0136，平均仅 0.1535。评价实现位于 `world_action_model/alignment/geometry.py`，并显式报告 empty-union fraction，避免空动态区域悄悄抬高均值。
+
 ### 必须报告的 mask 指标与对照
 
 训练 loss 下降不能作为方法有效的证据。held-out cache 至少需要报告：
