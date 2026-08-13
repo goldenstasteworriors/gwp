@@ -152,6 +152,8 @@ Object 上的微小改善来自夹爪项（0.0407 vs 0.0484），但平移和旋
 
 正式训练前必须运行 `scripts/preflight_counterfactual_stage1.py`。它逐个复核 train/held-out cache 的预测与NPZ哈希、action clipping关系、horizon、二值mask、gripper包含关系和有限值，并验证split零重叠、policy/dataset一致、tracked Git状态干净以及checkpoint空间预算。只有生成 `status: passed` 的审计报告才允许启动两组训练。
 
+两组训练统一通过 `scripts/launch_counterfactual_stage1_train.py` 启动。launcher 只接受当前 Git commit 生成且输入未变更的 passed preflight 报告，固定 GPU 2–5、200 steps、单卡 batch 1、梯度累积 4、seed 6666 和 mask weight 0.1，并为两组生成相同的 `comparison_id`。`matched` 与 `full` 的唯一训练差异分别为 `mask weight=0 + compute-control=1` 和 `mask weight=0.1 + compute-control=0`；若另一组 manifest 的公共设置不同则拒绝启动。
+
 mini MoT 的 mask-only backward 已确认这条机制在计算图上成立：mask head、visual patch embedding、action encoder、state encoder 和 joint-attention blocks 的梯度绝对值和均非零；未调用的 action decoder 与 RGB `proj_out` 梯度为 0。也就是说 mask supervision 会训练“如何把动作 token 作为未来视觉 consequence 的条件”以及共享交互层，但不会把 mask loss 直接当成 action decoder 的目标；动作输出是否改善仍必须由 matched-data control 和控制评测决定。
 
 ## 结果位置
