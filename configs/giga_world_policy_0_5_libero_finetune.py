@@ -47,6 +47,26 @@ consequence_weight = 0.0
 if consequence_mode != "off":
     consequence_weight = float(_env("GWP_CONSEQUENCE_WEIGHT", "0.1"))
 
+counterfactual_mask_cache_value = _env("GWP_COUNTERFACTUAL_MASK_CACHE_PATHS")
+counterfactual_mask_cache_paths = []
+if counterfactual_mask_cache_value is not None:
+    counterfactual_mask_cache_paths = [
+        path.strip() for path in counterfactual_mask_cache_value.split(",") if path.strip()
+    ]
+    if len(counterfactual_mask_cache_paths) != len(data_paths):
+        raise ValueError(
+            "GWP_COUNTERFACTUAL_MASK_CACHE_PATHS must contain one path per LIBERO dataset"
+        )
+    if consequence_mode != "off":
+        raise ValueError(
+            "Counterfactual mask supervision cannot use the legacy demo-RGB consequence loss"
+        )
+counterfactual_mask_weight = (
+    float(_env("GWP_COUNTERFACTUAL_MASK_WEIGHT", "0.1"))
+    if counterfactual_mask_cache_paths
+    else 0.0
+)
+
 view_keys = [
     key.strip()
     for key in _env("GWP_VIEW_KEYS", "observation.images.image").split(",")
@@ -75,8 +95,13 @@ data_or_config = [
         ),
         t5_cache_size=4096,
         robotype="franka",
+        counterfactual_mask_cache=(
+            counterfactual_mask_cache_paths[index]
+            if counterfactual_mask_cache_paths
+            else None
+        ),
     )
-    for data_path in data_paths
+    for index, data_path in enumerate(data_paths)
 ]
 
 config = dict(
@@ -151,6 +176,9 @@ config = dict(
             in_action_channels=16,
             out_action_channels=16,
             num_embodiments=2,
+            counterfactual_mask_frames_per_latent=(
+                4 if counterfactual_mask_cache_paths else 0
+            ),
         ),
         visual_flow_shift=2.0,
         action_flow_shift=5.0,
@@ -166,6 +194,19 @@ config = dict(
         consequence_interval=int(_env("GWP_CONSEQUENCE_INTERVAL", "4")),
         consequence_start_step=int(_env("GWP_CONSEQUENCE_START_STEP", "0")),
         consequence_visual_sigma=float(_env("GWP_CONSEQUENCE_VISUAL_SIGMA", "1.0")),
+        counterfactual_mask_loss_weight=counterfactual_mask_weight,
+        counterfactual_mask_bce_weight=float(
+            _env("GWP_COUNTERFACTUAL_MASK_BCE_WEIGHT", "1.0")
+        ),
+        counterfactual_mask_dice_weight=float(
+            _env("GWP_COUNTERFACTUAL_MASK_DICE_WEIGHT", "1.0")
+        ),
+        counterfactual_mask_interval=int(
+            _env("GWP_COUNTERFACTUAL_MASK_INTERVAL", "1")
+        ),
+        counterfactual_mask_start_step=int(
+            _env("GWP_COUNTERFACTUAL_MASK_START_STEP", "0")
+        ),
     ),
     optimizers=dict(type="CAME8Bit", lr=6e-5, weight_decay=1e-2),
     schedulers=dict(type="ConstantScheduler"),

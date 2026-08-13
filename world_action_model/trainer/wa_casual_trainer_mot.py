@@ -2,11 +2,12 @@ import functools
 import os
 
 import torch
+import torch.nn.functional as F
 from diffusers.models import AutoencoderKLWan
 from diffusers.video_processor import VideoProcessor
 from einops import rearrange
 from giga_models import utils as gm_utils
-from world_action_model.alignment import policy_only_surrogate
+from world_action_model.alignment import masked_bce_dice_loss, policy_only_surrogate
 from world_action_model.models import CasualWorldActionTransformer_MoT
 from giga_train import ModuleDict, Trainer
 
@@ -29,6 +30,21 @@ class CasualWATrainerMoT(Trainer):
         self.consequence_interval = int(model_config.get("consequence_interval", 1))
         self.consequence_start_step = int(model_config.get("consequence_start_step", 0))
         self.consequence_visual_sigma = float(model_config.get("consequence_visual_sigma", 1.0))
+        self.counterfactual_mask_loss_weight = float(
+            model_config.get("counterfactual_mask_loss_weight", 0.0)
+        )
+        self.counterfactual_mask_bce_weight = float(
+            model_config.get("counterfactual_mask_bce_weight", 1.0)
+        )
+        self.counterfactual_mask_dice_weight = float(
+            model_config.get("counterfactual_mask_dice_weight", 1.0)
+        )
+        self.counterfactual_mask_interval = int(
+            model_config.get("counterfactual_mask_interval", 1)
+        )
+        self.counterfactual_mask_start_step = int(
+            model_config.get("counterfactual_mask_start_step", 0)
+        )
         valid_gradient_modes = {"policy_only", "joint", "video_only"}
         if self.consequence_gradient_mode not in valid_gradient_modes:
             raise ValueError(
@@ -39,6 +55,15 @@ class CasualWATrainerMoT(Trainer):
             raise ValueError("consequence_interval must be positive")
         if not 0.0 < self.consequence_visual_sigma <= 1.0:
             raise ValueError("consequence_visual_sigma must be in (0, 1]")
+        if self.counterfactual_mask_loss_weight < 0.0:
+            raise ValueError("counterfactual_mask_loss_weight must be non-negative")
+        if self.counterfactual_mask_interval <= 0:
+            raise ValueError("counterfactual_mask_interval must be positive")
+        if self.counterfactual_mask_loss_weight > 0.0 and self.consequence_loss_weight > 0.0:
+            raise ValueError(
+                "Counterfactual mask supervision cannot be combined with the legacy demo-RGB "
+                "consequence loss"
+            )
 
         vae_pretrained = model_config.get("vae_pretrained", os.path.join(pretrained, "vae"))
         vae_dtype = model_config.get("vae_dtype", torch.float32)
@@ -58,6 +83,13 @@ class CasualWATrainerMoT(Trainer):
 
         transformer_pretrained = model_config.get("transformer_pretrained", os.path.join(pretrained, "transformer"))
         transformer_cfg = model_config.get("transformer")
+        if (
+            self.counterfactual_mask_loss_weight > 0.0
+            and int(transformer_cfg.get("counterfactual_mask_frames_per_latent", 0)) <= 0
+        ):
+            raise ValueError(
+                "counterfactual_mask_frames_per_latent must be enabled when mask loss is active"
+            )
         transformer = CasualWorldActionTransformer_MoT(**transformer_cfg)
         transformer = load_pretrained_weights(
             transformer,
@@ -180,6 +212,70 @@ class CasualWATrainerMoT(Trainer):
             "visual_loss": self.visual_loss_weight * visual_loss,
             "action_loss": self.action_loss_weight * action_loss,
         }
+        if self._should_compute_counterfactual_mask_loss():
+            required_keys = (
+                "counterfactual_action",
+                "counterfactual_robot_masks",
+                "counterfactual_robot_mask_valid",
+            )
+            missing_keys = [key for key in required_keys if key not in batch_dict]
+            if missing_keys:
+                raise KeyError(f"Counterfactual mask batch is missing keys: {missing_keys}")
+            counterfactual_action = batch_dict["counterfactual_action"].to(
+                device=state.device,
+                dtype=self.dtype,
+            )
+            if self.action_repeats > 1:
+                counterfactual_action = counterfactual_action.repeat(
+                    1, self.action_repeats, 1
+                )
+            if counterfactual_action.shape[1] != num_action_tokens:
+                raise ValueError(
+                    f"Counterfactual action tokens {counterfactual_action.shape[1]} do not match "
+                    f"training action tokens {num_action_tokens}"
+                )
+
+            counterfactual_future_noise = torch.randn_like(visual_latents[:, :, 1:]).to(
+                self.dtype
+            )
+            counterfactual_timestep = torch.zeros_like(timestep)
+            counterfactual_timestep[
+                :, num_state_tokens + num_action_tokens + num_clean_latent_tokens :
+            ] = 1000
+            counterfactual_output = transformer(
+                ref_latents=ref_latents,
+                noisy_latents=counterfactual_future_noise,
+                timestep=counterfactual_timestep,
+                encoder_hidden_states=prompt_embeds,
+                return_dict=True,
+                action=counterfactual_action.detach(),
+                state=state,
+                embodiment_id=embodiment_id,
+                output_counterfactual_mask=True,
+                output_action=False,
+                output_visual=False,
+            )
+            mask_logits = counterfactual_output["counterfactual_mask_logits"].float()
+            mask_target = batch_dict["counterfactual_robot_masks"].to(
+                device=mask_logits.device,
+                dtype=torch.float32,
+            )
+            mask_valid = batch_dict["counterfactual_robot_mask_valid"].to(
+                device=mask_logits.device,
+                dtype=torch.float32,
+            )
+            mask_target = F.interpolate(mask_target, size=mask_logits.shape[-2:], mode="nearest")
+            mask_valid = F.interpolate(mask_valid, size=mask_logits.shape[-2:], mode="nearest")
+            raw_mask_loss = masked_bce_dice_loss(
+                mask_logits,
+                mask_target,
+                mask_valid,
+                bce_weight=self.counterfactual_mask_bce_weight,
+                dice_weight=self.counterfactual_mask_dice_weight,
+            )
+            losses["counterfactual_mask_loss"] = (
+                self.counterfactual_mask_loss_weight * raw_mask_loss
+            )
         if self._should_compute_consequence_loss():
             predicted_clean_action = noisy_action.float() - action_sigma.float() * action_pred.float()
             consequence_action = predicted_clean_action
@@ -225,6 +321,16 @@ class CasualWATrainerMoT(Trainer):
         if step < self.consequence_start_step:
             return False
         return (step - self.consequence_start_step) % self.consequence_interval == 0
+
+    def _should_compute_counterfactual_mask_loss(self) -> bool:
+        if self.counterfactual_mask_loss_weight <= 0.0:
+            return False
+        step = int(getattr(self, "_cur_step", 0))
+        if step < self.counterfactual_mask_start_step:
+            return False
+        return (
+            step - self.counterfactual_mask_start_step
+        ) % self.counterfactual_mask_interval == 0
 
     def forward_vae(self, images):
         images = images.to(self.vae.dtype)

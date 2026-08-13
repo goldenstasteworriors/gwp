@@ -377,6 +377,63 @@ class WALeRobotTransformsPretrain(WATransforms):
             device=action.device,
         )
 
+        counterfactual_action = data_dict.get("counterfactual_action")
+        counterfactual_masks = data_dict.get("counterfactual_robot_masks")
+        counterfactual_horizons = data_dict.get("counterfactual_horizons")
+        norm_counterfactual_action = None
+        mask_target = None
+        mask_valid = None
+        if counterfactual_action is not None:
+            if counterfactual_masks is None or counterfactual_horizons is None:
+                raise KeyError("Counterfactual action, masks, and horizons must be provided together")
+            if bool(mask_t.any()):
+                raise ValueError(
+                    "Counterfactual executed-action caches currently require an all-false delta mask"
+                )
+            counterfactual_action = torch.as_tensor(counterfactual_action, dtype=torch.float32)
+            if counterfactual_action.dim() != 2 or counterfactual_action.shape[0] != self.num_frames:
+                raise ValueError(
+                    f"Expected [{self.num_frames}, D] counterfactual actions, "
+                    f"got {tuple(counterfactual_action.shape)}"
+                )
+            counterfactual_action = counterfactual_action[:, :effective_dim]
+            if counterfactual_action.shape[-1] < d:
+                counterfactual_action = torch_F.pad(
+                    counterfactual_action,
+                    (0, d - int(counterfactual_action.shape[-1])),
+                    value=0.0,
+                )
+            norm_counterfactual_action = _normalize_feature(
+                counterfactual_action,
+                norm_stats["action"],
+                eff_dim=effective_dim,
+                device=counterfactual_action.device,
+            )
+
+            counterfactual_masks = torch.as_tensor(counterfactual_masks, dtype=torch.float32)
+            counterfactual_horizons = torch.as_tensor(counterfactual_horizons, dtype=torch.long)
+            expected_horizons = torch.tensor([0, 12, 24, 36, 48], dtype=torch.long)
+            if not torch.equal(counterfactual_horizons.cpu(), expected_horizons):
+                raise ValueError(
+                    f"Expected counterfactual horizons {expected_horizons.tolist()}, "
+                    f"got {counterfactual_horizons.tolist()}"
+                )
+            if counterfactual_masks.shape != (5, dst_height, dst_width):
+                raise ValueError(
+                    "Counterfactual masks must already match the configured single-view canvas; "
+                    f"expected {(5, dst_height, dst_width)}, got {tuple(counterfactual_masks.shape)}"
+                )
+            mask_target = counterfactual_masks[1:].clamp(0.0, 1.0)
+            mask_valid = torch.ones_like(mask_target)
+            if self.num_views > 1:
+                if self.view_concat_mode != "horizontal":
+                    raise ValueError(
+                        "Multi-view counterfactual masks currently require horizontal concatenation"
+                    )
+                unknown_width = dst_width * (self.num_views - 1)
+                mask_target = torch_F.pad(mask_target, (0, unknown_width), value=0.0)
+                mask_valid = torch_F.pad(mask_valid, (0, unknown_width), value=0.0)
+
         prompt_embeds = self._build_prompt_embeds(data_dict)
 
         out = {}
@@ -388,6 +445,10 @@ class WALeRobotTransformsPretrain(WATransforms):
         out["action"] = norm_delta
         out["state"] = norm_state
         out["embodiment_id"] = torch.tensor(int(embodiment_id), dtype=torch.long)
+        if norm_counterfactual_action is not None:
+            out["counterfactual_action"] = norm_counterfactual_action
+            out["counterfactual_robot_masks"] = mask_target
+            out["counterfactual_robot_mask_valid"] = mask_valid
         dim = out["action"].shape[-1]
         if self.emit_action_denorm_scale:
             scale = torch.ones(dim, dtype=torch.float32, device=action.device)

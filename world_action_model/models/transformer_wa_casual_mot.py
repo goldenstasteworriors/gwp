@@ -1180,6 +1180,8 @@ class CasualWorldActionTransformer_MoT(
         action: Optional[torch.Tensor] = None,
         embodiment_id: Optional[torch.Tensor] = None,
         output_counterfactual_mask: bool = False,
+        output_action: bool = True,
+        output_visual: bool = True,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
         action_hidden_states, action_rotary_emb, num_state_tokens, _ = self.encode_action_tokens(state, action, embodiment_id=embodiment_id)
         visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, grid_info = self.encode_visual_tokens(
@@ -1197,8 +1199,8 @@ class CasualWorldActionTransformer_MoT(
             encoder_hidden_states_image=encoder_hidden_states_image,
             return_dict=return_dict,
             attention_kwargs=attention_kwargs,
-            output_action=True,
-            output_visual=True,
+            output_action=output_action,
+            output_visual=output_visual,
             output_counterfactual_mask=output_counterfactual_mask,
             visual_grid_info=grid_info,
             embodiment_id=embodiment_id,
