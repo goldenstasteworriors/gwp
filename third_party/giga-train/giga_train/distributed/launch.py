@@ -190,6 +190,8 @@ class Launcher:
                     time.sleep(10)
                 else:
                     break
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, command)
         finally:
             if os.path.exists(self.config_file):
                 os.remove(self.config_file)
