@@ -73,7 +73,10 @@ def prefix_attention_weights(
     if inference_delay < 0 or execution_horizon < 1:
         raise ValueError("inference_delay must be non-negative and execution_horizon positive")
 
-    overlap_end = min(prefix_length, max(horizon - execution_horizon, 0))
+    # Algorithm 1 uses s=max(d, s_min): the fresh suffix must never be shorter
+    # than the actions consumed while the new chunk is being generated.
+    effective_execution_horizon = max(execution_horizon, inference_delay)
+    overlap_end = min(prefix_length, max(horizon - effective_execution_horizon, 0))
     frozen_end = min(int(inference_delay), overlap_end)
     weights = torch.zeros(horizon, device=device, dtype=dtype)
     if frozen_end:
