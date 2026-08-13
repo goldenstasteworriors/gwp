@@ -386,7 +386,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True)
     probe_dir = args.output_dir / "probe"
     probe.eval().requires_grad_(False)
-    probe.save_pretrained(probe_dir)
+    probe.save_pretrained(probe_dir, approved_for_alignment=status == "passed")
     report = {
         "schema_version": "libero-latent-mask-probe-training-v1",
         "status": status,

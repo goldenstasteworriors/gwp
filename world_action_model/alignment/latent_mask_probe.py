@@ -69,7 +69,12 @@ class LatentRobotMaskProbe(nn.Module):
             width * self.spatial_scale,
         )
 
-    def save_pretrained(self, path: str | Path) -> None:
+    def save_pretrained(
+        self,
+        path: str | Path,
+        *,
+        approved_for_alignment: bool,
+    ) -> None:
         from safetensors.torch import save_file
 
         root = Path(path).expanduser().resolve()
@@ -79,6 +84,7 @@ class LatentRobotMaskProbe(nn.Module):
             "latent_channels": self.latent_channels,
             "frames_per_latent": self.frames_per_latent,
             "spatial_scale": self.spatial_scale,
+            "approved_for_alignment": bool(approved_for_alignment),
         }
         config_path = root / self.CONFIG_NAME
         temporary_config = root / f".{self.CONFIG_NAME}.incomplete"
@@ -112,6 +118,10 @@ class LatentRobotMaskProbe(nn.Module):
         if expected_class != cls.__name__:
             raise ValueError(
                 f"Probe class {expected_class!r} in {config_path} is not {cls.__name__!r}"
+            )
+        if config.pop("approved_for_alignment", False) is not True:
+            raise RuntimeError(
+                f"Latent-mask probe did not pass its held-out alignment gate: {root}"
             )
         probe = cls(**config)
         missing, unexpected = probe.load_state_dict(load_file(str(weights_path)), strict=False)
