@@ -47,7 +47,13 @@ consequence_weight = 0.0
 if consequence_mode != "off":
     consequence_weight = float(_env("GWP_CONSEQUENCE_WEIGHT", "0.1"))
 
-view_keys = ["observation.images.image"]
+view_keys = [
+    key.strip()
+    for key in _env("GWP_VIEW_KEYS", "observation.images.image").split(",")
+    if key.strip()
+]
+if not view_keys:
+    raise ValueError("GWP_VIEW_KEYS must contain at least one image feature")
 image_frame_offsets = [0, 12, 24, 36, 48]
 
 data_or_config = [
@@ -107,8 +113,9 @@ config = dict(
                 delta_mask_by_embodiment_id={"0": [False] * 7},
                 norm_use_quantiles=True,
                 norm_enable_clamp=True,
-                num_views=1,
+                num_views=len(view_keys),
                 view_keys=view_keys,
+                view_concat_mode=_env("GWP_VIEW_CONCAT_MODE", "horizontal"),
                 image_cfg=dict(
                     mask_generator=dict(max_ref_frames=1, start=1, factor=4)
                 ),
@@ -169,7 +176,8 @@ config = dict(
         gradient_accumulation_steps=int(_env("GWP_GRAD_ACCUM_STEPS", "1")),
         mixed_precision="bf16",
         checkpoint_interval=int(_env("GWP_CHECKPOINT_INTERVAL", "1000")),
-        checkpoint_total_limit=-1,
+        checkpoint_total_limit=int(_env("GWP_CHECKPOINT_TOTAL_LIMIT", "-1")),
+        checkpoint_save_optimizer=_bool("GWP_CHECKPOINT_SAVE_OPTIMIZER", True),
         checkpoint_safe_serialization=False,
         checkpoint_strict=False,
         log_with=None,
