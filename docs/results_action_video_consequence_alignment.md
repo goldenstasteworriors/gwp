@@ -176,6 +176,8 @@ baseline 的四套件评测和 stage-1 都使用 GPU 2–5，因此不能在 che
 
 训练日志中 LeRobot episode 82 的 AV1 解码会偶发失败并被 dataset 回退为全零；它不在 stage-1 的 200/50 split 内，但仅靠训练日志没有覆盖全部选中样本。`scripts/audit_lerobot_video_split.py` 因此在 action 导出前以同一 PyAV backend 逐个解码 250 个 frame-0 source 在 0/12/24/36/48 horizon 的 agent/wrist 双视图，拒绝缺帧、非有限值和全零/常量 fallback，并把逐 episode 统计写入 pipeline 审计报告。
 
+服务器全量定位进一步确认损坏只存在于 `libero_goal/episode 82/frame 105`，同一帧的 agent/wrist 两路同时失败；Spatial/Object/LIBERO-10 的 episode 82 均逐帧通过。按训练的五 horizon 读取方式扫描该 Goal episode 时，129 个 source window 中有 49 个会因跨过坏 packet 而整组回退，但相对四套件约 273,465 个训练窗口只占约 0.018%。6k preliminary baseline 保留这一已知轻微污染并单独记录，不因此中断；正式长预算训练应排除或重编码该 episode，而不能继续静默回退。
+
 服务器视频审计已覆盖 2500 张选中帧并以 `zero_or_constant_fallbacks=0` 通过。另一次 checkpoint 路径审计发现 Accelerate 的 DeepSpeed save hook 不会预填 `weights`；BF16 compact hook 现复用父实现的语义，在空列表时通过 accelerator gather 完整 state dict 后再 cast，避免 matched/full 到 step 200 才因错误假设而保存失败。
 
 pipeline 重启时允许复用已通过的视频审计，但会重新验证 dataset 绝对路径、两个 split 的路径与 SHA256、250 episode、五个 horizon、双视图、PyAV backend 和零 fallback；任何字段漂移都会硬失败，不会用旧报告跳过覆盖检查。
