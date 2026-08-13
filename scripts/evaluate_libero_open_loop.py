@@ -27,6 +27,7 @@ from giga_models.sockets import RobotInferenceClient  # noqa: E402
 
 DEFAULT_AGENT_VIEW_KEY = "observation.images.image"
 DEFAULT_WRIST_VIEW_KEY = "observation.images.wrist_image"
+ACTION_HORIZONS = (1, 12, 24, 36, 48)
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-views", type=int, choices=(1, 2), default=1)
     parser.add_argument("--agent-view-key", default=DEFAULT_AGENT_VIEW_KEY)
     parser.add_argument("--wrist-view-key", default=DEFAULT_WRIST_VIEW_KEY)
+    parser.add_argument("--policy-checkpoint", type=Path, required=True)
+    parser.add_argument("--policy-num-inference-steps", type=int, required=True)
+    parser.add_argument(
+        "--policy-model-dtype", choices=("bf16", "fp16", "fp32"), required=True
+    )
+    parser.add_argument("--policy-seed", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()
 
@@ -167,6 +174,53 @@ def jsonable(value: Any) -> Any:
     return value
 
 
+def action_error_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, Any]:
+    if predicted.shape != target.shape or predicted.shape != (48, 7):
+        raise ValueError(
+            f"Expected predicted/target actions with shape (48, 7), got "
+            f"{predicted.shape} and {target.shape}"
+        )
+    if not np.isfinite(predicted).all() or not np.isfinite(target).all():
+        raise ValueError("Predicted and target actions must be finite")
+    error = predicted - target
+    squared = error**2
+    absolute = np.abs(error)
+    clipped = np.clip(predicted, -1.0, 1.0)
+    clipped_error = clipped - target
+    gripper_predicted = predicted[:, 6] >= 0.0
+    gripper_target = target[:, 6] >= 0.0
+    return {
+        "mse": float(np.mean(squared)),
+        "mae": float(np.mean(absolute)),
+        "translation_mse": float(np.mean(squared[:, :3])),
+        "translation_mae": float(np.mean(absolute[:, :3])),
+        "rotation_mse": float(np.mean(squared[:, 3:6])),
+        "rotation_mae": float(np.mean(absolute[:, 3:6])),
+        "gripper_mse": float(np.mean(squared[:, 6])),
+        "gripper_mae": float(np.mean(absolute[:, 6])),
+        "gripper_sign_accuracy": float(np.mean(gripper_predicted == gripper_target)),
+        "out_of_range_element_fraction": float(np.mean(np.abs(predicted) > 1.0)),
+        "out_of_range_step_fraction": float(np.mean(np.any(np.abs(predicted) > 1.0, axis=1))),
+        "clipped_mse": float(np.mean(clipped_error**2)),
+        "per_dimension_mse": np.mean(squared, axis=0).tolist(),
+        "per_dimension_mae": np.mean(absolute, axis=0).tolist(),
+        "prefix_mse_by_horizon": {
+            str(horizon): float(np.mean(squared[:horizon]))
+            for horizon in ACTION_HORIZONS
+        },
+        "prefix_gripper_sign_accuracy_by_horizon": {
+            str(horizon): float(
+                np.mean(gripper_predicted[:horizon] == gripper_target[:horizon])
+            )
+            for horizon in ACTION_HORIZONS
+        },
+    }
+
+
+def mean_metric(rows: list[dict[str, Any]], key: str) -> float:
+    return float(np.mean([float(row[key]) for row in rows]))
+
+
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -229,23 +283,46 @@ def main() -> None:
             )
             sent_tasks.add(task_id)
         predicted = np.asarray(client.inference(request), dtype=np.float32)[:48, :7]
-        error = predicted - target
+        if predicted.shape != (48, 7):
+            raise ValueError(
+                f"Policy returned {predicted.shape} for episode {episode}; expected (48, 7)"
+            )
         episode_dir = args.output_dir / f"episode_{episode:06d}"
         episode_dir.mkdir(parents=True, exist_ok=True)
-        np.save(episode_dir / "predicted_actions.npy", predicted)
+        predicted_path = episode_dir / "predicted_actions.npy"
+        target_path = episode_dir / "target_actions.npy"
+        np.save(predicted_path, predicted)
+        np.save(target_path, target)
         row = {
             "episode_index": episode,
             "task_id": task_id,
-            "mse": float(np.mean(error**2)),
-            "translation_mse": float(np.mean(error[:, :3] ** 2)),
-            "rotation_mse": float(np.mean(error[:, 3:6] ** 2)),
-            "gripper_mse": float(np.mean(error[:, 6] ** 2)),
+            "available_target_steps": min(len(group), 48),
+            "predicted_actions_file": str(predicted_path.relative_to(args.output_dir)),
+            "predicted_actions_sha256": sha256_file(predicted_path),
+            "target_actions_file": str(target_path.relative_to(args.output_dir)),
+            "target_actions_sha256": sha256_file(target_path),
+            **action_error_metrics(predicted, target),
         }
         rows.append(row)
         print(json.dumps(row), flush=True)
 
     task_ids = sorted({row["task_id"] for row in rows})
+    scalar_metric_keys = (
+        "mse",
+        "mae",
+        "translation_mse",
+        "translation_mae",
+        "rotation_mse",
+        "rotation_mae",
+        "gripper_mse",
+        "gripper_mae",
+        "gripper_sign_accuracy",
+        "out_of_range_element_fraction",
+        "out_of_range_step_fraction",
+        "clipped_mse",
+    )
     summary = {
+        "schema_version": "libero-open-loop-v2",
         "num_episodes": len(rows),
         "num_views": args.num_views,
         "view_keys": (
@@ -259,10 +336,46 @@ def main() -> None:
         "episode_selection_sha256": (
             sha256_file(args.episodes_file) if args.episodes_file is not None else None
         ),
-        "mse": float(np.mean([row["mse"] for row in rows])),
-        "translation_mse": float(np.mean([row["translation_mse"] for row in rows])),
-        "rotation_mse": float(np.mean([row["rotation_mse"] for row in rows])),
-        "gripper_mse": float(np.mean([row["gripper_mse"] for row in rows])),
+        "protocol": {
+            "dataset_root": str(args.dataset_root.resolve()),
+            "suite": args.suite,
+            "num_views": int(args.num_views),
+            "view_keys": (
+                [args.agent_view_key]
+                if args.num_views == 1
+                else [args.agent_view_key, args.wrist_view_key]
+            ),
+            "policy_checkpoint": str(args.policy_checkpoint.resolve()),
+            "policy_num_inference_steps": args.policy_num_inference_steps,
+            "policy_model_dtype": args.policy_model_dtype,
+            "policy_seed": args.policy_seed,
+        },
+        **{key: mean_metric(rows, key) for key in scalar_metric_keys},
+        "per_dimension_mse": np.mean(
+            np.asarray([row["per_dimension_mse"] for row in rows]), axis=0
+        ).tolist(),
+        "per_dimension_mae": np.mean(
+            np.asarray([row["per_dimension_mae"] for row in rows]), axis=0
+        ).tolist(),
+        "prefix_mse_by_horizon": {
+            str(horizon): float(
+                np.mean(
+                    [row["prefix_mse_by_horizon"][str(horizon)] for row in rows]
+                )
+            )
+            for horizon in ACTION_HORIZONS
+        },
+        "prefix_gripper_sign_accuracy_by_horizon": {
+            str(horizon): float(
+                np.mean(
+                    [
+                        row["prefix_gripper_sign_accuracy_by_horizon"][str(horizon)]
+                        for row in rows
+                    ]
+                )
+            )
+            for horizon in ACTION_HORIZONS
+        },
         "mse_by_task": {
             str(task_id): float(np.mean([row["mse"] for row in rows if row["task_id"] == task_id]))
             for task_id in task_ids

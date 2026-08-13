@@ -210,6 +210,10 @@ status exporting_train_actions
     --host 127.0.0.1 \
     --port "$PORT" \
     --num-views 2 \
+    --policy-checkpoint "$CHECKPOINT" \
+    --policy-num-inference-steps 10 \
+    --policy-model-dtype bf16 \
+    --policy-seed 20260813 \
     --output-dir "$ACTIONS_TRAIN" \
     > "$RESULT_ROOT/logs/actions_train.log" 2>&1
 
@@ -221,6 +225,10 @@ status exporting_heldout_actions
     --host 127.0.0.1 \
     --port "$PORT" \
     --num-views 2 \
+    --policy-checkpoint "$CHECKPOINT" \
+    --policy-num-inference-steps 10 \
+    --policy-model-dtype bf16 \
+    --policy-seed 20260813 \
     --output-dir "$ACTIONS_HELDOUT" \
     > "$RESULT_ROOT/logs/actions_heldout.log" 2>&1
 
