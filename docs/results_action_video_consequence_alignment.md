@@ -176,6 +176,8 @@ baseline 的四套件评测和 stage-1 都使用 GPU 2–5，因此不能在 che
 
 训练日志中 LeRobot episode 82 的 AV1 解码会偶发失败并被 dataset 回退为全零；它不在 stage-1 的 200/50 split 内，但仅靠训练日志没有覆盖全部选中样本。`scripts/audit_lerobot_video_split.py` 因此在 action 导出前以同一 PyAV backend 逐个解码 250 个 frame-0 source 在 0/12/24/36/48 horizon 的 agent/wrist 双视图，拒绝缺帧、非有限值和全零/常量 fallback，并把逐 episode 统计写入 pipeline 审计报告。
 
+服务器视频审计已覆盖 2500 张选中帧并以 `zero_or_constant_fallbacks=0` 通过。另一次 checkpoint 路径审计发现 Accelerate 的 DeepSpeed save hook 不会预填 `weights`；BF16 compact hook 现复用父实现的语义，在空列表时通过 accelerator gather 完整 state dict 后再 cast，避免 matched/full 到 step 200 才因错误假设而保存失败。
+
 两组训练统一通过 `scripts/launch_counterfactual_stage1_train.py` 启动。launcher 只接受当前 Git commit 生成且输入未变更的 passed preflight 报告，固定 GPU 2–5、200 steps、单卡 batch 1、梯度累积 4、seed 6666 和 mask weight 0.1，并为两组生成相同的 `comparison_id`。`matched` 与 `full` 的唯一训练差异分别为 `mask weight=0 + compute-control=1` 和 `mask weight=0.1 + compute-control=0`；若另一组 manifest 的公共设置不同则拒绝启动。
 
 GigaTrain 在 `Trainer.__init__` 中先调用 `set_seed(seed)`，随后才在 `prepare()` 中构造模型，因此 baseline checkpoint 中不存在的新 mask head 应在两组中得到相同初始化。trainer 额外记录 `Counterfactual mask head initial SHA256`；正式结果审计要求 matched/full 日志中的该哈希完全相同，以直接排除随机 head 初始化差异。

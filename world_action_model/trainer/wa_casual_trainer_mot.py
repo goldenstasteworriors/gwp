@@ -468,7 +468,17 @@ class CasualWATrainerMoT(Trainer):
     def save_model_hook(self, models, weights, output_dir) -> None:
         dtype_name = str(self.kwargs.get("checkpoint_model_dtype", "original")).lower()
         if dtype_name != "original":
-            if len(weights) != 1:
+            if len(weights) == 0:
+                if len(models) != 1:
+                    raise RuntimeError(
+                        "Compact DeepSpeed checkpoint casting requires exactly one model"
+                    )
+                # Accelerate does not populate ``weights`` for DeepSpeed before
+                # invoking save hooks.  The base hook would gather the full state
+                # itself; gather it here so it can be cast before inference weights
+                # are serialized.
+                weights.append(self.accelerator.get_state_dict(models[0]))
+            elif len(weights) != 1:
                 raise RuntimeError(
                     "Compact checkpoint casting requires exactly one gathered model state dict"
                 )
