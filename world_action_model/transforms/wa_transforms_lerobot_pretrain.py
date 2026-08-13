@@ -382,6 +382,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         counterfactual_gripper_masks = data_dict.get("counterfactual_gripper_masks")
         counterfactual_horizons = data_dict.get("counterfactual_horizons")
         norm_counterfactual_action = None
+        initial_mask_target = None
         mask_target = None
         gripper_mask_target = None
         mask_valid = None
@@ -440,6 +441,7 @@ class WALeRobotTransformsPretrain(WATransforms):
                     f"got {tuple(counterfactual_gripper_masks.shape)} and "
                     f"{tuple(counterfactual_masks.shape)}"
                 )
+            initial_mask_target = counterfactual_masks[0].clamp(0.0, 1.0)
             mask_target = counterfactual_masks[1:].clamp(0.0, 1.0)
             gripper_mask_target = counterfactual_gripper_masks[1:].clamp(0.0, 1.0)
             mask_valid = torch.ones_like(mask_target)
@@ -449,6 +451,9 @@ class WALeRobotTransformsPretrain(WATransforms):
                         "Multi-view counterfactual masks currently require horizontal concatenation"
                     )
                 unknown_width = dst_width * (self.num_views - 1)
+                initial_mask_target = torch_F.pad(
+                    initial_mask_target, (0, unknown_width), value=0.0
+                )
                 mask_target = torch_F.pad(mask_target, (0, unknown_width), value=0.0)
                 gripper_mask_target = torch_F.pad(
                     gripper_mask_target, (0, unknown_width), value=0.0
@@ -468,9 +473,11 @@ class WALeRobotTransformsPretrain(WATransforms):
         out["embodiment_id"] = torch.tensor(int(embodiment_id), dtype=torch.long)
         if norm_counterfactual_action is not None:
             out["counterfactual_action"] = norm_counterfactual_action
+            out["counterfactual_initial_robot_mask"] = initial_mask_target
             out["counterfactual_robot_masks"] = mask_target
             out["counterfactual_gripper_masks"] = gripper_mask_target
             out["counterfactual_robot_mask_valid"] = mask_valid
+            out["counterfactual_horizons"] = counterfactual_horizons[1:]
         dim = out["action"].shape[-1]
         if self.emit_action_denorm_scale:
             scale = torch.ones(dim, dtype=torch.float32, device=action.device)
