@@ -168,6 +168,8 @@ cache schema 现升级为 `libero-counterfactual-robot-mask-v3`：生成器必�
 
 正式训练前必须在含 LIBERO/HDF5 依赖的 `gigaworld-libero-eval` 环境运行 `scripts/preflight_counterfactual_stage1.py`。它逐个重新验证 raw HDF5 哈希、语言到 suite task 的对应、完整 demo action 匹配、`states[0]` 与 frame-0 state、预测与NPZ哈希、action clipping关系、horizon、二值mask、gripper包含关系和有限值，并验证split零重叠、policy/dataset一致、tracked Git状态干净以及checkpoint空间预算。只有生成 `status: passed` 的审计报告才允许启动两组训练。
 
+原始 LIBERO-Spatial 的 10 个 HDF5 固定到 Hugging Face revision `f13aa24a3da8c43c7225569f28c562979fa0e35a`；文件名、字节数和 SHA256 记录在 `configs/libero_spatial_raw_demos.json`，由 `scripts/verify_libero_raw_demos.py` 在 cache 生成前先做 size gate、再做完整 SHA256 gate。正式链路统一由 `scripts/run_counterfactual_stage1_pipeline.sh` 等待 30k EMA checkpoint 和 raw demo 门禁，依次执行 v3 单步 smoke、预测动作导出、200/50 cache、preflight、matched/full 训练、held-out 评价和 pair audit，不再使用结果目录中指向 v2 cache 的临时 watcher。
+
 两组训练统一通过 `scripts/launch_counterfactual_stage1_train.py` 启动。launcher 只接受当前 Git commit 生成且输入未变更的 passed preflight 报告，固定 GPU 2–5、200 steps、单卡 batch 1、梯度累积 4、seed 6666 和 mask weight 0.1，并为两组生成相同的 `comparison_id`。`matched` 与 `full` 的唯一训练差异分别为 `mask weight=0 + compute-control=1` 和 `mask weight=0.1 + compute-control=0`；若另一组 manifest 的公共设置不同则拒绝启动。
 
 GigaTrain 在 `Trainer.__init__` 中先调用 `set_seed(seed)`，随后才在 `prepare()` 中构造模型，因此 baseline checkpoint 中不存在的新 mask head 应在两组中得到相同初始化。trainer 额外记录 `Counterfactual mask head initial SHA256`；正式结果审计要求 matched/full 日志中的该哈希完全相同，以直接排除随机 head 初始化差异。
