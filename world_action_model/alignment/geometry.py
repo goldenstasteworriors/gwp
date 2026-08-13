@@ -7,6 +7,7 @@ evaluation utilities: training-time policy gradients remain in
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -52,6 +53,180 @@ def binary_mask_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, 
         else 1.0,
         "centroid_px": centroid_px,
         "area_ratio": float(pred_area / target_area) if target_area else float("nan"),
+    }
+
+
+def copy_initial_mask_baseline(initial_mask: np.ndarray, num_horizons: int) -> np.ndarray:
+    """Repeat the observed robot mask as an action-independent future baseline."""
+
+    initial_mask = np.asarray(initial_mask)
+    if initial_mask.ndim != 2:
+        raise ValueError(f"Expected a 2D initial mask, got {initial_mask.shape}")
+    if num_horizons <= 0:
+        raise ValueError(f"num_horizons must be positive, got {num_horizons}")
+    return np.repeat((initial_mask > 0)[None], int(num_horizons), axis=0)
+
+
+def _masked_overlap_metrics(
+    predicted: np.ndarray,
+    target: np.ndarray,
+    valid: np.ndarray,
+) -> dict[str, float | int | bool]:
+    predicted = np.logical_and(predicted, valid)
+    target = np.logical_and(target, valid)
+    true_positive = np.logical_and(predicted, target).sum(dtype=np.float64)
+    false_positive = np.logical_and(predicted, np.logical_not(target)).sum(dtype=np.float64)
+    false_negative = np.logical_and(np.logical_not(predicted), target).sum(dtype=np.float64)
+    predicted_area = predicted.sum(dtype=np.float64)
+    target_area = target.sum(dtype=np.float64)
+    union = true_positive + false_positive + false_negative
+    denominator = predicted_area + target_area
+    return {
+        # An empty union means both masks correctly predict no occupancy.  Area
+        # counts remain in the result so aggregate reports can expose how often
+        # this convention is used rather than hiding it in a mean score.
+        "iou": float(true_positive / union) if union else 1.0,
+        "dice": float(2.0 * true_positive / denominator) if denominator else 1.0,
+        "precision": float(true_positive / predicted_area) if predicted_area else float("nan"),
+        "recall": float(true_positive / target_area) if target_area else float("nan"),
+        "predicted_pixels": int(predicted_area),
+        "target_pixels": int(target_area),
+        "valid_pixels": int(valid.sum(dtype=np.int64)),
+        "empty_union": bool(union == 0),
+    }
+
+
+def counterfactual_mask_metrics(
+    predicted_masks: np.ndarray,
+    target_masks: np.ndarray,
+    initial_mask: np.ndarray,
+    *,
+    valid_masks: np.ndarray | None = None,
+    target_gripper_masks: np.ndarray | None = None,
+    horizons: Sequence[int] | None = None,
+    threshold: float = 0.5,
+) -> dict[str, Any]:
+    """Evaluate whether future robot masks depend on a counterfactual action.
+
+    Besides full-mask overlap, this reports motion relative to the observed
+    initial robot mask and newly occupied pixels.  Those two views prevent the
+    large static base/arm region from making an action-independent predictor
+    look useful.  ``target_gripper_masks`` is optional because some renderers
+    provide only a full robot segmentation.
+
+    Floating-point predictions are interpreted as probabilities and thresholded
+    at ``threshold``.  Callers holding logits must apply a sigmoid first.
+    """
+
+    predicted_masks = np.asarray(predicted_masks)
+    target_masks = np.asarray(target_masks)
+    if predicted_masks.ndim != 3 or target_masks.ndim != 3:
+        raise ValueError(
+            "Expected predicted and target masks with shape [T, H, W], got "
+            f"{predicted_masks.shape} and {target_masks.shape}"
+        )
+    if predicted_masks.shape != target_masks.shape:
+        raise ValueError(
+            f"Predicted and target mask shapes differ: {predicted_masks.shape} vs "
+            f"{target_masks.shape}"
+        )
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError(f"threshold must be in [0, 1], got {threshold}")
+
+    num_horizons, height, width = target_masks.shape
+    initial_mask = np.asarray(initial_mask)
+    if initial_mask.shape != (height, width):
+        raise ValueError(
+            f"Expected initial mask shape {(height, width)}, got {initial_mask.shape}"
+        )
+
+    if valid_masks is None:
+        valid_masks = np.ones_like(target_masks, dtype=bool)
+    else:
+        valid_masks = np.asarray(valid_masks, dtype=bool)
+        if valid_masks.shape == (height, width):
+            valid_masks = np.broadcast_to(valid_masks, target_masks.shape)
+        if valid_masks.shape != target_masks.shape:
+            raise ValueError(
+                f"Expected valid masks shape {(height, width)} or {target_masks.shape}, "
+                f"got {valid_masks.shape}"
+            )
+    if np.any(valid_masks.sum(axis=(-2, -1)) == 0):
+        raise ValueError("Every horizon must contain at least one valid pixel")
+
+    if target_gripper_masks is not None:
+        target_gripper_masks = np.asarray(target_gripper_masks)
+        if target_gripper_masks.shape != target_masks.shape:
+            raise ValueError(
+                f"Target gripper mask shape {target_gripper_masks.shape} does not match "
+                f"target robot masks {target_masks.shape}"
+            )
+        target_gripper_masks = target_gripper_masks > 0
+
+    if horizons is None:
+        horizon_values = list(range(num_horizons))
+    else:
+        horizon_values = [int(value) for value in horizons]
+        if len(horizon_values) != num_horizons:
+            raise ValueError(
+                f"Expected {num_horizons} horizon labels, got {len(horizon_values)}"
+            )
+
+    predicted = (
+        predicted_masks
+        if predicted_masks.dtype == np.bool_
+        else predicted_masks >= threshold
+    )
+    target = target_masks > 0
+    initial = initial_mask > 0
+
+    per_horizon: list[dict[str, Any]] = []
+    for index, horizon in enumerate(horizon_values):
+        valid = valid_masks[index]
+        predicted_dynamic = np.logical_xor(predicted[index], initial)
+        target_dynamic = np.logical_xor(target[index], initial)
+        predicted_new = np.logical_and(predicted[index], np.logical_not(initial))
+        target_new = np.logical_and(target[index], np.logical_not(initial))
+        row: dict[str, Any] = {
+            "horizon": horizon,
+            "full": _masked_overlap_metrics(predicted[index], target[index], valid),
+            "dynamic": _masked_overlap_metrics(predicted_dynamic, target_dynamic, valid),
+            "new_occupancy": _masked_overlap_metrics(predicted_new, target_new, valid),
+        }
+        if target_gripper_masks is not None:
+            gripper = np.logical_and(target_gripper_masks[index], valid)
+            gripper_pixels = gripper.sum(dtype=np.float64)
+            covered = np.logical_and(predicted[index], gripper).sum(dtype=np.float64)
+            row["gripper_region_recall"] = (
+                float(covered / gripper_pixels) if gripper_pixels else float("nan")
+            )
+            row["gripper_pixels"] = int(gripper_pixels)
+        per_horizon.append(row)
+
+    mean: dict[str, float] = {}
+    for region in ("full", "dynamic", "new_occupancy"):
+        for metric in ("iou", "dice", "precision", "recall"):
+            values = np.asarray([row[region][metric] for row in per_horizon], dtype=np.float64)
+            mean[f"{region}_{metric}"] = (
+                float(np.nanmean(values)) if np.any(np.isfinite(values)) else float("nan")
+            )
+        mean[f"{region}_empty_union_fraction"] = float(
+            np.mean([row[region]["empty_union"] for row in per_horizon])
+        )
+    if target_gripper_masks is not None:
+        gripper_values = np.asarray(
+            [row["gripper_region_recall"] for row in per_horizon], dtype=np.float64
+        )
+        mean["gripper_region_recall"] = (
+            float(np.nanmean(gripper_values))
+            if np.any(np.isfinite(gripper_values))
+            else float("nan")
+        )
+
+    return {
+        "horizons": horizon_values,
+        "per_horizon": per_horizon,
+        "mean": mean,
     }
 
 

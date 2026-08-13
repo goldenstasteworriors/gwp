@@ -2,6 +2,8 @@ from .consequence import policy_only_surrogate
 from .masks import masked_bce_dice_loss
 from .geometry import (
     binary_mask_metrics,
+    copy_initial_mask_baseline,
+    counterfactual_mask_metrics,
     estimate_background_homography,
     project_world_points,
     register_and_compare_masks,
@@ -10,6 +12,8 @@ from .geometry import (
 
 __all__ = [
     "binary_mask_metrics",
+    "copy_initial_mask_baseline",
+    "counterfactual_mask_metrics",
     "estimate_background_homography",
     "policy_only_surrogate",
     "masked_bce_dice_loss",
