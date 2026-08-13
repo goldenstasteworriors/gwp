@@ -354,6 +354,9 @@ class WAMLeRobotDataset(BaseDataset):
                 data_dict["counterfactual_robot_masks"] = torch.from_numpy(
                     cache["robot_mask"].copy()
                 )
+                data_dict["counterfactual_gripper_masks"] = torch.from_numpy(
+                    cache["gripper_mask"].copy()
+                )
                 data_dict["counterfactual_horizons"] = torch.from_numpy(
                     cache["horizons"].copy()
                 )
