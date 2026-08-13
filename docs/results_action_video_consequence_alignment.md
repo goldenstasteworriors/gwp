@@ -212,6 +212,15 @@ mini MoT 的 mask-only backward 已确认这条机制在计算图上成立：mas
 
 当前实现把 mask head 接在 `visual_for_out` hidden tokens 上，而不经过 RGB `proj_out`。因此 held-out correct-action 超过 shuffled/copy/mean 只能证明这些 future visual tokens 学到了 predicted action 的可渲染机器人后果；它不能证明 RGB `proj_out` 生成的机器人位置也与该动作一致。这一点与 BridgeV2W 的“rendered mask 是输入条件”以及 MWM 的“mask 本身是生成目标”都不同，也是当前方案最重要的证伪边界。
 
+更严格地说，机器人世界模型的 action-conditioned dynamics 可以拆成两段：
+
+```text
+action command -> controller / kinematics -> robot trajectory
+robot trajectory + scene -> contact / object response -> future observation
+```
+
+当前 counterfactual robot-mask branch 只为第一段提供 predicted-action 分布上的监督。它没有凭空恢复第二段缺失的 counterfactual object motion；“scene response”仍只能从 expert-action + real future RGB 的 demo branch 学习。当前假设因此应表述为：先消除 world model 在 off-expert action realization 上的分布偏移，使 demo branch 已学到的 interaction prior 能在 policy trajectory 上被调用。若 mask gate 通过但 RGB-path/控制均不改善，结果就说明只补第一段不足，不能声称模型已经学到预测动作的完整未来后果。
+
 后续严格采用单变量分叉，不同时增加多个模块：
 
 1. 若第一阶段 mechanism gate 失败，停止控制评测，先修复 action conditioning 或监督时标，不增加 RGB/depth/object target。
