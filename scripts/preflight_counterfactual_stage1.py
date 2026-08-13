@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from generate_libero_counterfactual_mask_cache import (
+    load_episode_languages,
     normalize_raw_demo_actions,
     sha256_array,
 )
@@ -97,6 +98,7 @@ def load_source_episodes(
         ],
         ignore_index=True,
     )
+    episode_languages = load_episode_languages(dataset_root)
     records: dict[int, dict[str, Any]] = {}
     for episode, episode_frames in frames[frames["episode_index"].isin(requested_episodes)].groupby(
         "episode_index", sort=True
@@ -104,6 +106,7 @@ def load_source_episodes(
         episode_frames = episode_frames.sort_values("frame_index")
         records[int(episode)] = {
             "task_index": int(episode_frames.iloc[0]["task_index"]),
+            "task_language": episode_languages[int(episode)],
             "source_observation_state": np.asarray(
                 episode_frames.iloc[0]["observation.state"], dtype=np.float32
             ),
@@ -198,9 +201,15 @@ def audit_cache(
         task_index = int(record["task_index"])
         if task_index != int(source_episode["task_index"]):
             raise ValueError(f"Cache/source task mismatch for episode {episode}")
+        if record.get("task_language") != source_episode["task_language"]:
+            raise ValueError(f"Cache/source task language mismatch for episode {episode}")
         if task_index not in raw_files_by_task:
             raise ValueError(f"No raw HDF5 provenance for task {task_index}")
         raw_metadata = raw_files_by_task[task_index]
+        if raw_metadata.get("task_language") != source_episode["task_language"]:
+            raise ValueError(f"Raw/source task language mismatch for episode {episode}")
+        if int(record["libero_task_index"]) != int(raw_metadata["libero_task_index"]):
+            raise ValueError(f"Record/raw LIBERO task index mismatch for episode {episode}")
         raw_hdf5_path = Path(record["raw_hdf5_path"]).resolve()
         if raw_hdf5_path != Path(str(raw_metadata["path"])).resolve():
             raise ValueError(f"Record/manifest raw HDF5 mismatch for episode {episode}")
@@ -210,6 +219,16 @@ def audit_cache(
         raw_demo_key = (raw_hdf5_path, raw_demo_name)
         if raw_demo_key not in raw_demo_cache:
             with h5py.File(raw_hdf5_path, "r") as raw_file:
+                problem_info = json.loads(str(raw_file["data"].attrs["problem_info"]))
+                if str(problem_info.get("language_instruction", "")).strip() != str(
+                    raw_metadata["task_language"]
+                ).strip():
+                    raise ValueError(f"Raw HDF5/task language mismatch: {raw_hdf5_path}")
+                expected_filename = f"{raw_metadata['task_name']}_demo.hdf5"
+                if raw_hdf5_path.name != expected_filename:
+                    raise ValueError(
+                        f"Raw HDF5 filename {raw_hdf5_path.name!r} != {expected_filename!r}"
+                    )
                 demo_path = f"data/{raw_demo_name}"
                 if demo_path not in raw_file:
                     raise ValueError(f"Missing raw demo {raw_hdf5_path}:{demo_path}")

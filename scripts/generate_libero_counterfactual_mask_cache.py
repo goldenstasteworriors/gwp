@@ -155,6 +155,24 @@ def read_episode_file(path: Path) -> list[int]:
     return episodes
 
 
+def load_episode_languages(dataset_root: Path) -> dict[int, str]:
+    metadata_paths = sorted(dataset_root.glob("meta/episodes/chunk-*/file-*.parquet"))
+    if not metadata_paths:
+        raise FileNotFoundError(f"No episode metadata under {dataset_root}")
+    metadata = pd.concat(
+        [pd.read_parquet(path, columns=["episode_index", "tasks"]) for path in metadata_paths],
+        ignore_index=True,
+    )
+    result: dict[int, str] = {}
+    for _, row in metadata.iterrows():
+        episode = int(row["episode_index"])
+        tasks = list(row["tasks"])
+        if len(tasks) != 1 or not str(tasks[0]).strip():
+            raise ValueError(f"Episode {episode} must have exactly one language task: {tasks}")
+        result[episode] = str(tasks[0]).strip()
+    return result
+
+
 def load_episode_records(dataset_root: Path) -> dict[int, dict[str, Any]]:
     parquet_paths = sorted(dataset_root.glob("data/chunk-*/file-*.parquet"))
     if not parquet_paths:
@@ -175,6 +193,7 @@ def load_episode_records(dataset_root: Path) -> dict[int, dict[str, Any]]:
         ],
         ignore_index=True,
     )
+    episode_languages = load_episode_languages(dataset_root)
     result: dict[int, dict[str, Any]] = {}
     for episode_index, episode_frames in frames.groupby("episode_index", sort=True):
         episode_frames = episode_frames.sort_values("frame_index")
@@ -185,6 +204,7 @@ def load_episode_records(dataset_root: Path) -> dict[int, dict[str, Any]]:
             raise ValueError(f"Episode {episode_index} spans multiple tasks")
         result[int(episode_index)] = {
             "task_index": int(task_indices[0]),
+            "task_language": episode_languages[int(episode_index)],
             "source_observation_state": np.asarray(
                 episode_frames.iloc[0]["observation.state"], dtype=np.float32
             ),
@@ -215,13 +235,20 @@ def normalize_raw_demo_actions(actions: np.ndarray) -> np.ndarray:
     return normalized
 
 
-def load_raw_demo_candidates(path: Path) -> list[dict[str, Any]]:
+def load_raw_demo_candidates(path: Path, expected_language: str) -> list[dict[str, Any]]:
     if not path.is_file():
         raise FileNotFoundError(path)
     candidates: list[dict[str, Any]] = []
     with h5py.File(path, "r") as raw_file:
         if "data" not in raw_file:
             raise ValueError(f"Raw LIBERO HDF5 has no data group: {path}")
+        problem_info = json.loads(str(raw_file["data"].attrs["problem_info"]))
+        raw_language = str(problem_info.get("language_instruction", "")).strip()
+        if raw_language != expected_language:
+            raise ValueError(
+                f"Raw LIBERO HDF5 language {raw_language!r} does not match dataset "
+                f"language {expected_language!r}: {path}"
+            )
         for demo_name, demo in raw_file["data"].items():
             if "actions" not in demo or "states" not in demo or len(demo["states"]) == 0:
                 raise ValueError(f"Incomplete raw LIBERO demo {path}:{demo_name}")
@@ -279,6 +306,16 @@ def flatten_observation_state(obs: dict[str, Any]) -> np.ndarray:
             np.asarray(obs["robot_state"]["gripper"]["qpos"], dtype=np.float64),
         ]
     ).astype(np.float32)
+
+
+def suite_task_index_by_language(suite: Any) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    for task_index in range(len(suite.tasks)):
+        language = str(suite.get_task(task_index).language).strip()
+        if language in mapping:
+            raise ValueError(f"Duplicate LIBERO suite task language: {language!r}")
+        mapping[language] = task_index
+    return mapping
 
 
 def load_actions(path: Path, max_horizon: int) -> tuple[np.ndarray, np.ndarray]:
@@ -384,22 +421,36 @@ def main() -> None:
     from lerobot.envs.libero import LiberoEnv, _get_suite, get_libero_dummy_action
 
     suite = _get_suite(args.suite)
+    suite_language_index = suite_task_index_by_language(suite)
     raw_sources: dict[int, dict[str, Any]] = {}
     matched_demos: dict[int, tuple[dict[str, Any], float]] = {}
     used_demo_names: dict[int, set[str]] = {}
     for episode in predictions:
         source = episode_records[episode]
         task_index = int(source["task_index"])
+        task_language = str(source["task_language"])
+        if task_language not in suite_language_index:
+            raise ValueError(
+                f"Dataset task language is absent from suite {args.suite}: {task_language!r}"
+            )
+        libero_task_index = suite_language_index[task_language]
         if task_index not in raw_sources:
-            task = suite.get_task(task_index)
+            task = suite.get_task(libero_task_index)
             raw_path = args.raw_demos_root / f"{task.name}_demo.hdf5"
             raw_sources[task_index] = {
                 "task_index": task_index,
+                "libero_task_index": libero_task_index,
+                "task_language": task_language,
                 "task_name": task.name,
                 "path": str(raw_path.resolve()),
                 "sha256": sha256_file(raw_path),
-                "candidates": load_raw_demo_candidates(raw_path),
+                "candidates": load_raw_demo_candidates(raw_path, task_language),
             }
+        elif (
+            int(raw_sources[task_index]["libero_task_index"]) != libero_task_index
+            or raw_sources[task_index]["task_language"] != task_language
+        ):
+            raise ValueError(f"Dataset task_index {task_index} maps to multiple task languages")
         matched_demo, match_error = match_raw_demo(
             episode,
             source["demonstration_actions"],
@@ -422,14 +473,16 @@ def main() -> None:
     for episode, prediction_path in predictions.items():
         source = episode_records[episode]
         task_index = int(source["task_index"])
+        task_language = str(source["task_language"])
         source_observation_state = source["source_observation_state"]
         matched_demo, action_match_max_abs = matched_demos[episode]
         raw_initial_state = matched_demo["initial_state"]
         raw_source = raw_sources[task_index]
+        libero_task_index = int(raw_source["libero_task_index"])
         raw_actions, executed_actions = load_actions(prediction_path, max(horizons))
         env = LiberoEnv(
             task_suite=suite,
-            task_id=task_index,
+            task_id=libero_task_index,
             task_suite_name=args.suite,
             obs_type="pixels_agent_pos",
             camera_name="agentview_image",
@@ -497,6 +550,8 @@ def main() -> None:
             "source_frame_index": 0,
             "action_chunk_index": 0,
             "task_index": task_index,
+            "libero_task_index": libero_task_index,
+            "task_language": task_language,
             "raw_demo_name": matched_demo["demo_name"],
             "raw_hdf5_path": str(raw_source["path"]),
             "raw_hdf5_sha256": raw_source["sha256"],
@@ -525,7 +580,15 @@ def main() -> None:
             {
                 key: value
                 for key, value in raw_sources[task_index].items()
-                if key in {"task_index", "task_name", "path", "sha256"}
+                if key
+                in {
+                    "task_index",
+                    "libero_task_index",
+                    "task_language",
+                    "task_name",
+                    "path",
+                    "sha256",
+                }
             }
             for task_index in sorted(raw_sources)
         ],
