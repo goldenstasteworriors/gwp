@@ -34,6 +34,7 @@ PREFLIGHT_REPORT=$RESULT_ROOT/preflight_report.json
 MATCHED_EVAL=$RESULT_ROOT/matched_heldout.json
 FULL_EVAL=$RESULT_ROOT/full_heldout.json
 PAIR_AUDIT=$RESULT_ROOT/pair_audit.json
+VIDEO_SPLIT_AUDIT=$RESULT_ROOT/video_split_audit.json
 SERVER_PID=""
 
 status() {
@@ -102,7 +103,7 @@ git rev-parse HEAD > "$RESULT_ROOT/code_commit.txt"
 
 for path in "$ACTIONS_TRAIN" "$ACTIONS_HELDOUT" "$CACHE_TRAIN" \
     "$CACHE_HELDOUT" "$MATCHED_OUTPUT" "$FULL_OUTPUT" "$PREFLIGHT_REPORT" \
-    "$MATCHED_EVAL" "$FULL_EVAL" "$PAIR_AUDIT"; do
+    "$MATCHED_EVAL" "$FULL_EVAL" "$PAIR_AUDIT" "$VIDEO_SPLIT_AUDIT"; do
     test ! -e "$path"
 done
 
@@ -117,6 +118,14 @@ status hashing_raw_demos
 "$POLICY_PYTHON" -B scripts/verify_libero_raw_demos.py \
     --root "$RAW_DEMOS" \
     > "$RESULT_ROOT/raw_demo_verification.json"
+
+status auditing_selected_videos
+"$POLICY_PYTHON" -B scripts/audit_lerobot_video_split.py \
+    --dataset-root "$DATASET" \
+    --episodes-file "$SPLIT_ROOT/train_episodes.txt" \
+    --episodes-file "$SPLIT_ROOT/heldout_episodes.txt" \
+    --report "$VIDEO_SPLIT_AUDIT" \
+    > "$RESULT_ROOT/logs/video_split_audit.log" 2>&1
 
 status waiting_checkpoint
 while [ ! -d "$CHECKPOINT" ]; do
