@@ -112,27 +112,28 @@ done
 status waiting_gpus_for_smoke
 wait_for_gpus
 status running_v3_smoke
-export GWP_LIBERO_DATA_PATH="$DATASET"
-export GWP_NORM_STATS_PATH="$NORM_STATS"
-export GWP_WAN_PRETRAINED="$WAN"
-export GWP05_TRANSFORMER_PRETRAINED="$CHECKPOINT"
-export GWP05_PROJECT_DIR="$RESULT_ROOT/smoke_train"
-export GWP_T5_EMBEDDING_DIR="$DATASET/t5_embedding"
-export GWP_VIEW_KEYS=observation.images.image,observation.images.wrist_image
-export GWP_VIEW_CONCAT_MODE=horizontal
-export GWP_GPU_IDS=2,3,4,5
-export GWP_BATCH_SIZE_PER_GPU=1
-export GWP_NUM_WORKERS=0
-export GWP_MAX_STEPS=1
-export GWP_GRAD_ACCUM_STEPS=1
-export GWP_LOG_INTERVAL=1
-export GWP_WITH_EMA=0
-export GWP_DISABLE_CHECKPOINT=1
-export GWP_CONSEQUENCE_MODE=off
-export GWP_COUNTERFACTUAL_MASK_CACHE_PATHS="$SMOKE_CACHE"
-export GWP_COUNTERFACTUAL_MASK_WEIGHT=0.1
-"$POLICY_PYTHON" scripts/train.py --config giga_world_policy_0_5_libero_finetune \
-    > "$RESULT_ROOT/logs/smoke_train.log" 2>&1
+(
+    export GWP_LIBERO_DATA_PATH="$DATASET"
+    export GWP_NORM_STATS_PATH="$NORM_STATS"
+    export GWP_WAN_PRETRAINED="$WAN"
+    export GWP05_TRANSFORMER_PRETRAINED="$CHECKPOINT"
+    export GWP05_PROJECT_DIR="$RESULT_ROOT/smoke_train"
+    export GWP_T5_EMBEDDING_DIR="$DATASET/t5_embedding"
+    export GWP_VIEW_KEYS=observation.images.image,observation.images.wrist_image
+    export GWP_VIEW_CONCAT_MODE=horizontal
+    export GWP_GPU_IDS=2,3,4,5
+    export GWP_BATCH_SIZE_PER_GPU=1
+    export GWP_NUM_WORKERS=0
+    export GWP_MAX_STEPS=1
+    export GWP_GRAD_ACCUM_STEPS=1
+    export GWP_LOG_INTERVAL=1
+    export GWP_WITH_EMA=0
+    export GWP_DISABLE_CHECKPOINT=1
+    export GWP_CONSEQUENCE_MODE=off
+    export GWP_COUNTERFACTUAL_MASK_CACHE_PATHS="$SMOKE_CACHE"
+    export GWP_COUNTERFACTUAL_MASK_WEIGHT=0.1
+    "$POLICY_PYTHON" scripts/train.py --config giga_world_policy_0_5_libero_finetune
+) > "$RESULT_ROOT/logs/smoke_train.log" 2>&1
 
 status starting_policy_server
 "$POLICY_PYTHON" scripts/inference_libero_gwp05.py \
