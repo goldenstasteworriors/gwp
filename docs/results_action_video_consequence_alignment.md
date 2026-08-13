@@ -37,6 +37,8 @@
 
 10 个任务各一个 episode 的同初态 consequence 指标：
 
+> 2026-08-13 初态溯源审计：这里的历史几何数值使用了“同 task 内 episode rank → `.pruned_init` rank”的映射。`.pruned_init` 是另行采样的 benchmark 评测初态，并非 demonstration 初态；因此这些数值只保留为旧版诊断记录，不能作为与训练视频对齐的证据。开环动作 MSE 不受此问题影响。
+
 | 方法 | 配准后 mask IoU ↑ | EEF 像素误差 ↓ | EEF 坐标轴端点误差 ↓ | SO(3) 误差/度 ↓ |
 |---|---:|---:|---:|---:|
 | off | 0.5194 | 45.51 | 45.09 | 11.60 |
@@ -65,6 +67,8 @@
 `policy_only` 的总 MSE 比 `off` 高 6.1%，因此 1k 时的 43.2% 优势没有保持。`action_only` 比 `off` 高 43.3%，说明原始视频辅助任务对动作学习有明显价值；但在其上额外施加 consequence gradient 没有带来稳定收益。
 
 同初态几何 consequence 使用与 1k 相同的 10 个任务/episode：
+
+> 本表同样受上述 `.pruned_init` 映射问题影响，不再用于支持方法结论；后续几何 cache 必须通过 raw HDF5 demo state 溯源门禁。
 
 | 方法 | 配准后 mask IoU ↑ | EEF 像素误差 ↓ | EEF 坐标轴端点误差 ↓ | SO(3) 误差/度 ↓ | 48-step EEF 误差 ↓ |
 |---|---:|---:|---:|---:|---:|
@@ -111,13 +115,15 @@ Object 上的微小改善来自夹爪项（0.0407 vs 0.0484），但平移和旋
 1. Demo branch：真实动作条件下继续使用真实未来 RGB flow supervision，保留原始 GWP 的视频辅助任务。
 2. Counterfactual branch：缓存策略预测的 48-step action chunk，从同一 LIBERO 初态执行该动作，在 12/24/36/48 step 渲染 robot mask；未来 visual latent 从纯噪声开始，只从 future visual tokens 预测这四张 mask，不读取专家未来 RGB，也不经过 RGB `proj_out`。
 
-当前单 episode 链路已经验证：四个未来 mask 的 robot pixels 为 4960、6522、7093、7648。相对 horizon 0，变化像素占各未来 robot mask 的 52.3%、65.1%、76.0%、88.5%；gripper mask 与初态的 IoU 分别为 0.104、0、0、0。因此该样本不是简单复制静态机器人基座即可解决，但这不能替代多 episode 的 held-out 检验。
+旧 v2 单 episode 链路曾得到四个未来 mask 的 robot pixels 为 4960、6522、7093、7648；这些数值只说明该错误初态内的 rollout 不是静态复制，不再视为正式数据验证。v3 必须重新生成相同 smoke sample 后才能报告新的动态性结果。
 
-方向审计发现 v1 cache 只对 raw MuJoCo segmentation 做了竖直翻转，而 LeRobot LIBERO 训练视频来自 `LiberoEnv.render()`，其明确同时翻转高、宽两个轴；因此 v1 mask 与视频 token 存在左右镜像错位，不能用于训练。cache schema 已升级为 `libero-counterfactual-robot-mask-v2`，生成器对 segmentation 同时执行 H/W flip，并在 manifest 写入 `image_orientation=lerobot_libero_visualization_flip_height_width`；dataset、preflight、launcher 和 evaluator 都会拒绝旧方向 cache。前述像素数和同一 cache 内的 IoU 比例在整体镜像下不变，只可继续作为动态性诊断，正式训练必须重新生成 v2 cache。
+方向审计发现 v1 cache 只对 raw MuJoCo segmentation 做了竖直翻转，而 LeRobot LIBERO 训练视频来自 `LiberoEnv.render()`，其明确同时翻转高、宽两个轴；因此 v1 mask 与视频 token 存在左右镜像错位，不能用于训练。v2 修正了 H/W flip，但随后初态溯源审计发现 v2 仍把“同 task 内 LeRobot episode rank”当成 `.pruned_init` 编号。服务器 episode 0 的 v2 horizon-0 EEF 与数据集首帧相差约 6.46 mm；枚举 50 个 `.pruned_init` 也只能找到约 1 mm 的近邻，因为这些文件本来就是独立采样的评测初态，并非 demonstration state。因此 v1/v2 都被拒绝用于正式训练。
+
+cache schema 现升级为 `libero-counterfactual-robot-mask-v3`：生成器必须读取原始 LIBERO `<task>_demo.hdf5`，对 raw action 做与 LeRobot 转换相同的 no-op 过滤，并把 raw gripper `{-1,+1}` 转成 LeRobot `{1,0}`，再用完整 action 序列唯一匹配 demo。task 0 的 LeRobot episode 0 唯一匹配 `demo_40`，110-step action 最大误差为 `2.90e-8`；从 `demo_40/states[0]` 初始化并执行 10 个 settling no-op 后，8D frame-0 state 的 L2 误差为 `1.06e-7`。v3 将 raw HDF5/demo/state 哈希及两侧 frame-0 state 写入 cache，生成时和 preflight 都以 `source_state_max_abs <= 1e-5` 为硬门禁。mask 仍采用与训练视频相同的 H/W flip。只有通过这两类门禁的 v3 cache 才能进入 stage-1。
 
 服务器的LIBERO配置不在默认 `~/.libero`，而在数据盘的 `datasets/libero_config/config.yaml`。cache生成和闭环评测脚本会在导入LIBERO前从dataset父目录非交互地发现并验证该配置；cache manifest记录配置路径与SHA256，preflight拒绝配置缺失或生成后发生变化的cache，避免长时间watcher最终因交互提示或仿真资产路径漂移失败。
 
-同一真实 cache 上的 `copy-initial` 受控测试进一步说明不能只看 full mask：12/24/36/48 step 的 full robot IoU 分别为 0.5575、0.4313、0.3524、0.2715，平均仍有 0.4032；但四个时刻的 dynamic IoU 和 new-occupancy IoU 均为 0。gripper-region recall 从 0.5156 降至 0.0459、0.0389、0.0136，平均仅 0.1535。评价实现位于 `world_action_model/alignment/geometry.py`，并显式报告 empty-union fraction，避免空动态区域悄悄抬高均值。
+旧 v2 cache 上的 `copy-initial` 数值也因源初态错误而作废；“必须同时报告 full/dynamic/new-occupancy/gripper”这一评价原则仍保留。评价实现位于 `world_action_model/alignment/geometry.py`，并显式报告 empty-union fraction，避免空动态区域悄悄抬高均值。
 
 ### 必须报告的 mask 指标与对照
 

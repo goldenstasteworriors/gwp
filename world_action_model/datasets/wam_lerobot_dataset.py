@@ -14,7 +14,7 @@ from giga_datasets.datasets.lerobot_dataset import FastLeRobotDataset, _LeRobotD
 
 _SUBTASK_MARKER_RE = re.compile(r"\bsubtask\s*:\s*", flags=re.IGNORECASE)
 _T5_LOAD_FROM_CHOICES = ("dir", "pkl", "path")
-_COUNTERFACTUAL_MASK_SCHEMA = "libero-counterfactual-robot-mask-v2"
+_COUNTERFACTUAL_MASK_SCHEMA = "libero-counterfactual-robot-mask-v3"
 _COUNTERFACTUAL_MASK_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 
 

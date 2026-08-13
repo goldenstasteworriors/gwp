@@ -12,11 +12,18 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import h5py
 import numpy as np
+import pandas as pd
+
+from generate_libero_counterfactual_mask_cache import (
+    normalize_raw_demo_actions,
+    sha256_array,
+)
 
 
 SPLIT_SCHEMA = "libero-counterfactual-split-v1"
-CACHE_SCHEMA = "libero-counterfactual-robot-mask-v2"
+CACHE_SCHEMA = "libero-counterfactual-robot-mask-v3"
 EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]
 
@@ -67,12 +74,58 @@ def require_shape(name: str, value: np.ndarray, shape: tuple[int, ...], path: Pa
         raise ValueError(f"{path}: {name} shape {value.shape}, expected {shape}")
 
 
+def load_source_episodes(
+    dataset_root: Path,
+    requested_episodes: set[int],
+) -> dict[int, dict[str, Any]]:
+    parquet_paths = sorted(dataset_root.glob("data/chunk-*/file-*.parquet"))
+    if not parquet_paths:
+        raise FileNotFoundError(f"No parquet data under {dataset_root}")
+    frames = pd.concat(
+        [
+            pd.read_parquet(
+                path,
+                columns=[
+                    "episode_index",
+                    "frame_index",
+                    "task_index",
+                    "observation.state",
+                    "action",
+                ],
+            )
+            for path in parquet_paths
+        ],
+        ignore_index=True,
+    )
+    records: dict[int, dict[str, Any]] = {}
+    for episode, episode_frames in frames[frames["episode_index"].isin(requested_episodes)].groupby(
+        "episode_index", sort=True
+    ):
+        episode_frames = episode_frames.sort_values("frame_index")
+        records[int(episode)] = {
+            "task_index": int(episode_frames.iloc[0]["task_index"]),
+            "source_observation_state": np.asarray(
+                episode_frames.iloc[0]["observation.state"], dtype=np.float32
+            ),
+            "demonstration_actions": np.stack(episode_frames["action"].to_numpy()).astype(
+                np.float32
+            ),
+        }
+    missing = sorted(requested_episodes - set(records))
+    if missing:
+        raise ValueError(f"Selected episodes absent from source dataset: {missing}")
+    return records
+
+
 def audit_cache(
     root: Path,
     expected_episodes: list[int],
     selection_file: Path,
     checkpoint: Path,
     split_manifest: dict[str, Any],
+    source_episodes: dict[int, dict[str, Any]],
+    raw_file_hash_cache: dict[Path, str],
+    raw_demo_cache: dict[tuple[Path, str], tuple[np.ndarray, np.ndarray]],
 ) -> dict[str, Any]:
     manifest_path = root / "manifest.json"
     manifest = load_json(manifest_path)
@@ -88,6 +141,36 @@ def audit_cache(
         raise ValueError(f"Cache/split dataset root mismatch: {manifest_path}")
     if manifest.get("dataset_info_sha256") != split_manifest.get("dataset_info_sha256"):
         raise ValueError(f"Cache/split dataset hash mismatch: {manifest_path}")
+    if (
+        manifest.get("raw_demo_matching")
+        != "unique_full_action_sequence_after_noop_filter_and_gripper_conversion"
+    ):
+        raise ValueError(f"Cache does not use authoritative raw-demo matching: {manifest_path}")
+    action_match_atol = float(manifest.get("action_match_atol", -1.0))
+    source_state_atol = float(manifest.get("source_state_atol", -1.0))
+    if not 0.0 < action_match_atol <= 1e-5:
+        raise ValueError(f"Unsafe raw-demo action tolerance in {manifest_path}")
+    if not 0.0 < source_state_atol <= 1e-4:
+        raise ValueError(f"Unsafe source-state tolerance in {manifest_path}")
+    raw_demos_root = Path(str(manifest.get("raw_demos_root"))).resolve()
+    if not raw_demos_root.is_dir():
+        raise FileNotFoundError(f"Raw LIBERO demonstrations are missing: {raw_demos_root}")
+    raw_files_by_task: dict[int, dict[str, Any]] = {}
+    for raw_record in manifest.get("raw_demo_files", []):
+        task_index = int(raw_record["task_index"])
+        if task_index in raw_files_by_task:
+            raise ValueError(f"Duplicate raw-demo task {task_index} in {manifest_path}")
+        raw_path = Path(str(raw_record["path"])).resolve()
+        if not raw_path.is_relative_to(raw_demos_root):
+            raise ValueError(f"Raw demo file is outside raw_demos_root: {raw_path}")
+        if not raw_path.is_file():
+            raise FileNotFoundError(raw_path)
+        if raw_path not in raw_file_hash_cache:
+            raw_file_hash_cache[raw_path] = sha256_file(raw_path)
+        raw_sha256 = raw_file_hash_cache[raw_path]
+        if raw_sha256 != raw_record.get("sha256"):
+            raise ValueError(f"Raw demo HDF5 changed after cache generation: {raw_path}")
+        raw_files_by_task[task_index] = raw_record
     libero_config_path = Path(str(manifest.get("libero_config_path"))).resolve()
     if not libero_config_path.is_file():
         raise FileNotFoundError(f"Cache LIBERO config is missing: {libero_config_path}")
@@ -110,6 +193,47 @@ def audit_cache(
     clipped_values = 0
     action_values = 0
     for record in records:
+        episode = int(record["episode_index"])
+        source_episode = source_episodes[episode]
+        task_index = int(record["task_index"])
+        if task_index != int(source_episode["task_index"]):
+            raise ValueError(f"Cache/source task mismatch for episode {episode}")
+        if task_index not in raw_files_by_task:
+            raise ValueError(f"No raw HDF5 provenance for task {task_index}")
+        raw_metadata = raw_files_by_task[task_index]
+        raw_hdf5_path = Path(record["raw_hdf5_path"]).resolve()
+        if raw_hdf5_path != Path(str(raw_metadata["path"])).resolve():
+            raise ValueError(f"Record/manifest raw HDF5 mismatch for episode {episode}")
+        if record.get("raw_hdf5_sha256") != raw_metadata.get("sha256"):
+            raise ValueError(f"Record raw HDF5 hash mismatch for episode {episode}")
+        raw_demo_name = str(record["raw_demo_name"])
+        raw_demo_key = (raw_hdf5_path, raw_demo_name)
+        if raw_demo_key not in raw_demo_cache:
+            with h5py.File(raw_hdf5_path, "r") as raw_file:
+                demo_path = f"data/{raw_demo_name}"
+                if demo_path not in raw_file:
+                    raise ValueError(f"Missing raw demo {raw_hdf5_path}:{demo_path}")
+                raw_demo = raw_file[demo_path]
+                raw_demo_cache[raw_demo_key] = (
+                    np.asarray(raw_demo["states"][0], dtype=np.float64),
+                    normalize_raw_demo_actions(raw_demo["actions"][()]),
+                )
+        authoritative_raw_state, authoritative_demo_actions = raw_demo_cache[raw_demo_key]
+        source_demo_actions = source_episode["demonstration_actions"]
+        if authoritative_demo_actions.shape != source_demo_actions.shape:
+            raise ValueError(f"Raw/source action length mismatch for episode {episode}")
+        computed_action_match_max_abs = float(
+            np.max(np.abs(authoritative_demo_actions - source_demo_actions))
+        )
+        if computed_action_match_max_abs > action_match_atol:
+            raise ValueError(f"Raw/source action mismatch for episode {episode}")
+        if not np.isclose(
+            computed_action_match_max_abs,
+            float(record["raw_demo_action_match_max_abs"]),
+            rtol=0.0,
+            atol=1e-12,
+        ):
+            raise ValueError(f"Raw action-match summary mismatch for episode {episode}")
         if int(record.get("source_frame_index", -1)) != 0:
             raise ValueError(f"Nonzero cache source frame: {record}")
         if int(record.get("action_chunk_index", -1)) != 0:
@@ -126,6 +250,9 @@ def audit_cache(
                 "horizons",
                 "raw_actions",
                 "executed_actions",
+                "raw_initial_state",
+                "source_observation_state",
+                "rendered_initial_observation_state",
                 "robot_mask",
                 "gripper_mask",
                 "qpos",
@@ -141,17 +268,67 @@ def audit_cache(
             horizons = arrays["horizons"]
             raw_actions = arrays["raw_actions"]
             executed_actions = arrays["executed_actions"]
+            raw_initial_state = arrays["raw_initial_state"]
+            source_observation_state = arrays["source_observation_state"]
+            rendered_initial_observation_state = arrays[
+                "rendered_initial_observation_state"
+            ]
             robot_mask = arrays["robot_mask"]
             gripper_mask = arrays["gripper_mask"]
             require_shape("horizons", horizons, (5,), cache_path)
             require_shape("raw_actions", raw_actions, (48, 7), cache_path)
             require_shape("executed_actions", executed_actions, (48, 7), cache_path)
+            require_shape(
+                "raw_initial_state",
+                raw_initial_state,
+                authoritative_raw_state.shape,
+                cache_path,
+            )
+            require_shape("source_observation_state", source_observation_state, (8,), cache_path)
+            require_shape(
+                "rendered_initial_observation_state",
+                rendered_initial_observation_state,
+                (8,),
+                cache_path,
+            )
             require_shape("robot_mask", robot_mask, (5, 256, 256), cache_path)
             require_shape("gripper_mask", gripper_mask, (5, 256, 256), cache_path)
             if horizons.tolist() != EXPECTED_HORIZONS:
                 raise ValueError(f"{cache_path}: wrong horizons")
             if not np.array_equal(executed_actions, np.clip(raw_actions, -1.0, 1.0)):
                 raise ValueError(f"{cache_path}: executed action is not clipped raw action")
+            if not np.array_equal(raw_initial_state, authoritative_raw_state):
+                raise ValueError(f"{cache_path}: raw initial state changed")
+            if sha256_array(raw_initial_state) != record.get("raw_initial_state_sha256"):
+                raise ValueError(f"{cache_path}: raw initial state hash mismatch")
+            if not np.array_equal(
+                source_observation_state, source_episode["source_observation_state"]
+            ):
+                raise ValueError(f"{cache_path}: source frame-0 state mismatch")
+            source_state_delta = rendered_initial_observation_state - source_observation_state
+            source_state_max_abs = float(np.max(np.abs(source_state_delta)))
+            source_state_l2 = float(np.linalg.norm(source_state_delta))
+            if source_state_max_abs > source_state_atol:
+                raise ValueError(f"{cache_path}: rendered initial state misses source frame 0")
+            if not np.isclose(
+                source_state_max_abs,
+                float(record["source_state_max_abs"]),
+                rtol=0.0,
+                atol=1e-12,
+            ) or not np.isclose(
+                source_state_l2,
+                float(record["source_state_l2"]),
+                rtol=0.0,
+                atol=1e-12,
+            ):
+                raise ValueError(f"{cache_path}: source-state summary mismatch")
+            if not np.allclose(
+                arrays["eef_position"][0],
+                rendered_initial_observation_state[:3],
+                rtol=0.0,
+                atol=1e-6,
+            ):
+                raise ValueError(f"{cache_path}: horizon-0 EEF/state mismatch")
             if not np.logical_or(robot_mask == 0, robot_mask == 1).all():
                 raise ValueError(f"{cache_path}: robot mask is not binary")
             if not np.logical_or(gripper_mask == 0, gripper_mask == 1).all():
@@ -184,10 +361,16 @@ def audit_cache(
                 "camera_name",
                 "image_orientation",
                 "libero_config_sha256",
+                "raw_demo_matching",
+                "raw_demo_files",
+                "action_match_atol",
+                "source_state_atol",
                 "image_size",
                 "num_steps_wait",
             )
         },
+        "raw_demos_root": str(raw_demos_root),
+        "raw_demo_files": [str(Path(str(value["path"])).resolve()) for value in raw_files_by_task.values()],
     }
 
 
@@ -243,14 +426,37 @@ def main() -> None:
     if min(selected_lengths) < 49:
         raise ValueError("Every selected episode must cover frame 0 plus a 48-step chunk")
 
+    source_episodes = load_source_episodes(
+        Path(split_manifest["dataset_root"]).resolve(),
+        set(train_episodes + heldout_episodes),
+    )
+    raw_file_hash_cache: dict[Path, str] = {}
+    raw_demo_cache: dict[tuple[Path, str], tuple[np.ndarray, np.ndarray]] = {}
     train_audit = audit_cache(
-        args.train_cache, train_episodes, train_file, args.checkpoint, split_manifest
+        args.train_cache,
+        train_episodes,
+        train_file,
+        args.checkpoint,
+        split_manifest,
+        source_episodes,
+        raw_file_hash_cache,
+        raw_demo_cache,
     )
     heldout_audit = audit_cache(
-        args.heldout_cache, heldout_episodes, heldout_file, args.checkpoint, split_manifest
+        args.heldout_cache,
+        heldout_episodes,
+        heldout_file,
+        args.checkpoint,
+        split_manifest,
+        source_episodes,
+        raw_file_hash_cache,
+        raw_demo_cache,
     )
     if train_audit["metadata"] != heldout_audit["metadata"]:
         raise ValueError("Train and held-out cache metadata differ")
+    for raw_file in train_audit["raw_demo_files"] + heldout_audit["raw_demo_files"]:
+        if os.stat(raw_file).st_dev != output_device:
+            raise ValueError(f"Raw demo/cache/output crosses filesystems: {raw_file}")
 
     source_weight_bytes = checkpoint_weight_bytes(args.checkpoint)
     # Two BF16 checkpoints are approximately one FP32 source checkpoint.  Keep

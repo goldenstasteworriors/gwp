@@ -17,11 +17,12 @@ import re
 from pathlib import Path
 from typing import Any
 
+import h5py
 import numpy as np
 import pandas as pd
 
 
-SCHEMA_VERSION = "libero-counterfactual-robot-mask-v2"
+SCHEMA_VERSION = "libero-counterfactual-robot-mask-v3"
 IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EPISODE_PATTERN = re.compile(r"episode_(\d+)$")
 
@@ -30,6 +31,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--suite", required=True)
+    parser.add_argument(
+        "--raw-demos-root",
+        type=Path,
+        required=True,
+        help=(
+            "Directory containing the authoritative LIBERO <task>_demo.hdf5 files. "
+            "The LeRobot episode is uniquely matched by its complete action sequence."
+        ),
+    )
     parser.add_argument(
         "--predictions-root",
         type=Path,
@@ -53,6 +63,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--height", type=int, default=256)
     parser.add_argument("--num-steps-wait", type=int, default=10)
+    parser.add_argument("--action-match-atol", type=float, default=1e-6)
+    parser.add_argument("--source-state-atol", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=20260813)
     return parser.parse_args()
 
@@ -62,6 +74,15 @@ def sha256_file(path: Path) -> str:
     with path.open("rb") as file:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_array(value: np.ndarray) -> str:
+    value = np.ascontiguousarray(value)
+    digest = hashlib.sha256()
+    digest.update(str(value.dtype).encode("utf-8"))
+    digest.update(json.dumps(list(value.shape)).encode("utf-8"))
+    digest.update(value.tobytes())
     return digest.hexdigest()
 
 
@@ -134,20 +155,130 @@ def read_episode_file(path: Path) -> list[int]:
     return episodes
 
 
-def load_episode_index(dataset_root: Path) -> dict[int, tuple[int, int]]:
+def load_episode_records(dataset_root: Path) -> dict[int, dict[str, Any]]:
     parquet_paths = sorted(dataset_root.glob("data/chunk-*/file-*.parquet"))
     if not parquet_paths:
         raise FileNotFoundError(f"No parquet data under {dataset_root}")
     frames = pd.concat(
-        [pd.read_parquet(path, columns=["episode_index", "task_index"]) for path in parquet_paths],
+        [
+            pd.read_parquet(
+                path,
+                columns=[
+                    "episode_index",
+                    "frame_index",
+                    "task_index",
+                    "observation.state",
+                    "action",
+                ],
+            )
+            for path in parquet_paths
+        ],
         ignore_index=True,
     )
-    episode_tasks = frames.groupby("episode_index", sort=True)["task_index"].first()
-    result: dict[int, tuple[int, int]] = {}
-    for task_index, task_episodes in episode_tasks.groupby(episode_tasks, sort=True):
-        for task_episode_rank, episode_index in enumerate(task_episodes.index.to_list()):
-            result[int(episode_index)] = (int(task_index), task_episode_rank)
+    result: dict[int, dict[str, Any]] = {}
+    for episode_index, episode_frames in frames.groupby("episode_index", sort=True):
+        episode_frames = episode_frames.sort_values("frame_index")
+        if int(episode_frames.iloc[0]["frame_index"]) != 0:
+            raise ValueError(f"Episode {episode_index} has no frame 0")
+        task_indices = episode_frames["task_index"].unique()
+        if len(task_indices) != 1:
+            raise ValueError(f"Episode {episode_index} spans multiple tasks")
+        result[int(episode_index)] = {
+            "task_index": int(task_indices[0]),
+            "source_observation_state": np.asarray(
+                episode_frames.iloc[0]["observation.state"], dtype=np.float32
+            ),
+            "demonstration_actions": np.stack(episode_frames["action"].to_numpy()).astype(
+                np.float32
+            ),
+        }
     return result
+
+
+def normalize_raw_demo_actions(actions: np.ndarray) -> np.ndarray:
+    """Match the no-op filtering and gripper encoding used by the LeRobot conversion."""
+
+    kept: list[np.ndarray] = []
+    for action in np.asarray(actions, dtype=np.float64):
+        previous = kept[-1] if kept else None
+        is_noop = np.linalg.norm(action[:-1]) < 1e-4 and (
+            previous is None or action[-1] == previous[-1]
+        )
+        if not is_noop:
+            kept.append(action.copy())
+    if not kept:
+        raise ValueError("Raw LIBERO demonstration contains only no-op actions")
+    normalized = np.stack(kept).astype(np.float32)
+    # Raw LIBERO uses {-1=open, +1=closed}; this LeRobot conversion stores
+    # {1=open, 0=closed}.
+    normalized[:, -1] = (1.0 - normalized[:, -1]) * 0.5
+    return normalized
+
+
+def load_raw_demo_candidates(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    candidates: list[dict[str, Any]] = []
+    with h5py.File(path, "r") as raw_file:
+        if "data" not in raw_file:
+            raise ValueError(f"Raw LIBERO HDF5 has no data group: {path}")
+        for demo_name, demo in raw_file["data"].items():
+            if "actions" not in demo or "states" not in demo or len(demo["states"]) == 0:
+                raise ValueError(f"Incomplete raw LIBERO demo {path}:{demo_name}")
+            candidates.append(
+                {
+                    "demo_name": str(demo_name),
+                    "actions": normalize_raw_demo_actions(demo["actions"][()]),
+                    "initial_state": np.asarray(demo["states"][0], dtype=np.float64),
+                }
+            )
+    if not candidates:
+        raise ValueError(f"Raw LIBERO HDF5 contains no demonstrations: {path}")
+    return candidates
+
+
+def match_raw_demo(
+    episode: int,
+    episode_actions: np.ndarray,
+    candidates: list[dict[str, Any]],
+    atol: float,
+) -> tuple[dict[str, Any], float]:
+    matches: list[tuple[dict[str, Any], float]] = []
+    for candidate in candidates:
+        candidate_actions = candidate["actions"]
+        if candidate_actions.shape != episode_actions.shape:
+            continue
+        max_abs = float(np.max(np.abs(candidate_actions - episode_actions)))
+        if max_abs <= atol:
+            matches.append((candidate, max_abs))
+    if len(matches) != 1:
+        labels = [f"{candidate['demo_name']}:{error:.3g}" for candidate, error in matches]
+        raise ValueError(
+            f"Episode {episode} must uniquely match one raw LIBERO demo by its full action "
+            f"sequence; found {len(matches)} matches within atol={atol}: {labels}"
+        )
+    return matches[0]
+
+
+def quaternion_to_axis_angle(quaternion: np.ndarray) -> np.ndarray:
+    quaternion = np.asarray(quaternion, dtype=np.float64)
+    if quaternion.shape != (4,):
+        raise ValueError(f"Expected quaternion shape (4,), got {quaternion.shape}")
+    w = float(np.clip(quaternion[3], -1.0, 1.0))
+    denominator = float(np.sqrt(max(0.0, 1.0 - w * w)))
+    if denominator <= 1e-10:
+        return np.zeros(3, dtype=np.float64)
+    return quaternion[:3] / denominator * (2.0 * np.arccos(w))
+
+
+def flatten_observation_state(obs: dict[str, Any]) -> np.ndarray:
+    return np.concatenate(
+        [
+            np.asarray(obs["robot_state"]["eef"]["pos"], dtype=np.float64),
+            quaternion_to_axis_angle(obs["robot_state"]["eef"]["quat"]),
+            np.asarray(obs["robot_state"]["gripper"]["qpos"], dtype=np.float64),
+        ]
+    ).astype(np.float32)
 
 
 def load_actions(path: Path, max_horizon: int) -> tuple[np.ndarray, np.ndarray]:
@@ -225,6 +356,12 @@ def main() -> None:
         raise ValueError("Horizons must be non-negative")
     if args.width <= 0 or args.height <= 0:
         raise ValueError("Render width and height must be positive")
+    if args.num_steps_wait < 0:
+        raise ValueError("--num-steps-wait must be non-negative")
+    if args.action_match_atol <= 0 or args.source_state_atol <= 0:
+        raise ValueError("Action/state matching tolerances must be positive")
+    if not args.raw_demos_root.is_dir():
+        raise FileNotFoundError(args.raw_demos_root)
     if args.output_dir.exists():
         raise FileExistsError(f"Refusing to overwrite output directory: {args.output_dir}")
 
@@ -234,8 +371,8 @@ def main() -> None:
         else args.episodes
     )
     predictions = discover_predictions(args.predictions_root, explicit_episodes)
-    episode_index = load_episode_index(args.dataset_root)
-    unknown = sorted(set(predictions) - set(episode_index))
+    episode_records = load_episode_records(args.dataset_root)
+    unknown = sorted(set(predictions) - set(episode_records))
     if unknown:
         raise ValueError(f"Prediction episodes absent from dataset: {unknown}")
 
@@ -243,17 +380,52 @@ def main() -> None:
     if not info_path.is_file():
         raise FileNotFoundError(info_path)
     dataset_info_sha256 = sha256_file(info_path)
+    libero_config_path = configure_libero_path(args.dataset_root)
+    from lerobot.envs.libero import LiberoEnv, _get_suite, get_libero_dummy_action
+
+    suite = _get_suite(args.suite)
+    raw_sources: dict[int, dict[str, Any]] = {}
+    matched_demos: dict[int, tuple[dict[str, Any], float]] = {}
+    used_demo_names: dict[int, set[str]] = {}
+    for episode in predictions:
+        source = episode_records[episode]
+        task_index = int(source["task_index"])
+        if task_index not in raw_sources:
+            task = suite.get_task(task_index)
+            raw_path = args.raw_demos_root / f"{task.name}_demo.hdf5"
+            raw_sources[task_index] = {
+                "task_index": task_index,
+                "task_name": task.name,
+                "path": str(raw_path.resolve()),
+                "sha256": sha256_file(raw_path),
+                "candidates": load_raw_demo_candidates(raw_path),
+            }
+        matched_demo, match_error = match_raw_demo(
+            episode,
+            source["demonstration_actions"],
+            raw_sources[task_index]["candidates"],
+            args.action_match_atol,
+        )
+        demo_name = str(matched_demo["demo_name"])
+        if demo_name in used_demo_names.setdefault(task_index, set()):
+            raise ValueError(
+                f"Raw demo {task_index}:{demo_name} matched more than one selected episode"
+            )
+        used_demo_names[task_index].add(demo_name)
+        matched_demos[episode] = (matched_demo, match_error)
+
     args.output_dir.mkdir(parents=True)
     episodes_dir = args.output_dir / "episodes"
     episodes_dir.mkdir()
 
-    libero_config_path = configure_libero_path(args.dataset_root)
-    from lerobot.envs.libero import LiberoEnv, _get_suite
-
-    suite = _get_suite(args.suite)
     rows: list[dict[str, Any]] = []
     for episode, prediction_path in predictions.items():
-        task_index, task_episode_rank = episode_index[episode]
+        source = episode_records[episode]
+        task_index = int(source["task_index"])
+        source_observation_state = source["source_observation_state"]
+        matched_demo, action_match_max_abs = matched_demos[episode]
+        raw_initial_state = matched_demo["initial_state"]
+        raw_source = raw_sources[task_index]
         raw_actions, executed_actions = load_actions(prediction_path, max(horizons))
         env = LiberoEnv(
             task_suite=suite,
@@ -261,13 +433,26 @@ def main() -> None:
             task_suite_name=args.suite,
             obs_type="pixels_agent_pos",
             camera_name="agentview_image",
-            init_states=True,
-            episode_index=task_episode_rank,
+            init_states=False,
             n_envs=1,
-            num_steps_wait=args.num_steps_wait,
+            num_steps_wait=0,
         )
         try:
-            obs, _ = env.reset(seed=args.seed)
+            env.reset(seed=args.seed)
+            raw_obs = env._env.set_init_state(raw_initial_state)
+            for _ in range(args.num_steps_wait):
+                raw_obs, _, _, _ = env._env.step(get_libero_dummy_action())
+            obs = env._format_raw_obs(raw_obs)
+            rendered_initial_observation_state = flatten_observation_state(obs)
+            source_state_delta = rendered_initial_observation_state - source_observation_state
+            source_state_max_abs = float(np.max(np.abs(source_state_delta)))
+            source_state_l2 = float(np.linalg.norm(source_state_delta))
+            if source_state_max_abs > args.source_state_atol:
+                raise ValueError(
+                    f"Episode {episode} raw demo {matched_demo['demo_name']} does not reproduce "
+                    f"LeRobot frame-0 state: max_abs={source_state_max_abs:.9g}, "
+                    f"l2={source_state_l2:.9g}, atol={args.source_state_atol}"
+                )
             robot_ids, gripper_ids = robot_geom_ids(env)
             captures_by_horizon = {
                 0: capture_state(
@@ -302,6 +487,9 @@ def main() -> None:
             horizons=np.asarray(horizons, dtype=np.int32),
             raw_actions=raw_actions,
             executed_actions=executed_actions,
+            raw_initial_state=raw_initial_state,
+            source_observation_state=source_observation_state,
+            rendered_initial_observation_state=rendered_initial_observation_state,
             **arrays,
         )
         row = {
@@ -309,7 +497,13 @@ def main() -> None:
             "source_frame_index": 0,
             "action_chunk_index": 0,
             "task_index": task_index,
-            "task_episode_rank": task_episode_rank,
+            "raw_demo_name": matched_demo["demo_name"],
+            "raw_hdf5_path": str(raw_source["path"]),
+            "raw_hdf5_sha256": raw_source["sha256"],
+            "raw_initial_state_sha256": sha256_array(raw_initial_state),
+            "raw_demo_action_match_max_abs": action_match_max_abs,
+            "source_state_max_abs": source_state_max_abs,
+            "source_state_l2": source_state_l2,
             "prediction_path": str(prediction_path.resolve()),
             "prediction_sha256": sha256_file(prediction_path),
             "cache_file": str(cache_path.relative_to(args.output_dir)),
@@ -326,6 +520,15 @@ def main() -> None:
         "suite": args.suite,
         "dataset_root": str(args.dataset_root.resolve()),
         "dataset_info_sha256": dataset_info_sha256,
+        "raw_demos_root": str(args.raw_demos_root.resolve()),
+        "raw_demo_files": [
+            {
+                key: value
+                for key, value in raw_sources[task_index].items()
+                if key in {"task_index", "task_name", "path", "sha256"}
+            }
+            for task_index in sorted(raw_sources)
+        ],
         "libero_config_path": str(libero_config_path),
         "libero_config_sha256": sha256_file(libero_config_path),
         "predictions_root": str(args.predictions_root.resolve()),
@@ -337,9 +540,14 @@ def main() -> None:
             sha256_file(args.episodes_file) if args.episodes_file is not None else None
         ),
         "source_observation_semantics": (
-            "LIBERO episode initial observation after num_steps_wait; every target horizon "
-            "is measured after executing that many actions from the cached chunk"
+            "Authoritative raw LIBERO demonstration states[0], uniquely matched to the "
+            "LeRobot episode by its full converted action sequence, followed by "
+            "num_steps_wait no-op steps; every target horizon is measured after executing "
+            "that many policy-predicted actions"
         ),
+        "raw_demo_matching": "unique_full_action_sequence_after_noop_filter_and_gripper_conversion",
+        "action_match_atol": args.action_match_atol,
+        "source_state_atol": args.source_state_atol,
         "source_frame_index": 0,
         "action_chunk_index": 0,
         "horizons": horizons,

@@ -72,7 +72,7 @@ def read_manifest(cache_root: Path) -> dict[str, Any]:
     if not manifest_path.is_file():
         raise FileNotFoundError(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "libero-counterfactual-robot-mask-v2":
+    if manifest.get("schema_version") != "libero-counterfactual-robot-mask-v3":
         raise ValueError(f"Unsupported cache schema: {manifest.get('schema_version')!r}")
     if (
         manifest.get("image_orientation")
@@ -111,6 +111,10 @@ def validate_mean_mask_cache(
         "camera_name",
         "image_orientation",
         "libero_config_sha256",
+        "raw_demo_matching",
+        "raw_demo_files",
+        "action_match_atol",
+        "source_state_atol",
         "image_size",
         "num_steps_wait",
     ):

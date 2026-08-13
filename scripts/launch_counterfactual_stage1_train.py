@@ -15,7 +15,7 @@ from typing import Any
 
 
 VARIANTS = ("matched", "full")
-EXPECTED_CACHE_SCHEMA = "libero-counterfactual-robot-mask-v2"
+EXPECTED_CACHE_SCHEMA = "libero-counterfactual-robot-mask-v3"
 EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EXPECTED_TRAIN_EPISODES = 200
 EXPECTED_HELDOUT_EPISODES = 50
