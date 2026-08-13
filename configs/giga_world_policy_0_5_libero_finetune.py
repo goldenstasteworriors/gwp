@@ -76,6 +76,14 @@ counterfactual_mask_weight = (
     if counterfactual_mask_cache_paths
     else 0.0
 )
+counterfactual_mask_compute_control = _bool(
+    "GWP_COUNTERFACTUAL_MASK_COMPUTE_CONTROL", False
+)
+if counterfactual_mask_compute_control:
+    if not counterfactual_mask_cache_paths:
+        raise ValueError("Mask compute control requires a counterfactual mask cache")
+    if counterfactual_mask_weight != 0.0:
+        raise ValueError("Mask compute control is only valid when mask weight is zero")
 counterfactual_mask_trainable_scope = _env(
     "GWP_COUNTERFACTUAL_MASK_TRAINABLE_SCOPE", "all"
 )
@@ -214,6 +222,7 @@ config = dict(
         consequence_start_step=int(_env("GWP_CONSEQUENCE_START_STEP", "0")),
         consequence_visual_sigma=float(_env("GWP_CONSEQUENCE_VISUAL_SIGMA", "1.0")),
         counterfactual_mask_loss_weight=counterfactual_mask_weight,
+        counterfactual_mask_compute_control=counterfactual_mask_compute_control,
         counterfactual_mask_bce_weight=float(
             _env("GWP_COUNTERFACTUAL_MASK_BCE_WEIGHT", "1.0")
         ),

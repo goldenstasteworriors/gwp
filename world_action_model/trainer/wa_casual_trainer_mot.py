@@ -89,6 +89,9 @@ class CasualWATrainerMoT(Trainer):
         self.counterfactual_mask_loss_weight = float(
             model_config.get("counterfactual_mask_loss_weight", 0.0)
         )
+        self.counterfactual_mask_compute_control = bool(
+            model_config.get("counterfactual_mask_compute_control", False)
+        )
         self.counterfactual_mask_bce_weight = float(
             model_config.get("counterfactual_mask_bce_weight", 1.0)
         )
@@ -127,7 +130,10 @@ class CasualWATrainerMoT(Trainer):
             and self.counterfactual_mask_loss_weight <= 0.0
         ):
             raise ValueError("head_only requires positive counterfactual mask supervision")
-        if self.counterfactual_mask_loss_weight > 0.0 and self.consequence_loss_weight > 0.0:
+        if (
+            self.counterfactual_mask_loss_weight > 0.0
+            or self.counterfactual_mask_compute_control
+        ) and self.consequence_loss_weight > 0.0:
             raise ValueError(
                 "Counterfactual mask supervision cannot be combined with the legacy demo-RGB "
                 "consequence loss"
@@ -152,7 +158,10 @@ class CasualWATrainerMoT(Trainer):
         transformer_pretrained = model_config.get("transformer_pretrained", os.path.join(pretrained, "transformer"))
         transformer_cfg = model_config.get("transformer")
         if (
-            self.counterfactual_mask_loss_weight > 0.0
+            (
+                self.counterfactual_mask_loss_weight > 0.0
+                or self.counterfactual_mask_compute_control
+            )
             and int(transformer_cfg.get("counterfactual_mask_frames_per_latent", 0)) <= 0
         ):
             raise ValueError(
@@ -399,7 +408,10 @@ class CasualWATrainerMoT(Trainer):
         return (step - self.consequence_start_step) % self.consequence_interval == 0
 
     def _should_compute_counterfactual_mask_loss(self) -> bool:
-        if self.counterfactual_mask_loss_weight <= 0.0:
+        if (
+            self.counterfactual_mask_loss_weight <= 0.0
+            and not self.counterfactual_mask_compute_control
+        ):
             return False
         step = int(getattr(self, "_cur_step", 0))
         if step < self.counterfactual_mask_start_step:
