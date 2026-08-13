@@ -215,8 +215,8 @@ def load_episode_records(dataset_root: Path) -> dict[int, dict[str, Any]]:
     return result
 
 
-def normalize_raw_demo_actions(actions: np.ndarray) -> np.ndarray:
-    """Match the no-op filtering and gripper encoding used by the LeRobot conversion."""
+def filter_raw_demo_actions(actions: np.ndarray) -> np.ndarray:
+    """Apply the no-op filter while preserving simulator action semantics."""
 
     kept: list[np.ndarray] = []
     for action in np.asarray(actions, dtype=np.float64):
@@ -228,7 +228,13 @@ def normalize_raw_demo_actions(actions: np.ndarray) -> np.ndarray:
             kept.append(action.copy())
     if not kept:
         raise ValueError("Raw LIBERO demonstration contains only no-op actions")
-    normalized = np.stack(kept).astype(np.float32)
+    return np.stack(kept).astype(np.float32)
+
+
+def normalize_raw_demo_actions(actions: np.ndarray) -> np.ndarray:
+    """Match the no-op filtering and gripper encoding used by the LeRobot conversion."""
+
+    normalized = filter_raw_demo_actions(actions)
     # Raw LIBERO uses {-1=open, +1=closed}; this LeRobot conversion stores
     # {1=open, 0=closed}.
     normalized[:, -1] = (1.0 - normalized[:, -1]) * 0.5
