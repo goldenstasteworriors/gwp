@@ -136,6 +136,18 @@ Object 上的微小改善来自夹爪项（0.0407 vs 0.0484），但平移和旋
 
 控制结论仍以同预算、同初始化的 LIBERO success rate 为准。只有当 counterfactual mask 方法同时优于原始 GWP、`head-only` 和 `GT-action mask`，并且 held-out shuffle-action 检验成立时，才支持“让视频/共享 backbone 适应动作头的预测分布，从而改善控制”的叙事。
 
+### 第一阶段固定协议
+
+先只在 LIBERO-Spatial 做最小实验，不同时扩展 suite 或增加其他对齐头。使用 seed 20260813 按 task 分层选择 20 个 train episode 和 5 个 held-out episode，共 200/50，episode 交集为 0；split manifest 位于 `/home/ubuntu/project/WM/gwp-action-video-results/counterfactual_mask_splits/seed_20260813/libero_spatial_20train_5heldout/manifest.json`。每个 episode 只使用 frame 0 的双视图观测和 baseline 预测的第一个 48-step action chunk。
+
+从同一个 30k baseline EMA 初始化，先各继续训练 200 steps：
+
+1. `matched-data control`：读取完全相同的 200-sample sidecar，但 mask weight 为 0；用于隔离“只在 frame-0 子集上继续训练”的影响。
+2. `counterfactual-mask full`：数据、初始化、步数、batch、随机种子均相同，增加 mask BCE+Dice，允许 mask 梯度更新共享 backbone 和 mask head。
+3. 暂不立即运行 `head-only`。只有 full 方法在 held-out 上的 correct-action 指标明显优于 shuffled-action，并且优于 copy-initial/mean-mask，才运行 head-only 来判断收益是否只来自新 head。
+
+第一阶段机制 gate 为 held-out `correct - shuffled` 的 dynamic IoU、new-occupancy IoU 和 gripper recall 均为正，并且 correct-action 超过两个 action-independent baseline。未通过时停止增加训练预算，先检查 action conditioning 或更换监督表示；通过后才比较同预算动作误差和 LIBERO success rate。
+
 ## 结果位置
 
 - Spatial 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_spatial_1000step/<method>/`
