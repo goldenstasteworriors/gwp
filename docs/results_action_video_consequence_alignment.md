@@ -266,6 +266,16 @@ action-gap 中 expert action 的语义也做了真实数据核对：episode 0 �
 
 该 6k baseline 随后在 step 420 的 loss 与内存仍有限时，由 rank 0 收到外部 `SIGKILL`；主机同时仍有约 957 GiB available RAM，kernel journal 无 OOM、GPU Xid 或 retired-page 错误，因此没有证据把它归因为模型数值或主机内存故障。约 91 秒后另一个 7-GPU 训练启动并占用 GPU 3/4/5，这与外部抢占解释相符，但仅凭时间关系不能确定信号来源。GigaTrain 的 `Launcher.launch()` 还暴露出一个独立可靠性错误：Accelerate 子进程非零退出后，launcher 会正常返回，使 systemd 把失败误记为成功。commit `60400b1` 已改为抛出 `CalledProcessError`，并用 `/bin/false`/`/bin/true` 的无 GPU 单元路径验证失败透传与成功返回。此次 step 420 前没有 checkpoint，故不能恢复；GPU 3/4/5 被现有任务占用期间不重启，也不抢占他人进程。下一次只改变运行可靠性协议：缩短 checkpoint interval、保留最新可恢复 optimizer state，并在重启前等待三张 GPU 全部空闲；不同时改变 baseline 的数据、batch、loss 权重或 seed。
 
+### 第三种挂载点：shared mask-video flow（先做表示门禁）
+
+下一种最小方法不再从 RGB clean latent 经过冻结 probe，也不新增独立 hidden mask head。它把五帧 robot mask 复制为三通道 mask video，经原 Wan VAE 编码到与 RGB 完全相同的 48-channel latent；后续 predicted-action branch 使用原 video patch embedding、visual expert、`norm_out` 和同一个 `proj_out` 预测 mask-video flow。专家动作 branch 仍保留原 RGB flow。两种输出域必须用一个仅用于消除 RGB/mask 目标歧义的零初始化 modality embedding 区分；不能靠“预测动作 branch 恰好总在 sigma=1”作为隐式标记，否则会破坏已知动作条件下的正常 RGB 视频生成。matched/full 仍只相差 mask-flow loss 权重，cached action 继续 detach，控制结论仍只由 action head 的 paired LIBERO success rate决定。
+
+这一路径与 [Mask World Model](https://arxiv.org/abs/2604.19683) 的共同点是直接生成 mask dynamics，而非让一个 probe 解释 RGB latent；不同点是这里保留 GWP 的专家 RGB branch、动作生成头和同一个 RGB video output projection，只在没有 counterfactual RGB 的 policy-action branch 切换到可渲染 mask target。它也不同于 [BridgeV2W](https://arxiv.org/abs/2602.03793) 把 embodiment mask 作为 ControlNet 输入条件。新近 [GEM-4D](https://arxiv.org/abs/2605.22882) 说明把几何一致性监督注入单流 video backbone 可以改善控制，但其 dense correspondence 来自真实视频，未解决偏离 logged action 后缺少 counterfactual observation target 的问题。[World Action Verifier](https://arxiv.org/abs/2604.01985) 则直接强调 world model 必须覆盖 policy 产生的次优动作，并利用低维 action-relevant feature 做可达性验证；这一问题设定与当前“policy-action mask 是可验证部分、未知 scene response 不伪造”的叙事更接近。
+
+在改模型前先固定 Wan VAE 表示门。`scripts/audit_counterfactual_mask_video_vae.py` 对 v3 predicted-action cache 的双视图布局执行真实 encode/decode round trip，右侧未知 wrist 区域不计分，并核验每个 NPZ SHA256、binary/gripper-subset/horizon/orientation 与 `rgb_supervision=None`。默认 gate 要求 initial/full IoU mean≥0.90、full IoU p05≥0.80、dynamic/new IoU mean≥0.80 且 p05≥0.60、gripper recall mean≥0.90 且 p05≥0.75、有效区域 MAE mean≤0.05 且 p95≤0.10。门禁失败时不实现 shared mask-video flow，而是下一轮只比较 mask-specific VAE/decoder；门禁通过后才单独增加 modality embedding 和 mask-flow loss，不同时加入 motion weighting、depth 或 object mask。
+
+2026-08-13 11:01 UTC，服务器上的整个 `/home/ubuntu/project` 被外部移动到 `/home/ubuntu/待清理/project`，并非本实验脚本操作。三个依赖旧绝对路径的 Stage-1/probe/post-gate user services 已精确停止，未删除任何结果，也未触碰随后运行的 7-GPU 任务。由于目标目录明确标记为“待清理”，在确认新的持久化路径前不运行上述真实 VAE gate，也不继续写 checkpoint。
+
 ## 结果位置
 
 - Spatial 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_spatial_1000step/<method>/`
