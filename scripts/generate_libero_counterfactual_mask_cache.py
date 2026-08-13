@@ -34,6 +34,10 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Directory containing episode_XXXXXX/predicted_actions.npy files.",
     )
+    parser.add_argument(
+        "--policy-id",
+        help="Checkpoint or run identifier used to produce the predicted actions.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--episodes", type=int, nargs="+")
     parser.add_argument("--horizons", type=int, nargs="+", default=[0, 12, 24, 36, 48])
@@ -247,6 +251,8 @@ def main() -> None:
         )
         row = {
             "episode_index": episode,
+            "source_frame_index": 0,
+            "action_chunk_index": 0,
             "task_index": task_index,
             "task_episode_rank": task_episode_rank,
             "prediction_path": str(prediction_path.resolve()),
@@ -266,6 +272,13 @@ def main() -> None:
         "dataset_root": str(args.dataset_root.resolve()),
         "dataset_info_sha256": dataset_info_sha256,
         "predictions_root": str(args.predictions_root.resolve()),
+        "policy_id": args.policy_id,
+        "source_observation_semantics": (
+            "LIBERO episode initial observation after num_steps_wait; every target horizon "
+            "is measured after executing that many actions from the cached chunk"
+        ),
+        "source_frame_index": 0,
+        "action_chunk_index": 0,
         "horizons": horizons,
         "camera_name": args.camera_name,
         "image_size": [args.height, args.width],
