@@ -87,6 +87,16 @@ if counterfactual_mask_compute_control:
 counterfactual_mask_trainable_scope = _env(
     "GWP_COUNTERFACTUAL_MASK_TRAINABLE_SCOPE", "all"
 )
+counterfactual_mask_alignment_mode = _env(
+    "GWP_COUNTERFACTUAL_MASK_ALIGNMENT_MODE", "hidden_head"
+)
+if counterfactual_mask_alignment_mode not in {"hidden_head", "clean_latent_probe"}:
+    raise ValueError(
+        "GWP_COUNTERFACTUAL_MASK_ALIGNMENT_MODE must be hidden_head or clean_latent_probe"
+    )
+counterfactual_mask_probe_pretrained = _env(
+    "GWP_COUNTERFACTUAL_MASK_PROBE_PRETRAINED"
+)
 if counterfactual_mask_trainable_scope not in {"all", "head_only"}:
     raise ValueError(
         "GWP_COUNTERFACTUAL_MASK_TRAINABLE_SCOPE must be one of all, head_only"
@@ -204,7 +214,10 @@ config = dict(
             out_action_channels=16,
             num_embodiments=2,
             counterfactual_mask_frames_per_latent=(
-                4 if counterfactual_mask_cache_paths else 0
+                4
+                if counterfactual_mask_cache_paths
+                and counterfactual_mask_alignment_mode == "hidden_head"
+                else 0
             ),
         ),
         visual_flow_shift=2.0,
@@ -236,6 +249,8 @@ config = dict(
             _env("GWP_COUNTERFACTUAL_MASK_START_STEP", "0")
         ),
         counterfactual_mask_trainable_scope=counterfactual_mask_trainable_scope,
+        counterfactual_mask_alignment_mode=counterfactual_mask_alignment_mode,
+        counterfactual_mask_probe_pretrained=counterfactual_mask_probe_pretrained,
     ),
     optimizers=dict(type="CAME8Bit", lr=6e-5, weight_decay=1e-2),
     schedulers=dict(type="ConstantScheduler"),

@@ -230,6 +230,14 @@ robot trajectory + scene -> contact / object response -> future observation
 
 第三步仍不让 consistency loss 直接优化 action 数值：同一个 action 同时决定 rendered target 和 video condition，自一致性本身没有任务最优方向；若直接回传到 action，策略可能只选择视频模型最容易解释的动作。动作是否改善继续由共享表示与原始 expert action loss决定，并以 paired LIBERO success rate 作唯一控制结论。
 
+### 第二种挂载点：clean-video-latent frozen probe（实现中，尚无结果）
+
+为避免把独立 auxiliary mask head 学会几何误写成“视频生成结果与动作一致”，新增了一个默认关闭的 `clean_latent_probe` 路径。反事实分支仍使用同一初态、同一 predicted-action rollout mask、同一纯噪声和 `action.detach()`；唯一变化是必须先经过视频模型的 RGB `proj_out` 得到 flow。在 `sigma=1` 下用 `predicted_clean = noise - predicted_flow` 恢复 one-step clean video latent，再经过预先在“真实视频 clean latent → 同步真实 robot mask”上拟合并冻结的 probe，最后计算相同 BCE+Dice。这样梯度路径变为 `mask loss → frozen probe → predicted clean latent → RGB proj_out → shared backbone`，而不是绕过 `proj_out`。
+
+该路径目前只完成了代码挂载点与形状/梯度 smoke test，还不能进入正式比较：必须先生成与真实示范视频严格同步的 robot-mask 标签，单独训练 probe，并在 held-out demo 上证明 probe 的 dynamic/new-occupancy/gripper 指标足够高后冻结。随机或弱 probe 会给视频模型提供无意义梯度，因此不会为了尽快开跑而使用。另一个明确限制是当前从纯噪声做 one-step clean estimate；若 probe gate 通过而 action sensitivity 不通过，下一次只将其替换为少步可微 flow rollout，不同时修改 target 或 loss。
+
+实现位置为 `world_action_model/alignment/latent_mask_probe.py`、`world_action_model/trainer/wa_casual_trainer_mot.py` 和 `configs/giga_world_policy_0_5_libero_finetune.py`。默认 `GWP_COUNTERFACTUAL_MASK_ALIGNMENT_MODE=hidden_head`，所以该实现不会改变正在等待的 Stage-1；只有显式设置 `clean_latent_probe` 并提供冻结 probe checkpoint 才会启用。
+
 ## 结果位置
 
 - Spatial 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_spatial_1000step/<method>/`

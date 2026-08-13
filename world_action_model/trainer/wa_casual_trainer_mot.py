@@ -10,7 +10,11 @@ from diffusers.models import AutoencoderKLWan
 from diffusers.video_processor import VideoProcessor
 from einops import rearrange
 from giga_models import utils as gm_utils
-from world_action_model.alignment import masked_bce_dice_loss, policy_only_surrogate
+from world_action_model.alignment import (
+    LatentRobotMaskProbe,
+    masked_bce_dice_loss,
+    policy_only_surrogate,
+)
 from world_action_model.models import CasualWorldActionTransformer_MoT
 from giga_train import ModuleDict, Trainer
 
@@ -124,6 +128,12 @@ class CasualWATrainerMoT(Trainer):
         self.counterfactual_mask_trainable_scope = str(
             model_config.get("counterfactual_mask_trainable_scope", "all")
         )
+        self.counterfactual_mask_alignment_mode = str(
+            model_config.get("counterfactual_mask_alignment_mode", "hidden_head")
+        )
+        self.counterfactual_mask_probe_pretrained = model_config.get(
+            "counterfactual_mask_probe_pretrained"
+        )
         valid_gradient_modes = {"policy_only", "joint", "video_only"}
         if self.consequence_gradient_mode not in valid_gradient_modes:
             raise ValueError(
@@ -142,6 +152,19 @@ class CasualWATrainerMoT(Trainer):
             raise ValueError(
                 "counterfactual_mask_trainable_scope must be one of all, head_only"
             )
+        if self.counterfactual_mask_alignment_mode not in {
+            "hidden_head",
+            "clean_latent_probe",
+        }:
+            raise ValueError(
+                "counterfactual_mask_alignment_mode must be one of "
+                "hidden_head, clean_latent_probe"
+            )
+        if (
+            self.counterfactual_mask_alignment_mode == "clean_latent_probe"
+            and self.counterfactual_mask_trainable_scope != "all"
+        ):
+            raise ValueError("clean_latent_probe requires trainable scope 'all'")
         if (
             self.counterfactual_mask_trainable_scope == "head_only"
             and self.counterfactual_mask_loss_weight <= 0.0
@@ -171,6 +194,38 @@ class CasualWATrainerMoT(Trainer):
             self.device, dtype=vae_dtype
         )
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
+        self.counterfactual_latent_mask_probe = None
+        if (
+            self.counterfactual_mask_loss_weight > 0.0
+            or self.counterfactual_mask_compute_control
+        ) and self.counterfactual_mask_alignment_mode == "clean_latent_probe":
+            if not self.counterfactual_mask_probe_pretrained:
+                raise ValueError(
+                    "clean_latent_probe requires counterfactual_mask_probe_pretrained"
+                )
+            probe = LatentRobotMaskProbe.from_pretrained(
+                self.counterfactual_mask_probe_pretrained
+            )
+            if probe.latent_channels != int(self.vae.config.z_dim):
+                raise ValueError(
+                    f"Latent-mask probe has {probe.latent_channels} channels but VAE has "
+                    f"z_dim={self.vae.config.z_dim}"
+                )
+            if probe.frames_per_latent != int(self.vae_scale_factor_temporal):
+                raise ValueError(
+                    f"Latent-mask probe frames_per_latent={probe.frames_per_latent} but "
+                    f"VAE temporal scale is {self.vae_scale_factor_temporal}"
+                )
+            if probe.spatial_scale != int(self.vae_scale_factor_spatial):
+                raise ValueError(
+                    f"Latent-mask probe spatial_scale={probe.spatial_scale} but VAE spatial "
+                    f"scale is {self.vae_scale_factor_spatial}"
+                )
+            probe.requires_grad_(False)
+            probe.eval()
+            self.counterfactual_latent_mask_probe = probe.to(
+                self.device, dtype=torch.float32
+            )
 
         transformer_pretrained = model_config.get("transformer_pretrained", os.path.join(pretrained, "transformer"))
         transformer_cfg = model_config.get("transformer")
@@ -179,6 +234,7 @@ class CasualWATrainerMoT(Trainer):
                 self.counterfactual_mask_loss_weight > 0.0
                 or self.counterfactual_mask_compute_control
             )
+            and self.counterfactual_mask_alignment_mode == "hidden_head"
             and int(transformer_cfg.get("counterfactual_mask_frames_per_latent", 0)) <= 0
         ):
             raise ValueError(
@@ -353,20 +409,54 @@ class CasualWATrainerMoT(Trainer):
             counterfactual_timestep[
                 :, num_state_tokens + num_action_tokens + num_clean_latent_tokens :
             ] = 1000
-            counterfactual_output = transformer(
-                ref_latents=ref_latents,
-                noisy_latents=counterfactual_future_noise,
-                timestep=counterfactual_timestep,
-                encoder_hidden_states=prompt_embeds,
-                return_dict=True,
-                action=counterfactual_action.detach(),
-                state=state,
-                embodiment_id=embodiment_id,
-                output_counterfactual_mask=True,
-                output_action=False,
-                output_visual=False,
-            )
-            mask_logits = counterfactual_output["counterfactual_mask_logits"].float()
+            if self.counterfactual_mask_alignment_mode == "hidden_head":
+                counterfactual_output = transformer(
+                    ref_latents=ref_latents,
+                    noisy_latents=counterfactual_future_noise,
+                    timestep=counterfactual_timestep,
+                    encoder_hidden_states=prompt_embeds,
+                    return_dict=True,
+                    action=counterfactual_action.detach(),
+                    state=state,
+                    embodiment_id=embodiment_id,
+                    output_counterfactual_mask=True,
+                    output_action=False,
+                    output_visual=False,
+                )
+                mask_logits = counterfactual_output[
+                    "counterfactual_mask_logits"
+                ].float()
+            else:
+                counterfactual_output = transformer(
+                    ref_latents=ref_latents,
+                    noisy_latents=counterfactual_future_noise,
+                    timestep=counterfactual_timestep,
+                    encoder_hidden_states=prompt_embeds,
+                    return_dict=True,
+                    action=counterfactual_action.detach(),
+                    state=state,
+                    embodiment_id=embodiment_id,
+                    output_counterfactual_mask=False,
+                    output_action=False,
+                    output_visual=True,
+                )
+                counterfactual_flow = counterfactual_output.sample[:, :, 1:].float()
+                if counterfactual_flow.shape != counterfactual_future_noise.shape:
+                    raise ValueError(
+                        "Counterfactual video flow/future-noise shape mismatch: "
+                        f"{tuple(counterfactual_flow.shape)} vs "
+                        f"{tuple(counterfactual_future_noise.shape)}"
+                    )
+                # At sigma=1, x_t=noise and flow target=noise-clean, so the
+                # one-step predicted clean latent is noise-predicted_flow.
+                predicted_clean_future = (
+                    counterfactual_future_noise.float() - counterfactual_flow
+                )
+                if self.counterfactual_latent_mask_probe is None:
+                    raise RuntimeError("clean_latent_probe was not initialized")
+                mask_logits = self.counterfactual_latent_mask_probe(
+                    predicted_clean_future
+                ).float()
             mask_target = batch_dict["counterfactual_robot_masks"].to(
                 device=mask_logits.device,
                 dtype=torch.float32,
