@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rollouts-per-task", type=int, default=5)
     parser.add_argument("--max-steps", type=int, default=280)
     parser.add_argument("--replan-steps", type=int, default=8)
+    parser.add_argument("--num-views", type=int, choices=(1, 2), default=1)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=11421)
     parser.add_argument("--seed", type=int, default=20260813)
@@ -99,12 +100,17 @@ def main() -> None:
             raise ValueError(f"Invalid task id {task_id}; suite has {suite.n_tasks} tasks")
         prompt = load_prompt(prompts[task_id])
         for rollout in range(args.rollouts_per_task):
+            camera_names = (
+                "agentview_image,robot0_eye_in_hand_image"
+                if args.num_views == 2
+                else "agentview_image"
+            )
             env = LiberoEnv(
                 suite,
                 task_id,
                 args.suite,
                 episode_length=args.max_steps,
-                camera_name="agentview_image",
+                camera_name=camera_names,
                 obs_type="pixels_agent_pos",
                 init_states=True,
                 episode_index=rollout,
@@ -128,6 +134,8 @@ def main() -> None:
                     "episode_index": rollout,
                     "chunk_index": chunk,
                 }
+                if args.num_views == 2:
+                    request["wrist_image"] = observation["pixels"]["image2"][::-1, ::-1].copy()
                 if task_id not in prompt_sent:
                     request["prompt_embedding"] = prompt
                     prompt_sent.add(task_id)

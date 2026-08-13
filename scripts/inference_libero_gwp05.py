@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:4")
     parser.add_argument("--model-dtype", default="bf16")
     parser.add_argument("--num-inference-steps", type=int, default=10)
+    parser.add_argument("--num-views", type=int, choices=(1, 2), default=1)
     parser.add_argument("--seed", type=int, default=20260813)
     return parser.parse_args()
 
@@ -75,6 +76,24 @@ def as_pil_image(value: object) -> PIL.Image.Image:
     if np.issubdtype(value.dtype, np.floating) and value.max(initial=0.0) <= 1.0:
         value = value * 255.0
     return PIL.Image.fromarray(np.clip(value, 0, 255).astype(np.uint8), mode="RGB")
+
+
+def compose_policy_image(data: dict[str, object], num_views: int) -> PIL.Image.Image:
+    images = [as_pil_image(data["image"])]
+    if num_views == 2:
+        if "wrist_image" not in data:
+            raise KeyError("Two-view inference requires 'wrist_image'")
+        images.append(as_pil_image(data["wrist_image"]))
+    if len(images) == 1:
+        return images[0]
+    if len({image.height for image in images}) != 1:
+        raise ValueError(f"All policy views must have the same height: {[image.size for image in images]}")
+    canvas = PIL.Image.new("RGB", (sum(image.width for image in images), images[0].height))
+    offset = 0
+    for image in images:
+        canvas.paste(image, (offset, 0))
+        offset += image.width
+    return canvas
 
 
 def build_policy(args: argparse.Namespace):
@@ -111,7 +130,7 @@ def build_policy(args: argparse.Namespace):
 
     @torch.inference_mode()
     def inference(self, data):
-        image = as_pil_image(data["image"])
+        image = compose_policy_image(data, args.num_views)
         state = torch.as_tensor(data["state"], dtype=torch.float32, device=device).reshape(-1)[:8]
         normalized_state = 2.0 * (state - state_min) / state_range - 1.0
         normalized_state = F.pad(normalized_state, (0, 16 - normalized_state.shape[-1])).unsqueeze(0)
@@ -134,7 +153,7 @@ def build_policy(args: argparse.Namespace):
             state=normalized_state,
             prompt_embeds=prompt_cache[prompt_key],
             height=256,
-            width=256,
+            width=256 * args.num_views,
             num_frames=5,
             num_inference_steps=args.num_inference_steps,
             guidance_scale=0.0,
