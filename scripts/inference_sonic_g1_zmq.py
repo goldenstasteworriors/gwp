@@ -45,10 +45,12 @@ from world_action_model.asymmetric_hardware_manifest import (
     validate_manifest_capture_binding,
 )
 from world_action_model.models import CasualWorldActionTransformer_MoT
+from world_action_model.rtc import RTCConfig
 
 
 MODEL_ACTION_DIM = 32
 IMAGE_SIZE = (320, 384)
+LEFT13_ACTION_SCHEMA_ID = "sonic_g1_left_arm_inspire6_absolute_joint_v1"
 
 
 def _pack_default(obj: Any) -> dict:
@@ -186,15 +188,23 @@ class SonicG1Policy:
         action_schema: str = "legacy30",
         hardware_manifest: Path | None = None,
         calibration_capture: Path | None = None,
+        rtc_config: RTCConfig | None = None,
     ) -> None:
         self.pipeline = pipeline
         self.device = torch.device(device)
         self.prompt_embedding = prompt_embedding
         self.inference_steps = inference_steps
         self.action_schema = str(action_schema)
+        self.rtc_config = rtc_config
         if self.action_schema == "legacy30":
             self.physical_dim = LEGACY_SONIC_ACTION_DIM
             self.action_schema_id = LEGACY_SCHEMA_ID
+            self.hardware_manifest = None
+            self.hardware_contract_sha256 = None
+            self.calibration_capture_sha256 = None
+        elif self.action_schema == "left13":
+            self.physical_dim = 13
+            self.action_schema_id = LEFT13_ACTION_SCHEMA_ID
             self.hardware_manifest = None
             self.hardware_contract_sha256 = None
             self.calibration_capture_sha256 = None
@@ -227,7 +237,7 @@ class SonicG1Policy:
             hardware_manifest=self.hardware_manifest,
         )
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def predict_action(self, **request: Any) -> dict[str, np.ndarray | float]:
         examples = request.get("examples")
         if not isinstance(examples, list) or len(examples) != 1:
@@ -254,6 +264,28 @@ class SonicG1Policy:
         if prompt_embedding is None:
             raise ValueError("server requires --fixed-t5-path for this component-only Wan base model")
 
+        previous_chunk_tail = example.get("rtc_previous_chunk_tail")
+        inference_delay = int(example.get("rtc_inference_delay", 0))
+        normalized_previous_tail = None
+        if previous_chunk_tail is not None:
+            if self.rtc_config is None:
+                raise ValueError("request supplied RTC state but the server was not started with --rtc")
+            previous_chunk_tail = torch.as_tensor(
+                previous_chunk_tail, dtype=torch.float32, device=self.device
+            )
+            if previous_chunk_tail.ndim != 2 or previous_chunk_tail.shape[1] != self.physical_dim:
+                raise ValueError(
+                    "rtc_previous_chunk_tail must have shape "
+                    f"[T,{self.physical_dim}], got {tuple(previous_chunk_tail.shape)}"
+                )
+            action_range = (self.action_high - self.action_low).clamp_min(1e-8)
+            normalized_previous_tail = (
+                (previous_chunk_tail - self.action_low) / action_range * 2.0 - 1.0
+            )
+            normalized_previous_tail = F.pad(
+                normalized_previous_tail, (0, MODEL_ACTION_DIM - self.physical_dim)
+            )
+
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         started = time.perf_counter()
@@ -271,6 +303,9 @@ class SonicG1Policy:
             prompt=None,
             action_dim=MODEL_ACTION_DIM,
             generator=None,
+            rtc_previous_chunk_tail=normalized_previous_tail,
+            rtc_inference_delay=inference_delay,
+            rtc_config=self.rtc_config if normalized_previous_tail is not None else None,
         )
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
@@ -318,6 +353,7 @@ class MsgpackPolicyServer:
                             "state_dim": self.policy.physical_dim,
                             "action_dim": self.policy.physical_dim,
                             "action_horizon": 48,
+                            "rtc_enabled": self.policy.rtc_config is not None,
                         },
                     }
                 elif endpoint == "kill":
@@ -350,9 +386,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=5556)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--inference-steps", type=int, default=10)
+    parser.add_argument("--rtc", action="store_true", help="Enable training-free RTC guidance")
+    parser.add_argument("--rtc-execution-horizon", type=int, default=10)
+    parser.add_argument("--rtc-max-guidance-weight", type=float, default=5.0)
+    parser.add_argument(
+        "--rtc-prefix-schedule", choices=("exp", "linear", "ones", "hard"), default="exp"
+    )
     parser.add_argument(
         "--action-schema",
-        choices=("legacy30", "asymmetric25"),
+        choices=("legacy30", "left13", "asymmetric25"),
         default="legacy30",
         help="Legacy 30-D remains the default; asymmetric25 requires schema-labelled norm stats.",
     )
@@ -390,6 +432,15 @@ def main() -> None:
         action_schema=args.action_schema,
         hardware_manifest=args.hardware_manifest,
         calibration_capture=args.calibration_capture,
+        rtc_config=(
+            RTCConfig(
+                execution_horizon=args.rtc_execution_horizon,
+                max_guidance_weight=args.rtc_max_guidance_weight,
+                prefix_schedule=args.rtc_prefix_schedule,
+            )
+            if args.rtc
+            else None
+        ),
     )
     MsgpackPolicyServer(policy, args.host, args.port).run()
 

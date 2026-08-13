@@ -54,6 +54,7 @@ from PIL import Image
 from transformers import AutoTokenizer, CLIPImageProcessor, CLIPVisionModel, UMT5EncoderModel
 
 from world_action_model.models import CasualWorldActionTransformer, CasualWorldActionTransformer_MoT
+from world_action_model.rtc import RTCConfig, guided_flow_velocity
 from giga_models.sockets import RobotInferenceClient, RobotInferenceServer
 
 if is_torch_xla_available():
@@ -424,6 +425,9 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
         action_dim: int = 32,
+        rtc_previous_chunk_tail: Optional[torch.Tensor] = None,
+        rtc_inference_delay: int = 0,
+        rtc_config: Optional[RTCConfig] = None,
     ):
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
@@ -580,17 +584,30 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 num_clean_latent_tokens = frame_per_tokens
                 timestep[:, num_state_tokens + num_clean_latent_tokens :] = noise_t
 
-                with current_model.cache_context("cond"):
-                    action_pred = current_model(
+                def predict_action_velocity(action_input):
+                    return current_model(
                         ref_latents=latent_model_input[:, :, :1],
                         noisy_latents=latent_model_input[:, :, 1:],
                         timestep=timestep,
                         encoder_hidden_states=prompt_embeds,
                         return_dict=False,
-                        action=action,
+                        action=action_input,
                         state=state,
                         action_only=True,
                     )
+
+                with current_model.cache_context("cond"):
+                    if rtc_config is None:
+                        action_pred = predict_action_velocity(action)
+                    else:
+                        action_pred = guided_flow_velocity(
+                            action,
+                            predict_action_velocity,
+                            rtc_previous_chunk_tail,
+                            noise_level=self.action_scheduler.sigmas[i],
+                            inference_delay=rtc_inference_delay,
+                            config=rtc_config,
+                        )
 
                 if self.do_classifier_free_guidance:
                     with current_model.cache_context("uncond"):
@@ -833,6 +850,11 @@ def get_policy(
     action_chunk = 48
     guidance_scale = 0.0
     num_inference_steps = 10
+    rtc_config = RTCConfig(
+        execution_horizon=10,
+        max_guidance_weight=5.0,
+        prefix_schedule="exp",
+    )
 
     state_min = torch.tensor(stats_dict['norm_stats']['observation.state']['q01'])[..., :14].to(device=device)
     state_max = torch.tensor(stats_dict['norm_stats']['observation.state']['q99'])[..., :14].to(device=device)
@@ -894,6 +916,22 @@ def get_policy(
             raise ValueError("Request did not include prompt_embedding or prompt, and no fixed T5 embedding was loaded.")
         if prompt_embedding is not None:
             prompt_embedding = prompt_embedding.to(device)
+        rtc_previous_chunk_tail = data.get("rtc_previous_chunk_tail")
+        if rtc_previous_chunk_tail is not None:
+            rtc_previous_chunk_tail = torch.as_tensor(
+                rtc_previous_chunk_tail, device=device, dtype=state.dtype
+            )
+            if rtc_previous_chunk_tail.ndim != 2 or rtc_previous_chunk_tail.shape[-1] != 14:
+                raise ValueError("rtc_previous_chunk_tail must have shape [T, 14]")
+            delta_mask = torch.tensor(
+                [True] * 6 + [False] + [True] * 6 + [False], device=device
+            )
+            rtc_delta = rtc_previous_chunk_tail - state.unsqueeze(0) * delta_mask
+            rtc_previous_chunk_tail = ((rtc_delta - delta_min) / delta_range) * 2 - 1
+            rtc_previous_chunk_tail = torch_F.pad(
+                rtc_previous_chunk_tail, (0, 32 - rtc_previous_chunk_tail.shape[-1]), value=0.0
+            )
+        rtc_enabled = rtc_previous_chunk_tail is not None
         if str(device).startswith("cuda") and torch.cuda.is_available():
             torch.cuda.synchronize(torch.device(device))
         model_start_time = time.perf_counter()
@@ -910,6 +948,9 @@ def get_policy(
             prompt_embeds=prompt_embedding,
             prompt=prompt,
             action_dim=32,
+            rtc_previous_chunk_tail=rtc_previous_chunk_tail,
+            rtc_inference_delay=int(data.get("rtc_inference_delay", 0)),
+            rtc_config=rtc_config if rtc_enabled else None,
         )
         if str(device).startswith("cuda") and torch.cuda.is_available():
             torch.cuda.synchronize(torch.device(device))
