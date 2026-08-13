@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import random
 import re
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ EXPECTED_VARIANT_ENV = {
         "GWP_COUNTERFACTUAL_MASK_COMPUTE_CONTROL": "0",
     },
 }
+BOOTSTRAP_SEED = 20260813
+BOOTSTRAP_SAMPLES = 10_000
 
 
 def parse_args() -> argparse.Namespace:
@@ -284,6 +287,94 @@ def recompute_gate(
     }
 
 
+def paired_bootstrap_mean_interval(
+    values: list[float],
+    *,
+    seed: int,
+    num_resamples: int,
+) -> dict[str, float | int]:
+    if not values or not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("Paired bootstrap values must be non-empty and finite")
+    if num_resamples <= 0:
+        raise ValueError("num_resamples must be positive")
+    values = [float(value) for value in values]
+    generator = random.Random(seed)
+    sample_count = len(values)
+    means = []
+    for _ in range(num_resamples):
+        means.append(
+            sum(values[generator.randrange(sample_count)] for _ in range(sample_count))
+            / sample_count
+        )
+    means.sort()
+
+    def percentile(probability: float) -> float:
+        position = probability * (num_resamples - 1)
+        lower = int(math.floor(position))
+        upper = int(math.ceil(position))
+        fraction = position - lower
+        return means[lower] * (1.0 - fraction) + means[upper] * fraction
+
+    return {
+        "num_pairs": sample_count,
+        "num_resamples": num_resamples,
+        "mean": sum(values) / sample_count,
+        "ci95_low": percentile(0.025),
+        "ci95_high": percentile(0.975),
+    }
+
+
+def paired_effect_intervals(
+    full: dict[str, Any],
+    matched: dict[str, Any],
+) -> dict[str, Any]:
+    full_samples = full["per_sample"]
+    matched_samples = matched["per_sample"]
+    if len(full_samples) != len(matched_samples):
+        raise ValueError("Matched/full per-sample evaluation lengths differ")
+
+    effects: dict[str, Any] = {
+        "seed": BOOTSTRAP_SEED,
+        "full_correct_minus_shuffled": {},
+        "full_minus_matched_correct": {},
+        "full_minus_matched_sensitivity": {},
+    }
+    for key_index, key in enumerate(GATE_KEYS):
+        sensitivity = []
+        learned_correct = []
+        learned_sensitivity = []
+        for index, (full_row, matched_row) in enumerate(
+            zip(full_samples, matched_samples, strict=True)
+        ):
+            if full_row.get("index") != index or matched_row.get("index") != index:
+                raise ValueError("Matched/full per-sample order differs")
+            if full_row.get("shuffle_index") != matched_row.get("shuffle_index"):
+                raise ValueError(f"Matched/full shuffle differs at sample {index}")
+            full_correct = float(full_row["correct_action"]["mean"][key])
+            full_shuffled = float(full_row["shuffled_action"]["mean"][key])
+            matched_correct = float(matched_row["correct_action"]["mean"][key])
+            matched_shuffled = float(matched_row["shuffled_action"]["mean"][key])
+            sensitivity.append(full_correct - full_shuffled)
+            learned_correct.append(full_correct - matched_correct)
+            learned_sensitivity.append(
+                (full_correct - full_shuffled)
+                - (matched_correct - matched_shuffled)
+            )
+        for effect_index, (name, values) in enumerate(
+            (
+                ("full_correct_minus_shuffled", sensitivity),
+                ("full_minus_matched_correct", learned_correct),
+                ("full_minus_matched_sensitivity", learned_sensitivity),
+            )
+        ):
+            effects[name][key] = paired_bootstrap_mean_interval(
+                values,
+                seed=BOOTSTRAP_SEED + key_index * 10 + effect_index,
+                num_resamples=BOOTSTRAP_SAMPLES,
+            )
+    return effects
+
+
 def main() -> None:
     args = parse_args()
     if args.output.exists():
@@ -309,6 +400,7 @@ def main() -> None:
             raise ValueError(f"Matched/full evaluation setting differs for {key}")
 
     gate = recompute_gate(full_eval, matched_eval)
+    effect_intervals = paired_effect_intervals(full_eval, matched_eval)
     audit = {
         "audit_status": "passed",
         "comparison_id": matched_manifest["comparison_id"],
@@ -316,6 +408,7 @@ def main() -> None:
         "matched_checkpoint": str(matched_checkpoint),
         "full_checkpoint": str(full_checkpoint),
         "mechanism_gate": gate,
+        "paired_bootstrap_95ci": effect_intervals,
         "control_evaluation_allowed": gate["status"] == "passed",
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
