@@ -305,13 +305,11 @@ def predict_mask_logits(
         "action": action,
         "state": state,
         "embodiment_id": embodiment_id,
-        "output_action": False,
     }
     if alignment_mode == "hidden_head":
         output = transformer(
             **common,
             output_counterfactual_mask=True,
-            output_visual=False,
         )
         return output["counterfactual_mask_logits"].float()
     if alignment_mode != "clean_latent_probe":
@@ -321,9 +319,9 @@ def predict_mask_logits(
     output = transformer(
         **common,
         output_counterfactual_mask=False,
-        output_visual=True,
     )
-    predicted_flow = output.sample[:, :, 1:].float()
+    video_output = output["sample"] if isinstance(output, dict) else output.sample
+    predicted_flow = video_output[:, :, 1:].float()
     if predicted_flow.shape != future_noise.shape:
         raise ValueError(
             "Predicted flow/future-noise shape mismatch: "
