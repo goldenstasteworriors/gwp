@@ -242,9 +242,13 @@ robot trajectory + scene -> contact / object response -> future observation
 
 注册门在看到正式结果前固定为：position error p95≤5 mm、rotation error p95≤2°、gripper max-abs p95≤0.003、机器人区域最佳平移 p95≤4 px、全图 RGB MAE p95≤10/255、最佳平移后的 robot-region RGB MAE p95≤15/255。实现于 `scripts/audit_libero_demonstration_mask_registration.py`。probe 训练器 `scripts/train_libero_latent_mask_probe.py` 拒绝任何未通过注册门的 train/held-out cache；训练后的 held-out probe 门固定为 full IoU≥0.65、dynamic/new-occupancy IoU≥0.40、gripper recall≥0.70，且这四项同时超过 copy-initial 和 train-mean。失败 probe 会保留作负结果，但 checkpoint 写入 `approved_for_alignment=false`，`LatentRobotMaskProbe.from_pretrained` 会硬拒绝加载。
 
-服务器已排队一个单 episode 注册 smoke，固定 commit `b508ec4`、GPU 5，并等待现有 Stage-1 与 post-gate watcher 全部退出后才执行；状态位于 `/home/ubuntu/project/WM/gwp-action-video-results/clean_latent_probe_registration_smoke_op81/status`。只有该 smoke 通过上述固定门，才生成完整 200/50 demonstration-mask cache；不会先跑大规模数据再根据结果放宽标准。
+服务器已排队一个单 episode 注册 smoke，固定 commit `6bfd735` 和 GPU 5，只等待 Stage-1 退出；post-gate 控制固定使用 GPU 2/3/4，二者可以安全并行。当前状态位于 `/home/ubuntu/project/WM/gwp-action-video-results/clean_latent_probe_registration_smoke_op88/status`。只有该 smoke 通过上述固定门，才生成完整 200/50 demonstration-mask cache；不会先跑大规模数据再根据结果放宽标准。
 
 probe 的真实视频输入与正式 GWP 固定为同一双视图布局：`agent-view | wrist-view` 横向拼接成 256×512 后再过同一个 Wan VAE，而不是用单 agent-view latent 训练 probe、再外推到双视图 latent。监督 target/valid 同样是 256×512，但只有左侧 agent-view valid=1，右侧 wrist valid=0。真实 LeRobot 单样本审计已验证输入 `[5,3,256,512]`、未来 mask/valid `[4,256,512]`、左侧有效像素 262144、右侧有效像素严格为 0；该改动只消除 probe 与 GWP 的输入分布混杂，没有改变注册门、probe gate 或 counterfactual loss。
+
+clean-latent 正式训练还增加一个训练前 action-conditioning gap gate，不能仅凭“GWP 在 expert action 下应该能生成视频”作为未经验证的前提。`scripts/evaluate_clean_latent_action_gap.py` 对每个 held-out 初态固定同一 future noise，分别评价 `expert correct/shuffled` 与 `policy correct/shuffled`，前者使用已注册的 demonstration mask，后者使用 predicted-action rollout mask；shuffle 均为 task 内无固定点循环置换。dynamic IoU、new-occupancy IoU、gripper recall 三项必须同时满足 `expert correct - expert shuffled > 0` 且该动作敏感性大于 policy-action 动作敏感性，才允许开始 clean-latent 对齐训练；报告同时保存逐样本效应和固定 seed 的 10,000 次 paired bootstrap CI。若 expert gate 失败，说明 one-step `sigma=1` clean estimate 尚不能表达 baseline 已有的视频能力，下一步只改少步 flow rollout，不训练当前 loss；若没有 expert-policy gap，则该方法的核心分布偏移叙事在当前表示上不成立。
+
+旧 Stage-1 evaluator 曾在 eval mode 向 `_forward_inference` 传入仅训练路径支持的 `output_action/output_visual` 参数；mini MoT 实测会报 `unexpected keyword argument`。旧等待型 pipeline 在任何正式 action/cache/matched/full 产物生成前已终止并归档到 `counterfactual_mask_stage1_v3_pipeline_30k_ema_superseded_02a9b97_20260813T1007Z`，没有删除。新 pipeline 固定到已同时通过 hidden-head 与 clean-latent 前向 smoke 的 commit `6bfd735`，代码记录、preflight、训练、held-out evaluator 与 post-gate target 使用同一 commit；当前结果根仍为 `counterfactual_mask_stage1_v3_pipeline_30k_ema`。
 
 ## 结果位置
 
