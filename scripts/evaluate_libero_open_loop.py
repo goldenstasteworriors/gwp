@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -28,12 +29,40 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--suite", required=True, help="LIBERO suite name used to namespace prompt caches")
-    parser.add_argument("--episodes", type=int, nargs="+")
+    episode_group = parser.add_mutually_exclusive_group()
+    episode_group.add_argument("--episodes", type=int, nargs="+")
+    episode_group.add_argument(
+        "--episodes-file",
+        type=Path,
+        help="Text file containing one episode index per line.",
+    )
     parser.add_argument("--episodes-per-task", type=int, default=2)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=11421)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_episode_file(path: Path) -> list[int]:
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    try:
+        episodes = [int(token) for token in path.read_text(encoding="utf-8").split()]
+    except ValueError as error:
+        raise ValueError(f"Episode file must contain only integers: {path}") from error
+    if not episodes:
+        raise ValueError(f"Episode file is empty: {path}")
+    if len(episodes) != len(set(episodes)):
+        raise ValueError(f"Episode file contains duplicate indices: {path}")
+    return episodes
 
 
 def load_prompt(path: Path) -> torch.Tensor:
@@ -138,7 +167,12 @@ def main() -> None:
         raise FileNotFoundError(f"No parquet data under {args.dataset_root}")
     columns = ["index", "episode_index", "frame_index", "task_index", "observation.state", "action"]
     frames = pd.concat([pd.read_parquet(path, columns=columns) for path in parquet_paths], ignore_index=True)
-    episodes = select_episodes(frames, args.episodes, args.episodes_per_task)
+    explicit_episodes = (
+        read_episode_file(args.episodes_file)
+        if args.episodes_file is not None
+        else args.episodes
+    )
+    episodes = select_episodes(frames, explicit_episodes, args.episodes_per_task)
     grouped = {
         episode: frames[frames["episode_index"] == episode].sort_values("frame_index")
         for episode in episodes
@@ -190,6 +224,12 @@ def main() -> None:
     task_ids = sorted({row["task_id"] for row in rows})
     summary = {
         "num_episodes": len(rows),
+        "episode_selection_file": (
+            str(args.episodes_file.resolve()) if args.episodes_file is not None else None
+        ),
+        "episode_selection_sha256": (
+            sha256_file(args.episodes_file) if args.episodes_file is not None else None
+        ),
         "mse": float(np.mean([row["mse"] for row in rows])),
         "translation_mse": float(np.mean([row["translation_mse"] for row in rows])),
         "rotation_mse": float(np.mean([row["rotation_mse"] for row in rows])),

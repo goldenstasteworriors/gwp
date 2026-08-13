@@ -39,7 +39,13 @@ def parse_args() -> argparse.Namespace:
         help="Checkpoint or run identifier used to produce the predicted actions.",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--episodes", type=int, nargs="+")
+    episode_group = parser.add_mutually_exclusive_group()
+    episode_group.add_argument("--episodes", type=int, nargs="+")
+    episode_group.add_argument(
+        "--episodes-file",
+        type=Path,
+        help="Text file containing one episode index per line.",
+    )
     parser.add_argument("--horizons", type=int, nargs="+", default=[0, 12, 24, 36, 48])
     parser.add_argument("--camera-name", default="agentview")
     parser.add_argument("--width", type=int, default=256)
@@ -88,6 +94,20 @@ def discover_predictions(root: Path, episodes: list[int] | None) -> dict[int, Pa
     if missing:
         raise FileNotFoundError(f"Missing predictions for episodes: {missing}")
     return {episode: discovered[episode] for episode in requested}
+
+
+def read_episode_file(path: Path) -> list[int]:
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    try:
+        episodes = [int(token) for token in path.read_text(encoding="utf-8").split()]
+    except ValueError as error:
+        raise ValueError(f"Episode file must contain only integers: {path}") from error
+    if not episodes:
+        raise ValueError(f"Episode file is empty: {path}")
+    if len(episodes) != len(set(episodes)):
+        raise ValueError(f"Episode file contains duplicate indices: {path}")
+    return episodes
 
 
 def load_episode_index(dataset_root: Path) -> dict[int, tuple[int, int]]:
@@ -179,7 +199,12 @@ def main() -> None:
     if args.output_dir.exists():
         raise FileExistsError(f"Refusing to overwrite output directory: {args.output_dir}")
 
-    predictions = discover_predictions(args.predictions_root, args.episodes)
+    explicit_episodes = (
+        read_episode_file(args.episodes_file)
+        if args.episodes_file is not None
+        else args.episodes
+    )
+    predictions = discover_predictions(args.predictions_root, explicit_episodes)
     episode_index = load_episode_index(args.dataset_root)
     unknown = sorted(set(predictions) - set(episode_index))
     if unknown:
@@ -273,6 +298,12 @@ def main() -> None:
         "dataset_info_sha256": dataset_info_sha256,
         "predictions_root": str(args.predictions_root.resolve()),
         "policy_id": args.policy_id,
+        "episode_selection_file": (
+            str(args.episodes_file.resolve()) if args.episodes_file is not None else None
+        ),
+        "episode_selection_sha256": (
+            sha256_file(args.episodes_file) if args.episodes_file is not None else None
+        ),
         "source_observation_semantics": (
             "LIBERO episode initial observation after num_steps_wait; every target horizon "
             "is measured after executing that many actions from the cached chunk"
