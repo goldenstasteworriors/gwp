@@ -67,6 +67,25 @@ def copy_initial_mask_baseline(initial_mask: np.ndarray, num_horizons: int) -> n
     return np.repeat((initial_mask > 0)[None], int(num_horizons), axis=0)
 
 
+def per_horizon_mean_mask_baseline(
+    training_masks: np.ndarray,
+    *,
+    threshold: float = 0.5,
+) -> np.ndarray:
+    """Build an action- and observation-independent mask prior from training data."""
+
+    training_masks = np.asarray(training_masks)
+    if training_masks.ndim != 4:
+        raise ValueError(
+            f"Expected training masks with shape [N, T, H, W], got {training_masks.shape}"
+        )
+    if training_masks.shape[0] == 0:
+        raise ValueError("At least one training trajectory is required")
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError(f"threshold must be in [0, 1], got {threshold}")
+    return (training_masks > 0).mean(axis=0) >= threshold
+
+
 def _masked_overlap_metrics(
     predicted: np.ndarray,
     target: np.ndarray,
