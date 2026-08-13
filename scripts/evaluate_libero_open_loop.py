@@ -25,6 +25,10 @@ os.environ.setdefault("GIGA_MODELS_LIGHT_IMPORT", "1")
 from giga_models.sockets import RobotInferenceClient  # noqa: E402
 
 
+DEFAULT_AGENT_VIEW_KEY = "observation.images.image"
+DEFAULT_WRIST_VIEW_KEY = "observation.images.wrist_image"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-root", type=Path, required=True)
@@ -39,6 +43,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes-per-task", type=int, default=2)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=11421)
+    parser.add_argument("--num-views", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--agent-view-key", default=DEFAULT_AGENT_VIEW_KEY)
+    parser.add_argument("--wrist-view-key", default=DEFAULT_WRIST_VIEW_KEY)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()
 
@@ -107,6 +114,7 @@ def decode_episode_first_frames(
     dataset_root: Path,
     episodes: list[int],
     fps: float,
+    view_key: str = DEFAULT_AGENT_VIEW_KEY,
 ) -> dict[int, np.ndarray]:
     """Resolve each episode through LeRobot v3 video shard metadata."""
 
@@ -115,9 +123,9 @@ def decode_episode_first_frames(
         raise FileNotFoundError(f"No episode metadata under {dataset_root / 'meta/episodes'}")
     columns = [
         "episode_index",
-        "videos/observation.images.image/chunk_index",
-        "videos/observation.images.image/file_index",
-        "videos/observation.images.image/from_timestamp",
+        f"videos/{view_key}/chunk_index",
+        f"videos/{view_key}/file_index",
+        f"videos/{view_key}/from_timestamp",
     ]
     metadata = pd.concat(
         [pd.read_parquet(path, columns=columns) for path in metadata_paths], ignore_index=True
@@ -127,9 +135,9 @@ def decode_episode_first_frames(
         if episode not in metadata.index:
             raise ValueError(f"No video metadata for episode {episode}")
         row = metadata.loc[episode]
-        chunk = int(row["videos/observation.images.image/chunk_index"])
-        file_index = int(row["videos/observation.images.image/file_index"])
-        local_frame = int(round(float(row["videos/observation.images.image/from_timestamp"]) * fps))
+        chunk = int(row[f"videos/{view_key}/chunk_index"])
+        file_index = int(row[f"videos/{view_key}/file_index"])
+        local_frame = int(round(float(row[f"videos/{view_key}/from_timestamp"]) * fps))
         requests_by_shard.setdefault((chunk, file_index), {})[episode] = local_frame
 
     images: dict[int, np.ndarray] = {}
@@ -137,7 +145,7 @@ def decode_episode_first_frames(
         video_path = (
             dataset_root
             / "videos"
-            / "observation.images.image"
+            / view_key
             / f"chunk-{chunk:03d}"
             / f"file-{file_index:03d}.mp4"
         )
@@ -178,7 +186,20 @@ def main() -> None:
         for episode in episodes
     }
     info = json.loads((args.dataset_root / "meta" / "info.json").read_text())
-    images = decode_episode_first_frames(args.dataset_root, episodes, float(info["fps"]))
+    agent_images = decode_episode_first_frames(
+        args.dataset_root,
+        episodes,
+        float(info["fps"]),
+        args.agent_view_key,
+    )
+    wrist_images = None
+    if args.num_views == 2:
+        wrist_images = decode_episode_first_frames(
+            args.dataset_root,
+            episodes,
+            float(info["fps"]),
+            args.wrist_view_key,
+        )
 
     client = RobotInferenceClient(host=args.host, port=args.port)
     sent_tasks: set[int] = set()
@@ -192,13 +213,15 @@ def main() -> None:
             actions = np.concatenate([actions, np.repeat(actions[-1:], 48 - len(actions), axis=0)])
         target = actions[:48]
         request = {
-            "image": images[episode],
+            "image": agent_images[episode],
             "state": np.asarray(group.iloc[0]["observation.state"], dtype=np.float32),
             "prompt_key": f"{args.suite}:{task_id}",
             "task_id": task_id,
             "episode_index": episode,
             "chunk_index": 0,
         }
+        if wrist_images is not None:
+            request["wrist_image"] = wrist_images[episode]
         if task_id not in sent_tasks:
             prompt_episode = int(task_prompt_episode[task_id])
             request["prompt_embedding"] = load_prompt(
@@ -224,6 +247,12 @@ def main() -> None:
     task_ids = sorted({row["task_id"] for row in rows})
     summary = {
         "num_episodes": len(rows),
+        "num_views": args.num_views,
+        "view_keys": (
+            [args.agent_view_key]
+            if args.num_views == 1
+            else [args.agent_view_key, args.wrist_view_key]
+        ),
         "episode_selection_file": (
             str(args.episodes_file.resolve()) if args.episodes_file is not None else None
         ),
