@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,28 @@ def jsonable(value: Any) -> Any:
     if isinstance(value, np.generic):
         return value.item()
     return value
+
+
+def configure_libero_path(dataset_root: Path) -> Path:
+    """Resolve a non-interactive LIBERO config before importing LIBERO."""
+
+    configured = os.environ.get("LIBERO_CONFIG_PATH")
+    if configured:
+        config_path = Path(configured).expanduser().resolve() / "config.yaml"
+        if not config_path.is_file():
+            raise FileNotFoundError(
+                f"LIBERO_CONFIG_PATH does not contain config.yaml: {config_path}"
+            )
+        return config_path
+    resolved = dataset_root.resolve()
+    for parent in (resolved, *resolved.parents):
+        config_path = parent / "libero_config" / "config.yaml"
+        if config_path.is_file():
+            os.environ["LIBERO_CONFIG_PATH"] = str(config_path.parent)
+            return config_path
+    raise FileNotFoundError(
+        f"Could not discover libero_config/config.yaml from {dataset_root}"
+    )
 
 
 def discover_predictions(root: Path, episodes: list[int] | None) -> dict[int, Path]:
@@ -224,6 +247,7 @@ def main() -> None:
     episodes_dir = args.output_dir / "episodes"
     episodes_dir.mkdir()
 
+    libero_config_path = configure_libero_path(args.dataset_root)
     from lerobot.envs.libero import LiberoEnv, _get_suite
 
     suite = _get_suite(args.suite)
@@ -302,6 +326,8 @@ def main() -> None:
         "suite": args.suite,
         "dataset_root": str(args.dataset_root.resolve()),
         "dataset_info_sha256": dataset_info_sha256,
+        "libero_config_path": str(libero_config_path),
+        "libero_config_sha256": sha256_file(libero_config_path),
         "predictions_root": str(args.predictions_root.resolve()),
         "policy_id": args.policy_id,
         "episode_selection_file": (

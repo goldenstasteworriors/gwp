@@ -88,6 +88,11 @@ def audit_cache(
         raise ValueError(f"Cache/split dataset root mismatch: {manifest_path}")
     if manifest.get("dataset_info_sha256") != split_manifest.get("dataset_info_sha256"):
         raise ValueError(f"Cache/split dataset hash mismatch: {manifest_path}")
+    libero_config_path = Path(str(manifest.get("libero_config_path"))).resolve()
+    if not libero_config_path.is_file():
+        raise FileNotFoundError(f"Cache LIBERO config is missing: {libero_config_path}")
+    if manifest.get("libero_config_sha256") != sha256_file(libero_config_path):
+        raise ValueError(f"Cache LIBERO config changed: {manifest_path}")
     if Path(str(manifest.get("policy_id"))).resolve() != checkpoint.resolve():
         raise ValueError(f"Cache policy_id does not match checkpoint: {manifest_path}")
     if manifest.get("episode_selection_sha256") != sha256_file(selection_file):
@@ -178,6 +183,7 @@ def audit_cache(
                 "policy_id",
                 "camera_name",
                 "image_orientation",
+                "libero_config_sha256",
                 "image_size",
                 "num_steps_wait",
             )

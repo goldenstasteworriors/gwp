@@ -84,12 +84,35 @@ def to_jsonable(value: Any) -> Any:
     return value
 
 
+def configure_libero_path(dataset_root: Path) -> Path:
+    """Resolve a non-interactive LIBERO config before importing LIBERO."""
+
+    configured = os.environ.get("LIBERO_CONFIG_PATH")
+    if configured:
+        config_path = Path(configured).expanduser().resolve() / "config.yaml"
+        if not config_path.is_file():
+            raise FileNotFoundError(
+                f"LIBERO_CONFIG_PATH does not contain config.yaml: {config_path}"
+            )
+        return config_path
+    resolved = dataset_root.resolve()
+    for parent in (resolved, *resolved.parents):
+        config_path = parent / "libero_config" / "config.yaml"
+        if config_path.is_file():
+            os.environ["LIBERO_CONFIG_PATH"] = str(config_path.parent)
+            return config_path
+    raise FileNotFoundError(
+        f"Could not discover libero_config/config.yaml from {dataset_root}"
+    )
+
+
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     prompts = task_prompt_files(args.dataset_root)
     client = RobotInferenceClient(host=args.host, port=args.port)
 
+    configure_libero_path(args.dataset_root)
     from lerobot.envs.libero import LiberoEnv, _get_suite
 
     suite = _get_suite(args.suite)
