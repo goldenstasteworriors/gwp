@@ -237,8 +237,12 @@ def validate_clean_latent_gates(
     ):
         raise ValueError("Probe gate used different registration thresholds")
 
-    if gap_report.get("schema_version") != "clean-latent-action-conditioning-gap-v1":
+    if gap_report.get("schema_version") != "clean-latent-action-conditioning-gap-v2":
         raise ValueError(f"Unexpected action-gap report schema: {gap_report_path}")
+    if gap_report.get("gate_semantics") != (
+        "paired_bootstrap_ci95_low_strictly_positive"
+    ):
+        raise ValueError("Action-gap report used different statistical gate semantics")
     expected_gap_checks = {
         f"{prefix}.{metric}"
         for metric in (
@@ -259,6 +263,25 @@ def validate_clean_latent_gates(
         or not all(value is True for value in gap_checks.values())
     ):
         raise RuntimeError(f"Expert-policy action gap did not pass: {gap_report_path}")
+    gap_bootstrap = gap_report.get("bootstrap", {})
+    for section in ("expert_sensitivity", "gap"):
+        section_values = gap_bootstrap.get(section, {})
+        for metric in (
+            "dynamic_iou",
+            "new_occupancy_iou",
+            "gripper_region_recall",
+        ):
+            interval = section_values.get(metric, {})
+            lower = interval.get("ci95_low")
+            if (
+                not isinstance(lower, (int, float))
+                or isinstance(lower, bool)
+                or not float(lower) > 0.0
+            ):
+                raise RuntimeError(
+                    f"Action-gap bootstrap lower bound did not pass: "
+                    f"{section}.{metric}={lower!r}"
+                )
     if Path(str(gap_report.get("checkpoint"))).resolve() != checkpoint:
         raise ValueError("Action-gap report used a different baseline checkpoint")
     if Path(str(gap_report.get("vae"))).resolve() != vae:

@@ -424,22 +424,30 @@ def main() -> None:
         sensitivity["expert"][key] = float(expert_values.mean())
         sensitivity["policy"][key] = float(policy_values.mean())
         gap[key] = float(gap_values.mean())
-        bootstrap["expert_sensitivity"][key] = paired_bootstrap(
+        expert_bootstrap = paired_bootstrap(
             expert_values, args.bootstrap_samples, args.seed + key_index
         )
-        bootstrap["policy_sensitivity"][key] = paired_bootstrap(
+        policy_bootstrap = paired_bootstrap(
             policy_values, args.bootstrap_samples, args.seed + 100 + key_index
         )
-        bootstrap["gap"][key] = paired_bootstrap(
+        gap_bootstrap = paired_bootstrap(
             gap_values, args.bootstrap_samples, args.seed + 200 + key_index
         )
-        checks[f"expert_action_sensitive.{key}"] = sensitivity["expert"][key] > 0.0
-        checks[f"expert_sensitivity_exceeds_policy.{key}"] = gap[key] > 0.0
+        bootstrap["expert_sensitivity"][key] = expert_bootstrap
+        bootstrap["policy_sensitivity"][key] = policy_bootstrap
+        bootstrap["gap"][key] = gap_bootstrap
+        checks[f"expert_action_sensitive.{key}"] = (
+            expert_bootstrap["ci95_low"] > 0.0
+        )
+        checks[f"expert_sensitivity_exceeds_policy.{key}"] = (
+            gap_bootstrap["ci95_low"] > 0.0
+        )
     status = "passed" if all(checks.values()) else "failed"
     report = {
-        "schema_version": "clean-latent-action-conditioning-gap-v1",
+        "schema_version": "clean-latent-action-conditioning-gap-v2",
         "status": status,
         "alignment_training_allowed": status == "passed",
+        "gate_semantics": "paired_bootstrap_ci95_low_strictly_positive",
         "checkpoint": str(args.checkpoint.resolve()),
         "vae": str(args.vae.resolve()),
         "dataset": str(args.dataset.resolve()),
