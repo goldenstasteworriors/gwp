@@ -9,6 +9,8 @@ PROJECT=${GWP_CF_PROJECT:-/home/ubuntu/project/WM/gwp-action-video-consequence-a
 RESULT_ROOT=${GWP_CF_RESULT_ROOT:-/home/ubuntu/project/WM/gwp-action-video-results/counterfactual_mask_stage1_v3_pipeline_30k_ema}
 BASELINE_ROOT=${GWP_CF_BASELINE_ROOT:-/home/ubuntu/project/WM/gwp-action-video-results/libero_standard4_gwp05_official_30k_4gpu_2cam}
 CHECKPOINT=${GWP_CF_CHECKPOINT:-$BASELINE_ROOT/models/checkpoint_epoch_2_step_30000/transformer_ema}
+BASELINE_EVAL_PID_FILE=${GWP_CF_BASELINE_EVAL_PID_FILE:-$BASELINE_ROOT/auto_eval.pid}
+BASELINE_EVAL_OUTPUT=${GWP_CF_BASELINE_EVAL_OUTPUT:-$BASELINE_ROOT/closed_loop_standard4_10x10_ema}
 RAW_DEMOS=${GWP_CF_RAW_DEMOS:-/home/ubuntu/project/WM/datasets/LIBERO_raw/libero_spatial}
 DATASET=${GWP_CF_DATASET:-/home/ubuntu/project/WM/datasets/LIBERO_LeRobot_v3/libero_spatial}
 NORM_STATS=${GWP_CF_NORM_STATS:-/home/ubuntu/project/WM/datasets/LIBERO_LeRobot_v3/norm_stats_wam_48_standard4.json}
@@ -69,6 +71,17 @@ wait_for_gpus() {
     done
 }
 
+process_is_baseline_evaluator() {
+    local pid=$1
+    local command
+    if [ ! -r "/proc/$pid/cmdline" ]; then
+        return 1
+    fi
+    command=$(tr '\0' ' ' < "/proc/$pid/cmdline")
+    [[ "$command" == *"evaluate_libero_standard4_parallel.py"* ]] && \
+        [[ "$command" == *"$BASELINE_EVAL_OUTPUT"* ]]
+}
+
 mkdir -p "$RESULT_ROOT/logs"
 trap cleanup EXIT
 cd "$PROJECT"
@@ -81,6 +94,7 @@ test -d "$DATASET"
 test -f "$NORM_STATS"
 test -d "$WAN"
 test -d "$VAE"
+test -f "$BASELINE_EVAL_PID_FILE"
 test -f "$SPLIT_ROOT/train_episodes.txt"
 test -f "$SPLIT_ROOT/heldout_episodes.txt"
 test -f "$SMOKE_CACHE/manifest.json"
@@ -108,6 +122,15 @@ status waiting_checkpoint
 while [ ! -d "$CHECKPOINT" ]; do
     sleep 60
 done
+
+status waiting_baseline_evaluation
+BASELINE_EVAL_PID=$(cat "$BASELINE_EVAL_PID_FILE")
+[[ "$BASELINE_EVAL_PID" =~ ^[1-9][0-9]*$ ]]
+while process_is_baseline_evaluator "$BASELINE_EVAL_PID"; do
+    sleep 60
+done
+"$POLICY_PYTHON" -B -c 'import json,sys; from pathlib import Path; summary=json.loads(Path(sys.argv[1]).read_text()); expected=Path(sys.argv[2]).resolve(); assert Path(summary["checkpoint"]).resolve()==expected; assert int(summary["num_rollouts"])==400; assert set(summary["suites"])=={"libero_spatial","libero_object","libero_goal","libero_10"}; assert all(int(value["num_rollouts"])==100 for value in summary["suites"].values())' \
+    "$BASELINE_EVAL_OUTPUT/summary.json" "$CHECKPOINT"
 
 status waiting_gpus_for_smoke
 wait_for_gpus

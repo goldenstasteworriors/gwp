@@ -74,16 +74,26 @@ def process_alive(pid: int) -> bool:
     return True
 
 
+def checkpoint_ready(path: Path) -> bool:
+    if not path.is_dir() or not (path / "config.json").is_file():
+        return False
+    weight_files = sorted(path.glob("*.bin")) + sorted(path.glob("*.safetensors"))
+    return bool(weight_files) and all(file.is_file() and file.stat().st_size > 0 for file in weight_files)
+
+
 def wait_for_checkpoint(path: Path, timeout: int, training_pid: int | None) -> None:
-    if path.is_dir():
+    if checkpoint_ready(path) and (training_pid is None or not process_alive(training_pid)):
         return
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if training_pid is not None and not process_alive(training_pid):
-            raise RuntimeError(f"Training process {training_pid} exited before checkpoint appeared: {path}")
-        time.sleep(60)
-        if path.is_dir():
+        training_alive = training_pid is not None and process_alive(training_pid)
+        if not training_alive and checkpoint_ready(path):
             return
+        if training_pid is not None and not training_alive:
+            raise RuntimeError(
+                f"Training process {training_pid} exited before a complete checkpoint appeared: {path}"
+            )
+        time.sleep(60)
     raise TimeoutError(f"Checkpoint did not appear within {timeout}s: {path}")
 
 

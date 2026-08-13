@@ -172,6 +172,8 @@ cache schema 现升级为 `libero-counterfactual-robot-mask-v3`：生成器必�
 
 服务器 `/home/ubuntu/project/WM/gwp-action-video-results/counterfactual_mask_stage1_v3_pipeline_30k_ema/raw_demo_verification.json` 已对 10/10 文件通过精确字节数和 SHA256 检查，pipeline 随后进入 `waiting_checkpoint`。为防止 30k baseline 的模型、EMA 和 DeepSpeed resumability state 挤满结果盘，`scripts/compact_completed_checkpoint.py` 只在训练 PID 退出且 `transformer`/`transformer_ema` 各自的推理权重均超过下限后删除同一 checkpoint 的 optimizer/`pytorch_model` 状态，并保留 JSON 审计报告；它不会删除任一推理权重。
 
+baseline 的四套件评测和 stage-1 都使用 GPU 2–5，因此不能在 checkpoint 刚出现时竞态启动。`scripts/evaluate_libero_standard4_parallel.py` 现在要求训练 PID 已退出且 checkpoint 同时存在 config 和非空权重文件；stage-1 pipeline 则继续等待 baseline 评测进程结束，并验证四个 suite 各 100、总计 400 rollout 的 `summary.json` 与 30k EMA checkpoint 一致，之后才允许执行 smoke 和 action/cache 导出。
+
 两组训练统一通过 `scripts/launch_counterfactual_stage1_train.py` 启动。launcher 只接受当前 Git commit 生成且输入未变更的 passed preflight 报告，固定 GPU 2–5、200 steps、单卡 batch 1、梯度累积 4、seed 6666 和 mask weight 0.1，并为两组生成相同的 `comparison_id`。`matched` 与 `full` 的唯一训练差异分别为 `mask weight=0 + compute-control=1` 和 `mask weight=0.1 + compute-control=0`；若另一组 manifest 的公共设置不同则拒绝启动。
 
 GigaTrain 在 `Trainer.__init__` 中先调用 `set_seed(seed)`，随后才在 `prepare()` 中构造模型，因此 baseline checkpoint 中不存在的新 mask head 应在两组中得到相同初始化。trainer 额外记录 `Counterfactual mask head initial SHA256`；正式结果审计要求 matched/full 日志中的该哈希完全相同，以直接排除随机 head 初始化差异。
