@@ -244,6 +244,8 @@ robot trajectory + scene -> contact / object response -> future observation
 
 服务器已排队一个单 episode 注册 smoke，固定 commit `b508ec4`、GPU 5，并等待现有 Stage-1 与 post-gate watcher 全部退出后才执行；状态位于 `/home/ubuntu/project/WM/gwp-action-video-results/clean_latent_probe_registration_smoke_op81/status`。只有该 smoke 通过上述固定门，才生成完整 200/50 demonstration-mask cache；不会先跑大规模数据再根据结果放宽标准。
 
+probe 的真实视频输入与正式 GWP 固定为同一双视图布局：`agent-view | wrist-view` 横向拼接成 256×512 后再过同一个 Wan VAE，而不是用单 agent-view latent 训练 probe、再外推到双视图 latent。监督 target/valid 同样是 256×512，但只有左侧 agent-view valid=1，右侧 wrist valid=0。真实 LeRobot 单样本审计已验证输入 `[5,3,256,512]`、未来 mask/valid `[4,256,512]`、左侧有效像素 262144、右侧有效像素严格为 0；该改动只消除 probe 与 GWP 的输入分布混杂，没有改变注册门、probe gate 或 counterfactual loss。
+
 ## 结果位置
 
 - Spatial 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_spatial_1000step/<method>/`
