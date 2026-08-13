@@ -103,7 +103,7 @@ git rev-parse HEAD > "$RESULT_ROOT/code_commit.txt"
 
 for path in "$ACTIONS_TRAIN" "$ACTIONS_HELDOUT" "$CACHE_TRAIN" \
     "$CACHE_HELDOUT" "$MATCHED_OUTPUT" "$FULL_OUTPUT" "$PREFLIGHT_REPORT" \
-    "$MATCHED_EVAL" "$FULL_EVAL" "$PAIR_AUDIT" "$VIDEO_SPLIT_AUDIT"; do
+    "$MATCHED_EVAL" "$FULL_EVAL" "$PAIR_AUDIT"; do
     test ! -e "$path"
 done
 
@@ -120,12 +120,18 @@ status hashing_raw_demos
     > "$RESULT_ROOT/raw_demo_verification.json"
 
 status auditing_selected_videos
-"$POLICY_PYTHON" -B scripts/audit_lerobot_video_split.py \
-    --dataset-root "$DATASET" \
-    --episodes-file "$SPLIT_ROOT/train_episodes.txt" \
-    --episodes-file "$SPLIT_ROOT/heldout_episodes.txt" \
-    --report "$VIDEO_SPLIT_AUDIT" \
-    > "$RESULT_ROOT/logs/video_split_audit.log" 2>&1
+if [ -f "$VIDEO_SPLIT_AUDIT" ]; then
+    "$POLICY_PYTHON" -B -c 'import hashlib,json,sys; from pathlib import Path; report=json.loads(Path(sys.argv[1]).read_text()); dataset=Path(sys.argv[2]).resolve(); files=[Path(value).resolve() for value in sys.argv[3:]]; digest=lambda path:hashlib.sha256(path.read_bytes()).hexdigest(); sources=report["episode_sources"]; assert report["status"]=="passed"; assert Path(report["dataset_root"]).resolve()==dataset; assert report["num_episodes"]==250 and report["horizons"]==[0,12,24,36,48]; assert report["view_keys"]==["observation.images.image","observation.images.wrist_image"]; assert report["video_backend"]=="pyav" and report["zero_or_constant_fallbacks"]==0; assert [Path(value["path"]).resolve() for value in sources]==files; assert [value["sha256"] for value in sources]==[digest(path) for path in files]' \
+        "$VIDEO_SPLIT_AUDIT" "$DATASET" \
+        "$SPLIT_ROOT/train_episodes.txt" "$SPLIT_ROOT/heldout_episodes.txt"
+else
+    "$POLICY_PYTHON" -B scripts/audit_lerobot_video_split.py \
+        --dataset-root "$DATASET" \
+        --episodes-file "$SPLIT_ROOT/train_episodes.txt" \
+        --episodes-file "$SPLIT_ROOT/heldout_episodes.txt" \
+        --report "$VIDEO_SPLIT_AUDIT" \
+        > "$RESULT_ROOT/logs/video_split_audit.log" 2>&1
+fi
 
 status waiting_checkpoint
 while [ ! -d "$CHECKPOINT" ]; do
