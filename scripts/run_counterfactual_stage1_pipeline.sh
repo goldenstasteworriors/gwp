@@ -74,7 +74,7 @@ trap cleanup EXIT
 cd "$PROJECT"
 
 status validating_static_inputs
-test -d "$PROJECT/.git"
+test -e "$PROJECT/.git"
 test -z "$(git status --porcelain --untracked-files=no)"
 test -d "$RAW_DEMOS"
 test -d "$DATASET"
