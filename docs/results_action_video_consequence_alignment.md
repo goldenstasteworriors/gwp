@@ -146,6 +146,8 @@ Object 上的微小改善来自夹爪项（0.0407 vs 0.0484），但平移和旋
 2. `counterfactual-mask full`：数据、初始化、步数、batch、随机种子均相同，增加 mask BCE+Dice，允许 mask 梯度更新共享 backbone 和 mask head。
 3. 暂不立即运行 `head-only`。只有 full 方法在 held-out 上的 correct-action 指标明显优于 shuffled-action，并且优于 copy-initial/mean-mask，才运行 head-only 来判断收益是否只来自新 head。
 
+服务器当前单个 FP32 5B transformer checkpoint 约 23 GB，且框架的 `checkpoint_save_optimizer=False` 不会删除唯一/最新 checkpoint 的 optimizer。为避免两个对照挤满磁盘，stage-1 明确设置 `GWP_WITH_EMA=0`、`GWP_CHECKPOINT_MODEL_DTYPE=bf16` 和 `GWP_STRIP_OPTIMIZER_AFTER_CHECKPOINT=1`：只将推理模型浮点张量以 BF16 保存，并在保存后移除本次运行的 optimizer/DeepSpeed resumability state。原始30k baseline checkpoint不受影响；stage-1 checkpoint不能用于精确恢复 optimizer，但可直接用于推理和 held-out 评测。
+
 第一阶段机制 gate 为 held-out `correct - shuffled` 的 dynamic IoU、new-occupancy IoU 和 gripper recall 均为正，并且 correct-action 超过两个 action-independent baseline。未通过时停止增加训练预算，先检查 action conditioning 或更换监督表示；通过后才比较同预算动作误差和 LIBERO success rate。
 
 mini MoT 的 mask-only backward 已确认这条机制在计算图上成立：mask head、visual patch embedding、action encoder、state encoder 和 joint-attention blocks 的梯度绝对值和均非零；未调用的 action decoder 与 RGB `proj_out` 梯度为 0。也就是说 mask supervision 会训练“如何把动作 token 作为未来视觉 consequence 的条件”以及共享交互层，但不会把 mask loss 直接当成 action decoder 的目标；动作输出是否改善仍必须由 matched-data control 和控制评测决定。
