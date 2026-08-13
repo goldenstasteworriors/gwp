@@ -336,7 +336,9 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         "GWP_COUNTERFACTUAL_MASK_DICE_WEIGHT": "1.0",
         "GWP_SEED": str(args.seed),
         "GWP_VISUAL_LOSS_WEIGHT": "1.0",
-        "GWP_ACTION_LOSS_WEIGHT": "1.0",
+        # Preserve the official 30k baseline objective; the mask term is the
+        # only intended scientific difference between matched and full.
+        "GWP_ACTION_LOSS_WEIGHT": "5.0",
         "GWP_COUNTERFACTUAL_MASK_WEIGHT": (
             "0.0" if args.variant == "matched" else str(args.mask_weight)
         ),

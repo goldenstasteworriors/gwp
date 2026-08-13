@@ -182,6 +182,8 @@ pipeline 重启时允许复用已通过的视频审计，但会重新验证 data
 
 两组训练统一通过 `scripts/launch_counterfactual_stage1_train.py` 启动。launcher 只接受当前 Git commit 生成且输入未变更的 passed preflight 报告，固定 GPU 2–5、200 steps、单卡 batch 1、梯度累积 4、seed 6666 和 mask weight 0.1，并为两组生成相同的 `comparison_id`。`matched` 与 `full` 的唯一训练差异分别为 `mask weight=0 + compute-control=1` 和 `mask weight=0.1 + compute-control=0`；若另一组 manifest 的公共设置不同则拒绝启动。
 
+stage-1 继续使用 30k official baseline 的 `visual_loss_weight=1`、`action_loss_weight=5`、CAME8Bit `lr=6e-5` 和 constant scheduler；早期 launcher 曾误把 action weight 写成默认值 1，但在任何正式 stage-1 训练启动前已修正。因而 matched/full 相对 30k baseline 的共同变化只包含训练数据限定、200-step 预算、batch/梯度累积以及新增但零权重的 mask 计算图，不会额外改变动作/视频主损失的相对权重。
+
 GigaTrain 在 `Trainer.__init__` 中先调用 `set_seed(seed)`，随后才在 `prepare()` 中构造模型，因此 baseline checkpoint 中不存在的新 mask head 应在两组中得到相同初始化。trainer 额外记录 `Counterfactual mask head initial SHA256`；正式结果审计要求 matched/full 日志中的该哈希完全相同，以直接排除随机 head 初始化差异。
 
 两组训练与 held-out 评测完成后使用 `scripts/audit_counterfactual_stage1_pair.py` 做只读审计：它验证 preflight/launch 哈希、公共配置、仅允许的三个环境差异（输出目录、mask weight、compute-control）、初始 mask-head 哈希、step-200 compact checkpoint、50/200 held-out/train cache 和 taskwise derangement，并独立重算 mechanism gate。科学 gate 失败会被记录为 `mechanism_gate.status=failed`，但与产物损坏导致的 audit failure 明确区分。
