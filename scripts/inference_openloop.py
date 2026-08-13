@@ -614,12 +614,19 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                             action=action_input,
                             state=state,
                             action_only=True,
+                            allow_action_input_grad=rtc_config is not None,
                         )
 
                     with cache_context:
                         if rtc_config is None:
                             action_pred = predict_action_velocity(action)
                         else:
+                            if i == 0:
+                                # The visual/state prefix never depends on the noisy action.
+                                # Build it once without a graph, then differentiate only the
+                                # small action path during RTC guidance.
+                                with torch.no_grad():
+                                    predict_action_velocity(action)
                             action_pred = guided_flow_velocity(
                                 action,
                                 predict_action_velocity,
