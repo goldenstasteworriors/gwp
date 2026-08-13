@@ -200,6 +200,27 @@ mini MoT 的 mask-only backward 已确认这条机制在计算图上成立：mas
 
 服务器CPU机制审计进一步验证了两项不变量：future visual token可以读取完整48-step action chunk，而state/action/ref token均不能读取future visual noise；双视图训练中右侧wrist的valid mask为0，其logit梯度严格为0，改变右半屏伪target也不改变loss。因而当前分支既有动作到未来视觉的信息通路，也不会把未知wrist区域错误监督成背景。
 
+### 与 rendered-action / mask world model 前例的边界
+
+相关工作核对后，第一阶段的结论必须限定为“predicted-action consequence representation”，不能直接写成“预测 RGB 与动作已经对齐”：
+
+- [BridgeV2W](https://arxiv.org/abs/2602.03793) 将由 URDF、动作和相机参数渲染的 embodiment mask 作为 ControlNet-style **输入条件**，再用 logged action 对应的真实视频训练生成目标。它解决 coordinate action 到 pixel-space condition 的接口问题，但没有给偏离 logged action 的 policy prediction 构造 counterfactual RGB target。
+- [Robot-Factored World Models via Robot Rendering](https://arxiv.org/abs/2607.22535) 先用机器人控制器/运动学把命令实现成 deployment-available nominal trajectory，再渲染 URDF mesh RGB 与 depth 作为视频模型输入；真实视频仍来自 logged trajectory。其消融说明二维重叠不能表达接触与遮挡顺序，加入 end-effector/scene depth 后更好。该工作同时强调不能把 logged future state 直接作为 condition，否则会泄漏需要预测的 interaction outcome。
+- [Masked Visual Actions](https://arxiv.org/abs/2607.19343) 同样把部分可见的 robot/object trajectory 作为 pixel-space action interface；重点是 rendered action prompt，而不是在没有 counterfactual RGB 时监督 policy-predicted branch。
+- [Mask World Model](https://arxiv.org/abs/2604.19683) 把真实 demonstration 的未来语义 mask 经同一个 video VAE 编码，并以 flow matching 预训练 mask dynamics；第二阶段不再使用 mask loss，而是让 action diffusion head cross-attend 多层 predictive feature bank，并仅以 action loss 联合微调。它证明 mask-centric prediction 对控制可能有用，但没有处理“predicted action 无真实未来 RGB/mask”的反事实监督问题。
+- [Mask2Real-WM](https://arxiv.org/abs/2607.04546) 将 action-conditioned mask dynamics 与 mask-to-RGB rendering 拆成两阶段，是“先学可控几何、再恢复外观”的最近表示前例；其 mask target 来自仿真/真实轨迹，而非一个联合 WAM 自己预测动作所诱导的无 RGB 分支。
+
+当前实现把 mask head 接在 `visual_for_out` hidden tokens 上，而不经过 RGB `proj_out`。因此 held-out correct-action 超过 shuffled/copy/mean 只能证明这些 future visual tokens 学到了 predicted action 的可渲染机器人后果；它不能证明 RGB `proj_out` 生成的机器人位置也与该动作一致。这一点与 BridgeV2W 的“rendered mask 是输入条件”以及 MWM 的“mask 本身是生成目标”都不同，也是当前方案最重要的证伪边界。
+
+后续严格采用单变量分叉，不同时增加多个模块：
+
+1. 若第一阶段 mechanism gate 失败，停止控制评测，先修复 action conditioning 或监督时标，不增加 RGB/depth/object target。
+2. 若 mechanism gate 通过且 full 相对 matched 的控制收益为正，先运行既定 `head-only` 与 `GT-action mask`，判断收益来自共享 backbone 还是独立 head/普通 mask 辅助任务。
+3. 若 mechanism gate 通过但控制不提升，下一项最小实验不先扩大成完整 BridgeV2W/ControlNet，也不直接叠加 depth。只改变 **mask loss 的挂载点**：先在真实 RGB latent 与真实 robot mask 上后训练一个 mask probe 并冻结；counterfactual branch 从 RGB `proj_out` 的 flow 还原 predicted-clean video latent，经冻结 probe 得到 mask，再与同一 predicted-action rollout mask 比较。其余 action cache、200/50 split、预算、matched compute control 和 gate 保持不变。这样 mask loss 只有在 RGB 生成路径包含正确机器人几何时才能下降，可直接区分“独立 auxiliary head 学会了 mask”与“视频输出真的服从预测动作”。
+4. 只有第三步仍表现为“二维 mask 可学但接触相关控制不升”，才把 target 从 binary robot mask 单变量升级为 link-aware occupancy + robot/end-effector depth；依据 Robot-Factored 的结果，这一步针对的是 link 对应、遮挡顺序和假接触歧义，而不是再次更换整体架构。
+
+第三步仍不让 consistency loss 直接优化 action 数值：同一个 action 同时决定 rendered target 和 video condition，自一致性本身没有任务最优方向；若直接回传到 action，策略可能只选择视频模型最容易解释的动作。动作是否改善继续由共享表示与原始 expert action loss决定，并以 paired LIBERO success rate 作唯一控制结论。
+
 ## 结果位置
 
 - Spatial 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_spatial_1000step/<method>/`
