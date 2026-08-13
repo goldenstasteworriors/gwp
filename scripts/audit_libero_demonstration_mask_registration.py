@@ -25,6 +25,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--max-shift-px", type=int, default=8)
+    parser.add_argument("--position-p95-mm", type=float, default=5.0)
+    parser.add_argument("--rotation-p95-deg", type=float, default=2.0)
+    parser.add_argument("--gripper-p95-max-abs", type=float, default=0.003)
+    parser.add_argument("--shift-p95-px", type=float, default=4.0)
+    parser.add_argument("--full-rgb-mae-p95", type=float, default=10.0)
+    parser.add_argument("--shifted-robot-rgb-mae-p95", type=float, default=15.0)
     return parser.parse_args()
 
 
@@ -131,6 +137,16 @@ def main() -> None:
     args = parse_args()
     if args.max_shift_px < 0:
         raise ValueError("--max-shift-px must be non-negative")
+    thresholds = {
+        "position_error_mm.p95": args.position_p95_mm,
+        "rotation_error_deg.p95": args.rotation_p95_deg,
+        "gripper_max_abs.p95": args.gripper_p95_max_abs,
+        "best_shift_magnitude_px.p95": args.shift_p95_px,
+        "full_rgb_mae.p95": args.full_rgb_mae_p95,
+        "best_shift_robot_rgb_mae.p95": args.shifted_robot_rgb_mae_p95,
+    }
+    if any(value <= 0 for value in thresholds.values()):
+        raise ValueError("All registration thresholds must be positive")
     if args.report.exists():
         raise FileExistsError(f"Refusing to overwrite {args.report}")
     cache_root = args.cache.resolve()
@@ -268,9 +284,14 @@ def main() -> None:
             row["best_robot_shift"]["masked_rgb_mae"] for row in rows
         ],
     }
+    aggregate = {key: summarize(values) for key, values in metric_values.items()}
+    checks = {
+        key: float(aggregate[key.split(".")[0]][key.split(".")[1]]) <= threshold
+        for key, threshold in thresholds.items()
+    }
     report = {
         "schema_version": "libero-demonstration-mask-registration-audit-v1",
-        "status": "measured_not_yet_gated",
+        "status": "passed" if all(checks.values()) else "failed",
         "cache": str(cache_root),
         "manifest_sha256": sha256_file(manifest_path),
         "dataset_root": str(dataset_root),
@@ -279,7 +300,9 @@ def main() -> None:
         "max_shift_px": args.max_shift_px,
         "num_episodes": len(records),
         "num_frames": len(rows),
-        "aggregate": {key: summarize(values) for key, values in metric_values.items()},
+        "thresholds": thresholds,
+        "checks": checks,
+        "aggregate": aggregate,
         "frames": rows,
     }
     args.report.parent.mkdir(parents=True, exist_ok=True)

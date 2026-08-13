@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -67,6 +68,31 @@ class LatentRobotMaskProbe(nn.Module):
             height * self.spatial_scale,
             width * self.spatial_scale,
         )
+
+    def save_pretrained(self, path: str | Path) -> None:
+        from safetensors.torch import save_file
+
+        root = Path(path).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=False)
+        config = {
+            "class_name": type(self).__name__,
+            "latent_channels": self.latent_channels,
+            "frames_per_latent": self.frames_per_latent,
+            "spatial_scale": self.spatial_scale,
+        }
+        config_path = root / self.CONFIG_NAME
+        temporary_config = root / f".{self.CONFIG_NAME}.incomplete"
+        weights_path = root / self.WEIGHTS_NAME
+        temporary_weights = root / f".{self.WEIGHTS_NAME}.incomplete"
+        save_file(
+            {key: value.detach().cpu().contiguous() for key, value in self.state_dict().items()},
+            str(temporary_weights),
+        )
+        os.replace(temporary_weights, weights_path)
+        temporary_config.write_text(
+            json.dumps(config, indent=2) + "\n", encoding="utf-8"
+        )
+        os.replace(temporary_config, config_path)
 
     @classmethod
     def from_pretrained(cls, path: str | Path) -> "LatentRobotMaskProbe":
