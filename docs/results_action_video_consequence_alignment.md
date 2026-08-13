@@ -258,6 +258,8 @@ action-gap 中 expert action 的语义也做了真实数据核对：episode 0 �
 
 30k 共同 baseline 在 2026-08-13 10:28 UTC 于 step 17,940 收到 SIGTERM；日志最后一个完整 step 的 loss 有限，但进程未正常完成。该次运行只在 step 30,000 保存，因此 `models/` 为空，自动 evaluator 明确报出“training process exited before a complete checkpoint appeared”，compactor 也以缺少目标 checkpoint 失败。Stage-1 和 probe watcher 仍分别停在 `waiting_checkpoint`/`waiting_dependencies`，没有把这次中断误当成可用 baseline，也尚未产生正式 matched/full 或 clean-latent 结果。下一次启动前必须先解决长任务生命周期和同盘仅余约 84 GiB、无法安全同时保留大型可恢复 checkpoint 的问题；不会从 step 17,940 的日志伪造恢复点。
 
+为尽快得到可证伪的服务器预实验，而不是再次承担一次无恢复点的 30k 风险，新共同 baseline 固定为官方 GWP-0.5 初始化上的 6k dual-view fine-tune：GPU 3/4/5（GPU 2 已被无关任务占用）、单卡 batch 4、action weight 5、visual weight 1、seed 6666。它由 user systemd unit `gwp-baseline6k-op95.service` 托管，输出到 `libero_standard4_gwp05_preliminary_6k_3gpu_2cam_bf16`，末尾只保留 BF16 transformer、无 EMA，并立即剥离 optimizer，以同时解决会话 SIGTERM 与磁盘预算问题。该版本明确标记为 preliminary，不替代未来 30k 正式结论。Stage-1 runner 新增默认开启的 `GWP_CF_REQUIRE_BASELINE_EVAL=1`；只有该预实验显式设为 0 时，才把 baseline 的预先 400-rollout 评测推迟到 mechanism gate 之后的 paired baseline/matched/full bundle，正式默认协议不变。
+
 ## 结果位置
 
 - Spatial 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_spatial_1000step/<method>/`
