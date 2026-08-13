@@ -438,6 +438,8 @@ def main() -> None:
         "view_concat_mode": PROBE_VIEW_CONCAT_MODE,
         "mask_supervision_view": PROBE_VIEW_KEYS[0],
         "probe": str(probe_dir),
+        "probe_parameters": sum(parameter.numel() for parameter in probe.parameters()),
+        "probe_hidden_channels": probe.hidden_channels,
         "probe_config_sha256": sha256_file(probe_dir / probe.CONFIG_NAME),
         "probe_weights_sha256": sha256_file(probe_dir / probe.WEIGHTS_NAME),
         "hyperparameters": {

@@ -11,7 +11,7 @@ from torch import nn
 
 
 class LatentRobotMaskProbe(nn.Module):
-    """Decode standardized clean video latents into per-frame robot-mask logits."""
+    """Decode clean video latents with a small local nonlinear mask decoder."""
 
     CONFIG_NAME = "config.json"
     WEIGHTS_NAME = "model.safetensors"
@@ -21,21 +21,34 @@ class LatentRobotMaskProbe(nn.Module):
         latent_channels: int,
         frames_per_latent: int = 4,
         spatial_scale: int = 8,
+        hidden_channels: int = 128,
     ) -> None:
         super().__init__()
         self.latent_channels = int(latent_channels)
         self.frames_per_latent = int(frames_per_latent)
         self.spatial_scale = int(spatial_scale)
+        self.hidden_channels = int(hidden_channels)
         if self.latent_channels <= 0:
             raise ValueError("latent_channels must be positive")
         if self.frames_per_latent <= 0:
             raise ValueError("frames_per_latent must be positive")
         if self.spatial_scale <= 0:
             raise ValueError("spatial_scale must be positive")
-        self.projection = nn.Conv3d(
-            self.latent_channels,
-            self.frames_per_latent * self.spatial_scale**2,
-            kernel_size=1,
+        if self.hidden_channels <= 0:
+            raise ValueError("hidden_channels must be positive")
+        self.projection = nn.Sequential(
+            nn.Conv3d(
+                self.latent_channels,
+                self.hidden_channels,
+                kernel_size=(1, 3, 3),
+                padding=(0, 1, 1),
+            ),
+            nn.SiLU(),
+            nn.Conv3d(
+                self.hidden_channels,
+                self.frames_per_latent * self.spatial_scale**2,
+                kernel_size=1,
+            ),
         )
 
     def forward(self, clean_latents: torch.Tensor) -> torch.Tensor:
@@ -84,6 +97,7 @@ class LatentRobotMaskProbe(nn.Module):
             "latent_channels": self.latent_channels,
             "frames_per_latent": self.frames_per_latent,
             "spatial_scale": self.spatial_scale,
+            "hidden_channels": self.hidden_channels,
             "approved_for_alignment": bool(approved_for_alignment),
         }
         config_path = root / self.CONFIG_NAME
