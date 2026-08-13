@@ -153,7 +153,7 @@ def main() -> None:
             robot_ids, gripper_ids = robot_geom_ids(env)
 
             def capture(current_obs: dict[str, Any]) -> dict[str, np.ndarray]:
-                return capture_state(
+                result = capture_state(
                     env,
                     current_obs,
                     robot_ids,
@@ -162,6 +162,21 @@ def main() -> None:
                     int(source_manifest["image_size"][1]),
                     int(source_manifest["image_size"][0]),
                 )
+                result["rendered_rgb"] = np.flip(
+                    np.asarray(
+                        env._env.sim.render(
+                            width=int(source_manifest["image_size"][1]),
+                            height=int(source_manifest["image_size"][0]),
+                            camera_name=str(source_manifest["camera_name"]),
+                        )
+                    ),
+                    axis=(0, 1),
+                ).copy()
+                result["gripper_qpos"] = np.asarray(
+                    current_obs["robot_state"]["gripper"]["qpos"],
+                    dtype=np.float32,
+                )
+                return result
 
             captures = {0: capture(obs)}
             for step in range(1, max(horizons) + 1):
@@ -217,6 +232,7 @@ def main() -> None:
             "probe training"
         ),
         "rgb_supervision": None,
+        "rendered_rgb_role": "registration_audit_only_not_a_probe_or_video_target",
         "suite": suite_name,
         "dataset_root": str(dataset_root),
         "dataset_info_sha256": sha256_file(info_path),
