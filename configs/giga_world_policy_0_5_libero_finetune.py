@@ -221,6 +221,7 @@ config = dict(
         checkpoint_save_optimizer=_bool("GWP_CHECKPOINT_SAVE_OPTIMIZER", True),
         checkpoint_safe_serialization=False,
         checkpoint_strict=False,
+        disable_checkpoint=_bool("GWP_DISABLE_CHECKPOINT", False),
         log_with=None,
         log_interval=int(_env("GWP_LOG_INTERVAL", "20")),
         seed=int(_env("GWP_SEED", "6666")),

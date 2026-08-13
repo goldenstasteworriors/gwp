@@ -332,6 +332,11 @@ class CasualWATrainerMoT(Trainer):
             step - self.counterfactual_mask_start_step
         ) % self.counterfactual_mask_interval == 0
 
+    def save_checkpoint_step(self) -> None:
+        if bool(self.kwargs.get("disable_checkpoint", False)):
+            return
+        super().save_checkpoint_step()
+
     def forward_vae(self, images):
         images = images.to(self.vae.dtype)
         with torch.no_grad():
