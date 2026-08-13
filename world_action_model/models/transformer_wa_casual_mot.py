@@ -564,12 +564,16 @@ class CasualWorldActionTransformer_MoT(
         in_action_channels: int = 32,
         out_action_channels: int = 32,
         num_embodiments: int = 4,
+        counterfactual_mask_frames_per_latent: int = 0,
     ) -> None:
         super().__init__()
 
         inner_dim = num_attention_heads * attention_head_dim
         out_channels = out_channels or in_channels
         out_action_channels = int(out_action_channels if out_action_channels is not None else in_action_channels)
+        counterfactual_mask_frames_per_latent = int(counterfactual_mask_frames_per_latent)
+        if counterfactual_mask_frames_per_latent < 0:
+            raise ValueError("counterfactual_mask_frames_per_latent must be non-negative")
 
         self.rope = WanRotaryPosEmbed(attention_head_dim, patch_size, rope_max_seq_len)
         self.patch_embedding = nn.Conv3d(in_channels, inner_dim, kernel_size=patch_size, stride=patch_size)
@@ -610,6 +614,12 @@ class CasualWorldActionTransformer_MoT(
         self.norm_out = FP32LayerNorm(inner_dim, eps, elementwise_affine=False)
         self.proj_out = nn.Linear(inner_dim, out_channels * math.prod(patch_size))
         self.scale_shift_table = nn.Parameter(torch.randn(1, 2, inner_dim) / inner_dim**0.5)
+        self.counterfactual_mask_head = None
+        if counterfactual_mask_frames_per_latent > 0:
+            self.counterfactual_mask_head = nn.Linear(
+                inner_dim,
+                counterfactual_mask_frames_per_latent * math.prod(patch_size[1:]),
+            )
 
         self.gradient_checkpointing = False
 
@@ -917,6 +927,44 @@ class CasualWorldActionTransformer_MoT(
         )
         return visual_hidden_states, visual_rotary_emb
 
+    def decode_counterfactual_mask_tokens(
+        self,
+        visual_tokens: torch.Tensor,
+        num_ref_tokens: int,
+        visual_grid_info: Dict[str, int],
+    ) -> torch.Tensor:
+        """Decode future visual tokens into full-resolution latent-grid mask logits."""
+        if self.counterfactual_mask_head is None:
+            raise RuntimeError(
+                "counterfactual mask output requested, but "
+                "counterfactual_mask_frames_per_latent is disabled"
+            )
+        g = visual_grid_info
+        num_future_latent_frames = g["post_patch_num_frames"] - 1
+        expected_future_tokens = (
+            num_future_latent_frames * g["post_patch_height"] * g["post_patch_width"]
+        )
+        future_tokens = visual_tokens[:, num_ref_tokens:]
+        if future_tokens.shape[1] != expected_future_tokens:
+            raise ValueError(
+                f"Expected {expected_future_tokens} future visual tokens, "
+                f"got {future_tokens.shape[1]}"
+            )
+
+        frames_per_latent = int(self.config.counterfactual_mask_frames_per_latent)
+        logits = self.counterfactual_mask_head(future_tokens)
+        logits = logits.reshape(
+            visual_tokens.shape[0],
+            num_future_latent_frames,
+            g["post_patch_height"],
+            g["post_patch_width"],
+            frames_per_latent,
+            g["p_h"],
+            g["p_w"],
+        )
+        logits = logits.permute(0, 1, 4, 2, 5, 3, 6)
+        return logits.flatten(1, 2).flatten(4, 5).flatten(2, 3)
+
     def forward(self, *args, **kwargs):
         action_only = kwargs.pop("action_only", False)
         no_video_tokens = kwargs.pop("no_video_tokens", False)
@@ -945,6 +993,7 @@ class CasualWorldActionTransformer_MoT(
         attention_kwargs: Optional[Dict[str, Any]] = None,
         output_action: bool = True,
         output_visual: bool = True,
+        output_counterfactual_mask: bool = False,
         visual_grid_info: Optional[Dict[str, int]] = None,
         embodiment_id: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
@@ -1036,6 +1085,7 @@ class CasualWorldActionTransformer_MoT(
 
         action_pred = None
         video_output = None
+        counterfactual_mask_logits = None
 
         if output_action:
             if action_temb.ndim == 3:
@@ -1055,9 +1105,11 @@ class CasualWorldActionTransformer_MoT(
             action_slice = action_hidden_states[:, num_state_tokens:]
             action_pred = self._decode_action_tokens(action_slice, embodiment_id=embodiment_id)
 
-        if output_visual:
+        if output_visual or output_counterfactual_mask:
             if visual_grid_info is None:
-                raise ValueError("visual_grid_info is required when output_visual=True")
+                raise ValueError(
+                    "visual_grid_info is required when visual or counterfactual mask output is enabled"
+                )
             if visual_temb.ndim == 3:
                 shift, scale = (self.scale_shift_table.unsqueeze(0).to(visual_temb.device) + visual_temb.unsqueeze(2)).chunk(2, dim=2)
                 shift = shift.squeeze(2)
@@ -1069,6 +1121,15 @@ class CasualWorldActionTransformer_MoT(
             visual_for_out = (self.norm_out(visual_hidden_states.float()) * (1 + scale) + shift).type_as(
                 visual_hidden_states
             )
+
+            if output_counterfactual_mask:
+                counterfactual_mask_logits = self.decode_counterfactual_mask_tokens(
+                    visual_for_out,
+                    num_ref_tokens,
+                    visual_grid_info,
+                )
+
+        if output_visual:
             visual_for_out = self.proj_out(visual_for_out)
 
             g = visual_grid_info
@@ -1089,8 +1150,17 @@ class CasualWorldActionTransformer_MoT(
             unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
+            if output_counterfactual_mask:
+                return video_output, action_pred, counterfactual_mask_logits
             return video_output, action_pred
 
+        if output_counterfactual_mask:
+            output = {"counterfactual_mask_logits": counterfactual_mask_logits}
+            if output_visual:
+                output["sample"] = video_output
+            if output_action:
+                output["action_pred"] = action_pred
+            return output
         if output_action and output_visual:
             return {"sample": video_output, "action_pred": action_pred}
         if output_visual:
@@ -1109,6 +1179,7 @@ class CasualWorldActionTransformer_MoT(
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        output_counterfactual_mask: bool = False,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
         action_hidden_states, action_rotary_emb, num_state_tokens, _ = self.encode_action_tokens(state, action, embodiment_id=embodiment_id)
         visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, grid_info = self.encode_visual_tokens(
@@ -1128,6 +1199,7 @@ class CasualWorldActionTransformer_MoT(
             attention_kwargs=attention_kwargs,
             output_action=True,
             output_visual=True,
+            output_counterfactual_mask=output_counterfactual_mask,
             visual_grid_info=grid_info,
             embodiment_id=embodiment_id,
         )
@@ -1219,6 +1291,7 @@ class CasualWorldActionTransformer_MoT(
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        output_counterfactual_mask: bool = False,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
         action_hidden_states, action_rotary_emb, num_state_tokens, _ = self.encode_action_tokens(state, action, embodiment_id=embodiment_id)
         visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, grid_info = self.encode_visual_tokens(
@@ -1238,6 +1311,7 @@ class CasualWorldActionTransformer_MoT(
             attention_kwargs=attention_kwargs,
             output_action=True,
             output_visual=True,
+            output_counterfactual_mask=output_counterfactual_mask,
             visual_grid_info=grid_info,
             embodiment_id=embodiment_id,
         )
