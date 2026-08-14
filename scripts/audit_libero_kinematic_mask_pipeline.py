@@ -320,7 +320,7 @@ def main() -> None:
     )
     report = {
         "schema_version": SCHEMA_VERSION,
-        "status": "audit_complete_no_training_gate_decision_encoded",
+        "status": "engineering_gate_evaluated",
         "legacy_cache": str(args.legacy_cache.resolve()),
         "legacy_cache_schema": LEGACY_SCHEMA,
         "num_episodes": len(records),
