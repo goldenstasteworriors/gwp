@@ -90,6 +90,7 @@ def summarize(values: list[float]) -> dict[str, float]:
     return {
         "mean": float(array.mean()),
         "median": float(np.median(array)),
+        "p05": float(np.quantile(array, 0.05)),
         "p95": float(np.quantile(array, 0.95)),
         "min": float(array.min()),
         "max": float(array.max()),
@@ -273,6 +274,50 @@ def main() -> None:
     if any(value != 0 for value in dynamics_counts.values()):
         raise RuntimeError(f"A forbidden dynamics call was attempted: {dynamics_counts}")
 
+    renderer_robot_summary = summarize(registration_robot_iou)
+    renderer_gripper_summary = summarize(registration_gripper_iou)
+    ik_summaries = {
+        str(horizon): {
+            "joint_mae_rad": summarize(ik_joint_mae[horizon]),
+            "gripper_mae": summarize(ik_gripper_mae[horizon]),
+            "eef_position_error_m": summarize(ik_eef_position[horizon]),
+            "eef_rotation_error_deg": summarize(ik_eef_rotation[horizon]),
+            "robot_mask_iou": summarize(ik_robot_iou[horizon]),
+            "gripper_mask_iou": summarize(ik_gripper_iou[horizon]),
+        }
+        for horizon in expected_horizons
+    }
+    convergence_fraction = float(np.mean(convergence))
+    engineering_thresholds = {
+        "renderer_robot_iou_mean_min": 0.85,
+        "renderer_robot_iou_p05_min": 0.80,
+        "ik_horizon_12_robot_iou_mean_min": 0.80,
+        "ik_horizon_48_robot_iou_mean_min": 0.80,
+        "ik_horizon_48_robot_iou_p05_min": 0.65,
+        "ik_horizon_48_eef_error_mean_max_m": 0.03,
+        "ik_horizon_48_eef_error_p95_max_m": 0.05,
+        "ik_converged_fraction_min": 0.98,
+    }
+    renderer_gate = bool(
+        renderer_robot_summary["mean"]
+        >= engineering_thresholds["renderer_robot_iou_mean_min"]
+        and renderer_robot_summary["p05"]
+        >= engineering_thresholds["renderer_robot_iou_p05_min"]
+    )
+    ik_gate = bool(
+        ik_summaries["12"]["robot_mask_iou"]["mean"]
+        >= engineering_thresholds["ik_horizon_12_robot_iou_mean_min"]
+        and ik_summaries["48"]["robot_mask_iou"]["mean"]
+        >= engineering_thresholds["ik_horizon_48_robot_iou_mean_min"]
+        and ik_summaries["48"]["robot_mask_iou"]["p05"]
+        >= engineering_thresholds["ik_horizon_48_robot_iou_p05_min"]
+        and ik_summaries["48"]["eef_position_error_m"]["mean"]
+        <= engineering_thresholds["ik_horizon_48_eef_error_mean_max_m"]
+        and ik_summaries["48"]["eef_position_error_m"]["p95"]
+        <= engineering_thresholds["ik_horizon_48_eef_error_p95_max_m"]
+        and convergence_fraction
+        >= engineering_thresholds["ik_converged_fraction_min"]
+    )
     report = {
         "schema_version": SCHEMA_VERSION,
         "status": "audit_complete_no_training_gate_decision_encoded",
@@ -291,26 +336,27 @@ def main() -> None:
             "attempted_calls": dynamics_counts,
         },
         "renderer_registration": {
-            "robot_mask_iou": summarize(registration_robot_iou),
-            "gripper_mask_iou": summarize(registration_gripper_iou),
+            "robot_mask_iou": renderer_robot_summary,
+            "gripper_mask_iou": renderer_gripper_summary,
             "interpretation": (
                 "CPU masks are amodal robot-only silhouettes; legacy MuJoCo masks may "
                 "be object-occluded, so this is a registration check rather than identity."
             ),
         },
         "ik_action_to_q": {
-            "converged_fraction": float(np.mean(convergence)),
-            "by_horizon": {
-                str(horizon): {
-                    "joint_mae_rad": summarize(ik_joint_mae[horizon]),
-                    "gripper_mae": summarize(ik_gripper_mae[horizon]),
-                    "eef_position_error_m": summarize(ik_eef_position[horizon]),
-                    "eef_rotation_error_deg": summarize(ik_eef_rotation[horizon]),
-                    "robot_mask_iou": summarize(ik_robot_iou[horizon]),
-                    "gripper_mask_iou": summarize(ik_gripper_iou[horizon]),
-                }
-                for horizon in expected_horizons
-            },
+            "converged_fraction": convergence_fraction,
+            "by_horizon": ik_summaries,
+        },
+        "engineering_gate": {
+            "thresholds_defined_after_initial_two_episode_diagnostic": engineering_thresholds,
+            "renderer_registration_passed": renderer_gate,
+            "fixed_gain_action_to_q_passed": ik_gate,
+            "status": "passed" if renderer_gate and ik_gate else "failed",
+            "decision": (
+                "fixed_kinematic_action_adapter_eligible"
+                if renderer_gate and ik_gate
+                else "require_explicit_future_joint_trajectory_prediction"
+            ),
         },
         "configuration": {
             "camera_name": args.camera_name,

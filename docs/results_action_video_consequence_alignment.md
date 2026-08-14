@@ -318,6 +318,27 @@ v5 matched/full 训练均完成 200 steps、exit code 0，训练 manifest 的 co
 
 同一 split 的 open-loop 结果位于 `shared_mask_video_flow_v5_open_loop_op166`。matched/full MSE 为 `0.03043/0.03169`（full +4.12%），MAE 为 `0.09490/0.09460`（full -0.31%），gripper sign accuracy 为 `0.91292/0.91375`（+0.083 percentage points）；三项 paired 95% CI 均跨 0。full 的 out-of-range element/step fraction 从 `0.03155/0.2050` 增至 `0.07298/0.47583`，差值 95% CI 分别为 `[+0.03423,+0.04869]` 和 `[+0.22041,+0.32042]`，明确恶化。严格结论是：shared mask-video flow 在 200-step 预算下通过“可优化”门，但未通过 action-conditioning 或 action-improvement 门，且增加动作越界；因此停止为该方法扩大闭环预算，转入下一种最小改动方法，而不是把低 mask loss 写成控制收益。
 
+### 2026-08-14 三次协议纠错：mask 必须是无动力学的 q-space 几何渲染
+
+用户进一步指出，v3--v5 cache 的 target generation 仍调用 `env.step(predicted_action)`，再从 rollout 后的 `sim.data.qpos` 渲染 mask。在 LIBERO 本身就是 benchmark simulator 的前提下，这等价于向 target generator 查询动作执行后的 simulator future state；即使没有读取 demonstration future RGB，它仍使用了 benchmark dynamics oracle。因而 v3--v5 的 mask-flow、VAE、correct-vs-shuffled 与 modality embedding 结果都只能描述“能否拟合 simulator-oracle rollout mask”，不能作为无泄漏 action--video alignment 证据。旧目录全部保留；open-loop action 数值仍可复现，但所有依赖 rollout mask 的方法结论再次降级为 invalid-for-intended-benchmark。
+
+新的合法接口固定为：
+
+```text
+specified arm joint q + specified gripper q + calibrated camera
+    -> FK only
+    -> robot visual-mesh rasterization only
+    -> amodal robot / gripper mask
+```
+
+生成期间禁止 `env.step`、`sim.step` 和 `mj_step`；task XML 只提供 Panda joint tree、visual mesh、base transform 与 camera calibration。task objects 不参与 rasterization，因此 mask 不受碰撞、接触、物体状态或物体遮挡影响。`scripts/libero_kinematic_robot_mask.py` 用运行时 monkeypatch 将三类 step 调用变成硬错误，只保留 `mj_forward` 作为 FK，并用 CPU triangle-union rasterizer直接投影 robot visual mesh。50-episode held-out 注册审计中，把旧 cache 已有的同一个 q 写入新渲染器后，robot-mask IoU mean/median/min 为 `0.89831/0.89803/0.87531`；差异预期来自新 mask 是 amodal robot-only，而旧 MuJoCo segmentation 会被 task object 遮挡。三类 forbidden-step attempted count 均为 0，说明相机方向和 mesh 坐标注册成立且没有执行动力学。
+
+GWP/LIBERO 的控制输出是 normalized OSC delta，不是 q，因此还单独审计了“current q + action chunk -> fixed differential IK -> future q”。直接使用 OSC 完整命令幅度在 2-episode diagnostic 上到 horizon 12 已产生约 `0.278 m` EEF error，立即判为不可用。10 条 demo 的相邻记录状态显示，实际平移只实现 command delta 的约 `0.228`，各轴 command/realized correlation 为 `0.89--0.99`；据此仅作为诊断测试固定 gain 0.23，而不在生成时调用 dynamics。正式 50-episode held-out 审计位于 `/workspace/WM/gwp-action-video-results/kinematic_mask_audit_op174_gain023_heldout50.json`：horizon 12 的 EEF error mean=`0.01302 m`、robot-mask IoU mean=`0.86429`；horizon 48 漂移到 EEF error mean/p95=`0.05410/0.10668 m`、robot-mask IoU mean/min=`0.67958/0.48236`。所以固定 action-to-q adapter 不具备长时 target 精度，不能替代 simulator rollout 生成正式监督。
+
+由此方法结构必须改变，而不能只替换 cache renderer：策略分支应显式预测视频时间点 `[0,12,24,36,48]` 的 future joint q 与 gripper q，再由纯几何 renderer 得到 action-side robot mask。q 不能是一个可被 action decoder 忽略的独立 auxiliary head；下一最小实验应把它作为 control bottleneck：每个 12-step action block 由对应 q endpoint 条件化，或由相邻 q 的 FK displacement 产生 nominal OSC action、仅允许受正则约束的小 residual。这样 video-mask consistency 改变 q 时才有明确路径改变最终控制动作，同时五个 q endpoint 自然解决视频五帧与 48-step action 的时间间隔不一致。
+
+`scripts/generate_libero_joint_trajectory_mask_cache.py` 已实现这个新数据契约，只接受每集 `predicted_joint_qpos.npy` 与 `predicted_gripper_qpos.npy`，manifest 明确记录 `action_input=None`、`simulator_future_state_input=None`、`raw_demonstration_future_state_input=None` 和三类 step 计数。单集静态 frame-0 q 的集成 smoke 位于 `joint_mask_static_q_cache_op176`，五帧 mask 像素逐帧完全相同，证明工具不会暗中推进状态。该 smoke 只验证接口，不是 future-q 方法结果；在 joint predictor/control bottleneck 完成并通过 q/EEF/mask held-out gate 前，不启动新的 mask-video matched/full 训练，也不继续 clean-latent probe pipeline。
+
 ## 结果位置
 
 - 当前 4×PPU 服务器：`/workspace/WM/gwp-action-video-results/`
