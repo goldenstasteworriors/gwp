@@ -18,8 +18,16 @@ class TorchSerializer:
     @staticmethod
     def from_bytes(data: bytes):
         buffer = BytesIO(data)
-        obj = torch.load(buffer, map_location='cpu', weights_only=False)
-        return obj
+        try:
+            return torch.load(buffer, map_location='cpu', weights_only=False)
+        except TypeError as error:
+            if 'weights_only' not in str(error):
+                raise
+            # torch<2.0 has no weights_only argument. Socket payloads are
+            # exchanged only with the explicitly configured local policy
+            # client, so retain the previous full-object load semantics.
+            buffer.seek(0)
+            return torch.load(buffer, map_location='cpu')
 
 
 @dataclass
