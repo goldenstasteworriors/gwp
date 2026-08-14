@@ -15,7 +15,11 @@ from typing import Any
 
 
 VARIANTS = ("matched", "full")
-ALIGNMENT_MODES = ("hidden_head", "clean_latent_probe")
+ALIGNMENT_MODES = (
+    "hidden_head",
+    "clean_latent_probe",
+    "shared_mask_video_flow",
+)
 EXPECTED_CACHE_SCHEMA = "libero-counterfactual-robot-mask-v3"
 EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EXPECTED_TRAIN_EPISODES = 200
@@ -47,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--mask-probe-report", type=Path)
     parser.add_argument("--action-gap-report", type=Path)
-    parser.add_argument("--gpu-ids", type=int, nargs="+", default=[2, 3, 4, 5])
+    parser.add_argument("--gpu-ids", type=int, nargs="+", default=[0, 1, 2, 3])
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--batch-size-per-gpu", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
@@ -152,7 +156,7 @@ def validate_clean_latent_gates(
     heldout_cache: Path,
     heldout_manifest: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if args.alignment_mode == "hidden_head":
+    if args.alignment_mode != "clean_latent_probe":
         if args.mask_probe_report is not None or args.action_gap_report is not None:
             raise ValueError(
                 "Probe/action-gap reports are only valid with clean_latent_probe"
@@ -521,7 +525,7 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
     if args.mask_weight <= 0.0:
         raise ValueError("--mask-weight must be positive")
     fixed_protocol = {
-        "gpu_ids": [2, 3, 4, 5],
+        "gpu_ids": [0, 1, 2, 3],
         "steps": 200,
         "batch_size_per_gpu": 1,
         "gradient_accumulation_steps": 4,
@@ -550,11 +554,13 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         * args.gradient_accumulation_steps
     )
     common = {
-        "protocol": (
-            "counterfactual-clean-latent-stage1-v1"
-            if args.alignment_mode == "clean_latent_probe"
-            else "counterfactual-mask-stage1-v1"
-        ),
+        "protocol": {
+            "hidden_head": "counterfactual-mask-stage1-v1",
+            "clean_latent_probe": "counterfactual-clean-latent-stage1-v1",
+            "shared_mask_video_flow": (
+                "counterfactual-shared-mask-video-flow-stage1-v1"
+            ),
+        }[args.alignment_mode],
         "alignment_mode": args.alignment_mode,
         "project_root": str(project_root),
         "preflight_report": str(report_path),
