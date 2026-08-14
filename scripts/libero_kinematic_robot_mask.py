@@ -37,11 +37,13 @@ def forbid_mujoco_dynamics() -> Iterator[dict[str, int]]:
     """
 
     import mujoco
+    from robosuite.environments.base import MujocoEnv
     from robosuite.utils.binding_utils import MjSim
 
     counts = {"mj_step": 0, "sim_step": 0, "env_step": 0}
     original_mj_step = mujoco.mj_step
     original_sim_step = MjSim.step
+    original_env_step = MujocoEnv.step
 
     def forbidden_mj_step(*args: Any, **kwargs: Any) -> None:
         del args, kwargs
@@ -53,13 +55,20 @@ def forbid_mujoco_dynamics() -> Iterator[dict[str, int]]:
         counts["sim_step"] += 1
         raise RuntimeError("Dynamics are forbidden for kinematic mask rendering: sim.step")
 
+    def forbidden_env_step(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        counts["env_step"] += 1
+        raise RuntimeError("Dynamics are forbidden for kinematic mask rendering: env.step")
+
     mujoco.mj_step = forbidden_mj_step
     MjSim.step = forbidden_sim_step
+    MujocoEnv.step = forbidden_env_step
     try:
         yield counts
     finally:
         mujoco.mj_step = original_mj_step
         MjSim.step = original_sim_step
+        MujocoEnv.step = original_env_step
 
 
 def axis_angle_to_matrix(vector: np.ndarray) -> np.ndarray:
@@ -378,4 +387,3 @@ class KinematicRobotMaskRenderer:
                 self.sim.model.cam_fovy[self.camera_id], dtype=np.float32
             ),
         }
-
