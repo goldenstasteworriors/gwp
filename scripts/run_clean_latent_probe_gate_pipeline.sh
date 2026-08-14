@@ -126,7 +126,8 @@ wait_for_gpu
 status generating_train_demo_masks
 (
     cd "$worktree_path"
-    CUDA_VISIBLE_DEVICES="$gpu_id" MUJOCO_GL=egl "$eval_env/bin/python" -B \
+    CUDA_VISIBLE_DEVICES="$gpu_id" MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 \
+        "$eval_env/bin/python" -B \
         scripts/generate_libero_demonstration_mask_cache.py \
         --counterfactual-cache "$train_counterfactual_cache" \
         --output-dir "$train_demo_cache" \
@@ -136,7 +137,8 @@ status generating_train_demo_masks
 status generating_heldout_demo_masks
 (
     cd "$worktree_path"
-    CUDA_VISIBLE_DEVICES="$gpu_id" MUJOCO_GL=egl "$eval_env/bin/python" -B \
+    CUDA_VISIBLE_DEVICES="$gpu_id" MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 \
+        "$eval_env/bin/python" -B \
         scripts/generate_libero_demonstration_mask_cache.py \
         --counterfactual-cache "$heldout_counterfactual_cache" \
         --output-dir "$heldout_demo_cache" \
