@@ -306,6 +306,14 @@ v4 单 episode smoke 位于 `counterfactual_mask_cache_gripper_encoding_smoke_op
 
 修复后的执行链路 sanity 位于 `libero_closed_loop_v4_gripper_corrected_sanity_op145`：original/matched/full 各跑 10 个 task×1 rollout，三者均为 0/10，全部 evaluator exit 0；full-vs-matched 为 10 个 both-failure、0 discordant，`protocol_status=verified_equal`。这说明官方初始化与旧 200-step checkpoint 仍处于 success floor，不能据此区分方法；它也不能挽救旧 v3 训练。下一项有效实验必须从 v4 cache 重新跑 Wan-VAE gate、preflight 和相同 200-step matched/full，不能只用 v4 evaluator 重测旧权重。
 
+### 2026-08-14 二次协议纠错：模型条件与 simulator action 必须分离
+
+v4 cache 虽然已用正确 simulator gripper 命令生成物理 mask，但后续审计发现 `WAMLeRobotDataset` 仍读取名为 `executed_actions` 的 simulator 数组作为 transformer 的动作条件；该数组的夹爪维度是 raw LIBERO `{-1=open,+1=closed}`，而 action expert 与 norm stats 使用 LeRobot `{1=open,0=closed}`。因此 `shared_mask_video_flow_v4_stage1_op153` 的 standard action loss 数值本身仍可复现，但 full 对齐分支条件语义错误，matched/full checkpoint、`shared_mask_video_flow_v4_eval_op154` 的控制差异和 mask-flow 学习均不得作为正式对齐证据。结果目录全部保留，不删除也不纳入结论。
+
+cache schema 随后升级为 `libero-counterfactual-robot-mask-v5`，明确使用 `policy_actions_lerobot` 作为模型条件、`simulator_actions` 仅用于物理重放，并在 manifest 固定两个数组名。`scripts/preflight_counterfactual_stage1.py` 同时验证：(1) policy 数组逐元素等于哈希固定的模型预测；(2) simulator 数组逐元素等于统一转换函数的输出；(3) dataset/launcher/evaluator 只接受 v5。已有 v4 mask 无需重新渲染，`scripts/migrate_counterfactual_mask_cache_v4_to_v5.py` 在逐文件校验源 SHA256 和转换公式后只重命名动作数组，输出到 `counterfactual_mask_v5_explicit_action_semantics_op158`。
+
+v5 的最终 preflight 位于 `shared_mask_video_flow_v5_stage1_op159/preflight_final_19b8c5b.json`：commit `19b8c5b`，train/heldout 为 200/50、重叠为 0，train/heldout simulator 转换改变元素比例为 `0.142857/0.143393`。同 commit 的 50-episode Wan-VAE gate 再次 11/11 通过，full/dynamic/new-occupancy IoU mean 为 `0.99033/0.97430/0.96969`；matched/full dry-run comparison ID 均为 `c396ac984f4a11157496c9e9c20805f8ffa070d25b5628657d544c62f937ef9d`。正式 v5 成对训练从该 gate 启动，结果解释必须以 v5 checkpoint 为起点。
+
 ## 结果位置
 
 - 当前 4×PPU 服务器：`/workspace/WM/gwp-action-video-results/`
