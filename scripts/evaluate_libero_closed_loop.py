@@ -112,6 +112,143 @@ def configure_libero_path(dataset_root: Path) -> Path:
     )
 
 
+def load_libero_runtime() -> tuple[Any, Any]:
+    """Load LeRobot's wrapper or an equivalent official-LIBERO fallback.
+
+    The simulator's supported Python 3.8 environment cannot install current
+    LeRobot.  Keep evaluation semantics fixed by mirroring the subset of
+    ``lerobot.envs.libero.LiberoEnv`` used by this script: benchmark initial
+    states, ten settling no-ops, dual raw cameras, relative control, and the
+    same robot-state fields.
+    """
+
+    try:
+        from lerobot.envs.libero import LiberoEnv, _get_suite
+
+        return LiberoEnv, _get_suite
+    except ModuleNotFoundError as error:
+        if error.name != "lerobot":
+            raise
+
+    from libero.libero import benchmark, get_libero_path
+    from libero.libero.envs import OffScreenRenderEnv
+
+    def get_suite(name: str) -> Any:
+        suites = benchmark.get_benchmark_dict()
+        if name not in suites:
+            raise ValueError(
+                f"Unknown LIBERO suite {name!r}; available: {sorted(suites)}"
+            )
+        suite = suites[name]()
+        if not getattr(suite, "tasks", None):
+            raise ValueError(f"Suite {name!r} has no tasks")
+        return suite
+
+    class OfficialLiberoEnv:
+        """Minimal single-environment equivalent of LeRobot's wrapper."""
+
+        def __init__(
+            self,
+            task_suite: Any,
+            task_id: int,
+            task_suite_name: str,
+            episode_length: int,
+            camera_name: str,
+            obs_type: str,
+            init_states: bool,
+            episode_index: int,
+            n_envs: int,
+            num_steps_wait: int,
+        ) -> None:
+            del task_suite_name
+            if obs_type != "pixels_agent_pos":
+                raise ValueError(f"Unsupported fallback observation type: {obs_type}")
+            if not init_states:
+                raise ValueError("Closed-loop fallback requires benchmark initial states")
+            if n_envs != 1:
+                raise ValueError("Closed-loop fallback supports exactly one environment")
+            camera_names = [
+                value.strip() for value in camera_name.split(",") if value.strip()
+            ]
+            if not camera_names or len(camera_names) > 2:
+                raise ValueError(f"Expected one or two camera names, got {camera_names}")
+
+            task = task_suite.get_task(task_id)
+            self.task_description = task.language
+            self._camera_names = camera_names
+            self._episode_length = int(episode_length)
+            self._num_steps_wait = int(num_steps_wait)
+            self._steps = 0
+            initial_states = task_suite.get_task_init_states(task_id)
+            self._initial_state = np.asarray(
+                initial_states[episode_index % len(initial_states)], dtype=np.float64
+            )
+            bddl_path = (
+                Path(get_libero_path("bddl_files"))
+                / task.problem_folder
+                / task.bddl_file
+            )
+            self._env = OffScreenRenderEnv(
+                bddl_file_name=str(bddl_path),
+                camera_heights=256,
+                camera_widths=256,
+                control_freq=20,
+            )
+            self._env.reset()
+
+        def _format_raw_obs(self, raw_obs: dict[str, Any]) -> dict[str, Any]:
+            images = {"image": raw_obs[self._camera_names[0]]}
+            if len(self._camera_names) == 2:
+                images["image2"] = raw_obs[self._camera_names[1]]
+            return {
+                "pixels": images,
+                "robot_state": {
+                    "eef": {
+                        "pos": raw_obs["robot0_eef_pos"],
+                        "quat": raw_obs["robot0_eef_quat"],
+                        "mat": self._env.robots[0].controller.ee_ori_mat,
+                    },
+                    "gripper": {
+                        "qpos": raw_obs["robot0_gripper_qpos"],
+                        "qvel": raw_obs["robot0_gripper_qvel"],
+                    },
+                    "joints": {
+                        "pos": raw_obs["robot0_joint_pos"],
+                        "vel": raw_obs["robot0_joint_vel"],
+                    },
+                },
+            }
+
+        def reset(self, seed: int) -> tuple[dict[str, Any], dict[str, bool]]:
+            self._env.seed(seed)
+            self._env.reset()
+            raw_obs = self._env.set_init_state(self._initial_state)
+            for _ in range(self._num_steps_wait):
+                raw_obs, _, _, _ = self._env.step([0, 0, 0, 0, 0, 0, -1])
+            for robot in self._env.robots:
+                robot.controller.use_delta = True
+            self._steps = 0
+            return self._format_raw_obs(raw_obs), {"is_success": False}
+
+        def step(
+            self, action: np.ndarray
+        ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+            if action.ndim != 1:
+                raise ValueError(f"Expected a 1-D action, got {action.shape}")
+            raw_obs, reward, done, info = self._env.step(action)
+            self._steps += 1
+            success = bool(self._env.check_success())
+            info.update({"done": done, "is_success": success})
+            terminated = bool(done or success)
+            truncated = self._steps >= self._episode_length and not terminated
+            return self._format_raw_obs(raw_obs), reward, terminated, truncated, info
+
+        def close(self) -> None:
+            self._env.close()
+
+    return OfficialLiberoEnv, get_suite
+
+
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -119,7 +256,7 @@ def main() -> None:
     client = RobotInferenceClient(host=args.host, port=args.port)
 
     configure_libero_path(args.dataset_root)
-    from lerobot.envs.libero import LiberoEnv, _get_suite
+    LiberoEnv, _get_suite = load_libero_runtime()
 
     suite = _get_suite(args.suite)
     rows: list[dict[str, Any]] = []
