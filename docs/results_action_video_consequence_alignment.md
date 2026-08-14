@@ -294,6 +294,18 @@ commit `b72e889` 上的 200-step matched/full 初步训练使用相同 4 PPU、e
 
 这次 preliminary 的严格结论是：shared mask-video flow 在 policy-action 分布上可学习、不会明显破坏原 action optimization，并在 held-out gripper 符号决策上给出一个初步正信号；它尚未证明机器人控制更好。open-loop expert action 存在多解且两组越界比例都高，下一步必须用相同 checkpoint 做 paired LIBERO closed-loop success，并在扩大训练预算/多 seed 前保留 matched compute control。若闭环无收益，则该结果支持“表示对齐成立但未传递到控制”，而不是继续仅凭 mask loss 强化叙事。
 
+### 2026-08-14 协议纠错：task prompt 与 gripper simulator encoding
+
+node2 闭环接入时发现两项会使控制结论失效的协议错误。第一，旧 `evaluate_libero_closed_loop.py` 直接用 LIBERO suite `task_id` 索引 LeRobot dataset 的 prompt embedding，但两边任务顺序不同；按语言唯一匹配后的 suite→dataset 映射为 `[4,7,8,5,1,2,0,3,6,9]`，旧实现除 task 9 外均发送了错误语言。第二，数据转换把 raw LIBERO gripper `{-1=open,+1=closed}` 存为 LeRobot `{1=open,0=closed}`，模型输出也采用后者；旧闭环 evaluator 和 predicted-action mask cache 却直接把 `{1,0}` 送入 simulator。正确逆变换固定为 `sim_gripper = 1 - 2 * clip(lerobot_gripper, 0, 1)`，前六维仍 clip 到 `[-1,1]`。
+
+修复实现位于 `scripts/libero_action_encoding.py`、`scripts/evaluate_libero_closed_loop.py` 和 `scripts/generate_libero_counterfactual_mask_cache.py`。闭环 summary 升级为 `libero-closed-loop-v4`，protocol 必须同时记录 task→prompt 映射、policy/simulator action encoding 和转换公式；每个 rollout 分别保存 `policy_actions_lerobot.npy` 与实际执行的 `executed_actions.npy`。counterfactual cache 升级为 `libero-counterfactual-robot-mask-v4`，dataset、merge、VAE audit、preflight、evaluator、demo-cache 和 launcher 全部只接受 v4。负向回归 `/workspace/WM/gwp-action-video-results/preflight_v3_rejection_op149/` 证明旧 v3 cache 会在 manifest gate 立即被拒绝。
+
+因此上述 v3 shared-mask preliminary 必须降级解释：open-loop action MSE/MAE/sign 指标不经过 simulator，数值本身仍可复现；但 v3 mask target、mask loss、modality embedding 和由其训练得到的控制 checkpoint 不再构成物理对齐证据，尤其 gripper geometry/contact 语义错误。旧闭环目录 `shared_mask_video_flow_stage1_closed_loop_smoke_op126`、`shared_mask_video_flow_stage1_closed_loop_preliminary_op127`、`gwp05_original_closed_loop_prompt_mapping_sanity_op129` 和 `shared_mask_video_flow_stage1_closed_loop_correct_prompt_op142` 均保留但明确 invalid，不纳入方法比较。
+
+v4 单 episode smoke 位于 `counterfactual_mask_cache_gripper_encoding_smoke_op144`。policy gripper 范围为 `[0.8477,0.9219]`，转换后 simulator 范围为 `[-0.8438,-0.6953]`，逐元素公式最大误差为 0；相对旧 v3，同一条轨迹未来四个 horizon 的 gripper mask 分别改变 216/207/202/205 像素，证明该修复改变了物理 rollout 而非仅改 metadata。随后 4-way train + 2-way heldout 并行重建固定 200/50 cache，结果位于 `counterfactual_mask_v4_gripper_corrected_parallel_op148`，6/6 shard exit 0，merge 后 train/heldout manifest SHA256 分别为 `43e5b5847a42f3cf176ba0c6f9ff70ee363a09a89b5eca08efb66884e6f4be43` 与 `7fec3eba9cf8af758bb26c3ff6f5057a106ba8d6d47ef1c3617aa2d388786b0c`。v4 与 v3 的 episode 顺序和 prediction SHA 逐项相同，转换公式误差为 0；250/250 episode 的未来 robot/gripper mask 均发生变化。heldout 在 0/12/24/36/48 的 robot-mask XOR 均值为 `[0,50.4,116.24,172.1,215.68]`，gripper-mask XOR 均值为 `[0,211.58,209.7,204.76,212.22]`。
+
+修复后的执行链路 sanity 位于 `libero_closed_loop_v4_gripper_corrected_sanity_op145`：original/matched/full 各跑 10 个 task×1 rollout，三者均为 0/10，全部 evaluator exit 0；full-vs-matched 为 10 个 both-failure、0 discordant，`protocol_status=verified_equal`。这说明官方初始化与旧 200-step checkpoint 仍处于 success floor，不能据此区分方法；它也不能挽救旧 v3 训练。下一项有效实验必须从 v4 cache 重新跑 Wan-VAE gate、preflight 和相同 200-step matched/full，不能只用 v4 evaluator 重测旧权重。
+
 ## 结果位置
 
 - 当前 4×PPU 服务器：`/workspace/WM/gwp-action-video-results/`
