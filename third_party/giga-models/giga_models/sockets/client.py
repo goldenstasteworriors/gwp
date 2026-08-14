@@ -1,8 +1,25 @@
 from io import BytesIO
 from typing import Any, Dict, Optional
 
+import numpy as np
 import torch
 import zmq
+
+
+def _canonicalize_arrays(data: Any) -> Any:
+    """Replace NumPy payloads with tensors before cross-version transport."""
+
+    if isinstance(data, np.ndarray):
+        return torch.from_numpy(np.ascontiguousarray(data))
+    if isinstance(data, np.generic):
+        return data.item()
+    if isinstance(data, dict):
+        return {key: _canonicalize_arrays(value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_canonicalize_arrays(value) for value in data]
+    if isinstance(data, tuple):
+        return tuple(_canonicalize_arrays(value) for value in data)
+    return data
 
 
 class TorchSerializer:
@@ -11,7 +28,7 @@ class TorchSerializer:
     @staticmethod
     def to_bytes(data: Any) -> bytes:
         buffer = BytesIO()
-        torch.save(data, buffer)
+        torch.save(_canonicalize_arrays(data), buffer)
         return buffer.getvalue()
 
     @staticmethod
