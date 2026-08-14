@@ -331,6 +331,22 @@ def audit_cache(
                 "policy_actions_lerobot", policy_actions, (48, 7), cache_path
             )
             require_shape("simulator_actions", simulator_actions, (48, 7), cache_path)
+            prediction_actions = np.load(prediction_path, allow_pickle=False)
+            if prediction_actions.ndim == 3 and prediction_actions.shape[0] == 1:
+                prediction_actions = prediction_actions[0]
+            if prediction_actions.ndim != 2 or prediction_actions.shape[0] < 48:
+                raise ValueError(
+                    f"{prediction_path}: expected at least [48,D] policy actions, "
+                    f"got {prediction_actions.shape}"
+                )
+            prediction_actions = np.asarray(
+                prediction_actions[:48, :7], dtype=np.float32
+            )
+            if not np.array_equal(policy_actions, prediction_actions):
+                raise ValueError(
+                    f"{cache_path}: policy_actions_lerobot does not match the "
+                    "hashed policy prediction"
+                )
             require_shape(
                 "raw_initial_state",
                 raw_initial_state,
