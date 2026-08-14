@@ -276,8 +276,13 @@ action-gap 中 expert action 的语义也做了真实数据核对：episode 0 �
 
 2026-08-13 11:01 UTC，服务器上的整个 `/home/ubuntu/project` 被外部移动到 `/home/ubuntu/待清理/project`，并非本实验脚本操作。三个依赖旧绝对路径的 Stage-1/probe/post-gate user services 已精确停止，未删除任何结果，也未触碰随后运行的 7-GPU 任务。由于目标目录明确标记为“待清理”，在确认新的持久化路径前不运行上述真实 VAE gate，也不继续写 checkpoint。
 
+2026-08-14 已将实验迁移到 `4xH20-node2:/workspace/WM/gwp-action-video-consequence-alignment`，并在同盘建立 bare SSH 远端 `/workspace/WM/giga-world-policy-align.git`；目标工作树与 gate report 均固定到 commit `97d48b0`。目标机已有完整 GWP-0.5/Wan 权重，加载厂商 `/usr/local/PPU_SDK/envsetup.sh ppu` 后，原项目 `.venv-ppu` 可直接使用四张空闲 PPU，不迁移旧 CUDA 环境或重复权重。旧结果目录为 324 GiB，因此只迁移可复现本方法所需的 v3 cache/split/小型审计证据；LIBERO 数据集迁移到 `/workspace/WM/datasets`。
+
+真实 mask-video VAE gate 输出为 `/workspace/WM/gwp-action-video-results/mask_video_vae_audit_op104/report.json`。当前 v3 smoke cache 只有 1 个 episode，故这是实现前的表示可行性 gate，不是跨 episode 统计结论；在双视图布局、仅左侧 agent-view 计分且不使用 counterfactual RGB 的条件下，initial/full/dynamic/new-occupancy IoU 分别为 0.9962/0.9872/0.9807/0.9790，gripper recall 为 0.9913，有效区域 MAE 为 0.00404，预注册 11 项检查全部通过。由此允许下一轮只实现 zero-init modality embedding 与 shared mask-video flow；正式 200/50 cache 到位后仍须按同一脚本重跑 p05 gate，不能把单 episode pass 当作方法有效性结论。
+
 ## 结果位置
 
+- 当前 4×PPU 服务器：`/workspace/WM/gwp-action-video-results/`
 - Spatial 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_spatial_1000step/<method>/`
 - 三套件 6k：`/home/ubuntu/project/WM/gwp-action-video-results/libero_sgo_6000/<method>/`
 - 每个方法下的 `open_loop_*`、`consequence_pose_*`、`closed_loop_*` 分别保存动作、几何 overlay/summary 和闭环结果。
