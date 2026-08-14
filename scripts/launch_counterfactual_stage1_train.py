@@ -38,6 +38,19 @@ EXPECTED_PROBE_MINIMUMS = {
     "new_occupancy_iou": 0.40,
     "gripper_region_recall": 0.70,
 }
+EXPECTED_MASK_VIDEO_VAE_THRESHOLDS = {
+    "min_initial_iou_mean": 0.90,
+    "min_full_iou_mean": 0.90,
+    "min_full_iou_p05": 0.80,
+    "min_dynamic_iou_mean": 0.80,
+    "min_dynamic_iou_p05": 0.60,
+    "min_new_iou_mean": 0.80,
+    "min_new_iou_p05": 0.60,
+    "min_gripper_recall_mean": 0.90,
+    "min_gripper_recall_p05": 0.75,
+    "max_pixel_mae_mean": 0.05,
+    "max_pixel_mae_p95": 0.10,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--mask-probe-report", type=Path)
     parser.add_argument("--action-gap-report", type=Path)
+    parser.add_argument("--mask-video-vae-report", type=Path)
     parser.add_argument("--gpu-ids", type=int, nargs="+", default=[0, 1, 2, 3])
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--batch-size-per-gpu", type=int, default=1)
@@ -79,6 +93,12 @@ def sha256_file(path: Path) -> str:
 def sha256_json(value: dict[str, Any]) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def filesystem_id(path: Path) -> int:
+    """Return the filesystem id across OverlayFS lower/upper inodes."""
+
+    return int(os.statvfs(path).f_fsid)
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -364,6 +384,83 @@ def validate_clean_latent_gates(
     }
 
 
+def validate_shared_mask_video_gate(
+    args: argparse.Namespace,
+    vae: Path,
+    heldout_cache: Path,
+    heldout_manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    if args.alignment_mode != "shared_mask_video_flow":
+        if args.mask_video_vae_report is not None:
+            raise ValueError(
+                "--mask-video-vae-report is only valid with shared_mask_video_flow"
+            )
+        return None
+    if args.mask_video_vae_report is None:
+        raise ValueError(
+            "shared_mask_video_flow requires --mask-video-vae-report"
+        )
+
+    report_path = args.mask_video_vae_report.resolve()
+    report = load_json(report_path)
+    checks = report.get("gate", {}).get("checks", {})
+    expected_checks = {
+        "initial_iou_mean",
+        "full_iou_mean",
+        "full_iou_p05",
+        "dynamic_iou_mean",
+        "dynamic_iou_p05",
+        "new_occupancy_iou_mean",
+        "new_occupancy_iou_p05",
+        "gripper_recall_mean",
+        "gripper_recall_p05",
+        "pixel_mae_mean",
+        "pixel_mae_p95",
+    }
+    if (
+        report.get("schema_version") != "counterfactual-mask-video-vae-audit-v1"
+        or report.get("status") != "passed"
+        or report.get("gate", {}).get("status") != "passed"
+        or set(checks) != expected_checks
+        or not all(value is True for value in checks.values())
+    ):
+        raise RuntimeError(f"Mask-video VAE gate did not pass: {report_path}")
+    manifest_path = heldout_cache / "manifest.json"
+    if Path(str(report.get("cache"))).resolve() != heldout_cache:
+        raise ValueError("Mask-video VAE report uses a different held-out cache")
+    if report.get("cache_manifest_sha256") != sha256_file(manifest_path):
+        raise ValueError("Held-out cache changed after mask-video VAE gate")
+    if report.get("cache_schema_version") != EXPECTED_CACHE_SCHEMA:
+        raise ValueError("Unexpected cache schema in mask-video VAE report")
+    if report.get("policy_id") != heldout_manifest.get("policy_id"):
+        raise ValueError("Mask-video VAE report uses a different policy cache")
+    if Path(str(report.get("vae"))).resolve() != vae:
+        raise ValueError("Mask-video VAE report uses a different VAE")
+    vae_config = vae / "config.json"
+    if report.get("vae_config_sha256") != sha256_file(vae_config):
+        raise ValueError("VAE config changed after mask-video representation gate")
+    if int(report.get("num_samples", -1)) != EXPECTED_HELDOUT_EPISODES:
+        raise ValueError("Mask-video VAE gate must cover all held-out episodes")
+    if report.get("thresholds") != EXPECTED_MASK_VIDEO_VAE_THRESHOLDS:
+        raise ValueError("Mask-video VAE gate thresholds differ from the protocol")
+    if (
+        int(report.get("num_views", -1)) != 2
+        or float(report.get("threshold", -1.0)) != 0.5
+        or report.get("dtype") != "fp32"
+        or [int(value) for value in report.get("horizons", [])]
+        != [0, 12, 24, 36, 48]
+        or report.get("counterfactual_rgb_used") is not False
+    ):
+        raise ValueError("Unexpected mask-video VAE evaluation protocol")
+    return {
+        "report": str(report_path),
+        "report_sha256": sha256_file(report_path),
+        "num_samples": int(report["num_samples"]),
+        "thresholds": report["thresholds"],
+        "checks": checks,
+    }
+
+
 def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, str]]:
     report_path = args.preflight_report.resolve()
     report = load_json(report_path)
@@ -445,12 +542,18 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         heldout_cache,
         heldout_manifest,
     )
+    shared_mask_video_gate = validate_shared_mask_video_gate(
+        args,
+        vae,
+        heldout_cache,
+        heldout_manifest,
+    )
 
     t5_embedding_dir = dataset_root / "t5_embedding"
     if not t5_embedding_dir.is_dir():
         raise FileNotFoundError(t5_embedding_dir)
 
-    output_device = os.stat(output_dir.parent).st_dev
+    output_filesystem = filesystem_id(output_dir.parent)
     stage_sources = [
         checkpoint,
         train_cache,
@@ -469,8 +572,10 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
                 Path(clean_latent_gates["demonstration_registration"]),
             ]
         )
+    if shared_mask_video_gate is not None:
+        stage_sources.append(Path(shared_mask_video_gate["report"]))
     for source in stage_sources:
-        if os.stat(source).st_dev != output_device:
+        if filesystem_id(source) != output_filesystem:
             raise ValueError(f"Large stage-one source/output crosses filesystems: {source}")
 
     latest_mtime_paths = [checkpoint, train_cache, heldout_cache, split_manifest]
@@ -484,6 +589,8 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
                 Path(clean_latent_gates["demonstration_registration"]),
             ]
         )
+    if shared_mask_video_gate is not None:
+        latest_mtime_paths.append(Path(shared_mask_video_gate["report"]))
     latest_mtime = latest_input_mtime_ns(latest_mtime_paths)
     if report_path.stat().st_mtime_ns < latest_mtime:
         raise RuntimeError(
@@ -586,6 +693,8 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
     }
     if clean_latent_gates is not None:
         common["clean_latent_gates"] = clean_latent_gates
+    if shared_mask_video_gate is not None:
+        common["shared_mask_video_gate"] = shared_mask_video_gate
     comparison_id = sha256_json(common)
 
     env_overrides = {
@@ -653,6 +762,11 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
             "mask_probe": (
                 clean_latent_gates["probe_root"]
                 if clean_latent_gates is not None
+                else None
+            ),
+            "mask_video_vae_report": (
+                shared_mask_video_gate["report"]
+                if shared_mask_video_gate is not None
                 else None
             ),
             "counterfactual_mask_weight": float(
