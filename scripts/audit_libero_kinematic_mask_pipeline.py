@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=256)
     parser.add_argument("--damping", type=float, default=0.05)
     parser.add_argument("--max-iterations", type=int, default=30)
+    parser.add_argument("--translation-execution-gain", type=float, default=0.2)
+    parser.add_argument("--rotation-execution-gain", type=float, default=0.2)
     return parser.parse_args()
 
 
@@ -144,6 +146,8 @@ def main() -> None:
                             args.height,
                             damping=args.damping,
                             max_iterations=args.max_iterations,
+                            translation_execution_gain=args.translation_execution_gain,
+                            rotation_execution_gain=args.rotation_execution_gain,
                         ),
                     )
                 _, renderer = renderers[task_index]
@@ -314,6 +318,8 @@ def main() -> None:
             "height": args.height,
             "damping": args.damping,
             "max_iterations": args.max_iterations,
+            "translation_execution_gain": args.translation_execution_gain,
+            "rotation_execution_gain": args.rotation_execution_gain,
         },
         "episodes": episode_summaries,
     }
@@ -326,4 +332,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

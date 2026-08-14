@@ -127,6 +127,8 @@ class KinematicRobotMaskRenderer:
         position_tolerance: float = 1e-5,
         orientation_tolerance: float = 1e-4,
         max_joint_update: float = 0.12,
+        translation_execution_gain: float = 0.2,
+        rotation_execution_gain: float = 0.2,
     ) -> None:
         self.environment = environment
         self.sim = environment.sim
@@ -139,9 +141,15 @@ class KinematicRobotMaskRenderer:
         self.position_tolerance = float(position_tolerance)
         self.orientation_tolerance = float(orientation_tolerance)
         self.max_joint_update = float(max_joint_update)
+        self.translation_execution_gain = float(translation_execution_gain)
+        self.rotation_execution_gain = float(rotation_execution_gain)
 
         if self.width <= 0 or self.height <= 0:
             raise ValueError("Rasterizer dimensions must be positive")
+        if not 0.0 < self.translation_execution_gain <= 1.0:
+            raise ValueError("translation_execution_gain must be in (0, 1]")
+        if not 0.0 < self.rotation_execution_gain <= 1.0:
+            raise ValueError("rotation_execution_gain must be in (0, 1]")
         self.arm_qpos_indexes = np.asarray(
             self.robot._ref_joint_pos_indexes, dtype=np.int64
         )
@@ -251,8 +259,13 @@ class KinematicRobotMaskRenderer:
             raise ValueError(f"Expected action shape (7,), got {action.shape}")
         clipped = np.clip(action[:6], -1.0, 1.0)
         start_position, start_rotation = self.current_eef_pose()
-        desired_position = start_position + clipped[:3] * 0.05
-        desired_rotation = axis_angle_to_matrix(clipped[3:6] * 0.5) @ start_rotation
+        desired_position = (
+            start_position
+            + clipped[:3] * 0.05 * self.translation_execution_gain
+        )
+        desired_rotation = axis_angle_to_matrix(
+            clipped[3:6] * 0.5 * self.rotation_execution_gain
+        ) @ start_rotation
 
         position_error_norm = float("inf")
         orientation_error_norm = float("inf")
