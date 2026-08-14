@@ -565,6 +565,7 @@ class CasualWorldActionTransformer_MoT(
         out_action_channels: int = 32,
         num_embodiments: int = 4,
         counterfactual_mask_frames_per_latent: int = 0,
+        use_mask_video_modality_embedding: bool = False,
     ) -> None:
         super().__init__()
 
@@ -614,6 +615,11 @@ class CasualWorldActionTransformer_MoT(
         self.norm_out = FP32LayerNorm(inner_dim, eps, elementwise_affine=False)
         self.proj_out = nn.Linear(inner_dim, out_channels * math.prod(patch_size))
         self.scale_shift_table = nn.Parameter(torch.randn(1, 2, inner_dim) / inner_dim**0.5)
+        self.mask_video_modality_embedding = None
+        if use_mask_video_modality_embedding:
+            self.mask_video_modality_embedding = nn.Parameter(
+                torch.zeros(1, 1, inner_dim)
+            )
         self.counterfactual_mask_head = None
         if counterfactual_mask_frames_per_latent > 0:
             self.counterfactual_mask_head = nn.Linear(
@@ -814,8 +820,24 @@ class CasualWorldActionTransformer_MoT(
         self,
         ref_latents: torch.Tensor,
         future_latents: Optional[torch.Tensor] = None,
+        future_visual_modality: str = "rgb",
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], int, int, Optional[Dict[str, int]]]:
         """Encode ref (+ optional future) latents into visual stream tokens and RoPE."""
+        if future_visual_modality not in {"rgb", "mask"}:
+            raise ValueError(
+                "future_visual_modality must be either 'rgb' or 'mask', got "
+                f"{future_visual_modality!r}"
+            )
+        if future_visual_modality == "mask" and future_latents is None:
+            raise ValueError("Mask-video modality requires future latents")
+        if (
+            future_visual_modality == "mask"
+            and self.mask_video_modality_embedding is None
+        ):
+            raise ValueError(
+                "Mask-video modality requested but use_mask_video_modality_embedding "
+                "is disabled"
+            )
         if future_latents is not None:
             visual_input = torch.cat([ref_latents, future_latents], dim=2)
         else:
@@ -832,6 +854,18 @@ class CasualWorldActionTransformer_MoT(
         post_patch_width = width // p_w
         num_ref_tokens = post_patch_width * post_patch_height
         num_future_tokens = visual_hidden_states.shape[1] - num_ref_tokens
+        if future_visual_modality == "mask":
+            visual_hidden_states = torch.cat(
+                [
+                    visual_hidden_states[:, :num_ref_tokens],
+                    visual_hidden_states[:, num_ref_tokens:]
+                    + self.mask_video_modality_embedding.to(
+                        device=visual_hidden_states.device,
+                        dtype=visual_hidden_states.dtype,
+                    ),
+                ],
+                dim=1,
+            )
         grid_info = None
         if future_latents is not None:
             grid_info = {
@@ -1182,10 +1216,13 @@ class CasualWorldActionTransformer_MoT(
         output_counterfactual_mask: bool = False,
         output_action: bool = True,
         output_visual: bool = True,
+        future_visual_modality: str = "rgb",
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
         action_hidden_states, action_rotary_emb, num_state_tokens, _ = self.encode_action_tokens(state, action, embodiment_id=embodiment_id)
         visual_hidden_states, visual_rotary_emb, num_ref_tokens, _, grid_info = self.encode_visual_tokens(
-            ref_latents, noisy_latents
+            ref_latents,
+            noisy_latents,
+            future_visual_modality=future_visual_modality,
         )
         return self._forward_tokens(
             action_hidden_states=action_hidden_states,
