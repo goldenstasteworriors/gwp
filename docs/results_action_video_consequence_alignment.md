@@ -314,6 +314,10 @@ cache schema 随后升级为 `libero-counterfactual-robot-mask-v5`，明确使�
 
 v5 的最终 preflight 位于 `shared_mask_video_flow_v5_stage1_op159/preflight_final_19b8c5b.json`：commit `19b8c5b`，train/heldout 为 200/50、重叠为 0，train/heldout simulator 转换改变元素比例为 `0.142857/0.143393`。同 commit 的 50-episode Wan-VAE gate 再次 11/11 通过，full/dynamic/new-occupancy IoU mean 为 `0.99033/0.97430/0.96969`；matched/full dry-run comparison ID 均为 `c396ac984f4a11157496c9e9c20805f8ffa070d25b5628657d544c62f937ef9d`。正式 v5 成对训练从该 gate 启动，结果解释必须以 v5 checkpoint 为起点。
 
+v5 matched/full 训练均完成 200 steps、exit code 0，训练 manifest 的 comparison ID 与 commit 均严格相同。held-out mask-flow evaluator 位于 `shared_mask_video_flow_v5_mask_eval_op165`，在相同 50 episodes、三组 timestep/noise 上比较正确 policy action、同任务循环打乱 action 和 zero-flow。full 的正确动作 mask-flow MSE 从 matched 的 `0.47344` 降到 `0.05251`（下降 88.9%），但 full 的 correct-vs-shuffled MSE advantage 仅 `0.000108`，matched 为 `0.000120`；full-minus-matched action-sensitivity advantage 为 `-1.15e-5`，task-stratified bootstrap 95% CI `[-1.81e-4,1.51e-4]`。所以该分支主要学会 mask-video 分布，并未证明利用动作条件预测不同后果。
+
+同一 split 的 open-loop 结果位于 `shared_mask_video_flow_v5_open_loop_op166`。matched/full MSE 为 `0.03043/0.03169`（full +4.12%），MAE 为 `0.09490/0.09460`（full -0.31%），gripper sign accuracy 为 `0.91292/0.91375`（+0.083 percentage points）；三项 paired 95% CI 均跨 0。full 的 out-of-range element/step fraction 从 `0.03155/0.2050` 增至 `0.07298/0.47583`，差值 95% CI 分别为 `[+0.03423,+0.04869]` 和 `[+0.22041,+0.32042]`，明确恶化。严格结论是：shared mask-video flow 在 200-step 预算下通过“可优化”门，但未通过 action-conditioning 或 action-improvement 门，且增加动作越界；因此停止为该方法扩大闭环预算，转入下一种最小改动方法，而不是把低 mask loss 写成控制收益。
+
 ## 结果位置
 
 - 当前 4×PPU 服务器：`/workspace/WM/gwp-action-video-results/`
