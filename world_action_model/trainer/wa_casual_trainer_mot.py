@@ -35,6 +35,77 @@ def module_state_sha256(module: torch.nn.Module) -> str:
     return digest.hexdigest()
 
 
+def build_counterfactual_mask_video(
+    initial_mask: torch.Tensor,
+    future_masks: torch.Tensor,
+) -> torch.Tensor:
+    """Build a three-channel ``[-1, 1]`` mask video for the frozen Wan VAE."""
+
+    if initial_mask.ndim != 3:
+        raise ValueError(
+            f"Expected counterfactual initial mask [B,H,W], got {tuple(initial_mask.shape)}"
+        )
+    if future_masks.ndim != 4:
+        raise ValueError(
+            f"Expected counterfactual future masks [B,T,H,W], got {tuple(future_masks.shape)}"
+        )
+    if (
+        initial_mask.shape[0] != future_masks.shape[0]
+        or initial_mask.shape[1:] != future_masks.shape[2:]
+    ):
+        raise ValueError(
+            "Counterfactual initial/future mask shapes do not match: "
+            f"{tuple(initial_mask.shape)} vs {tuple(future_masks.shape)}"
+        )
+    mask_video = torch.cat([initial_mask[:, None], future_masks], dim=1)
+    mask_video = mask_video.clamp(0.0, 1.0).unsqueeze(2).repeat(1, 1, 3, 1, 1)
+    return mask_video * 2.0 - 1.0
+
+
+def counterfactual_latent_valid_mask(
+    pixel_valid: torch.Tensor,
+    latent_height: int,
+    latent_width: int,
+) -> torch.Tensor:
+    """Map future pixel validity to a broadcastable latent-flow validity mask."""
+
+    if pixel_valid.ndim != 4:
+        raise ValueError(
+            f"Expected counterfactual valid mask [B,T,H,W], got {tuple(pixel_valid.shape)}"
+        )
+    if pixel_valid.shape[1] <= 0:
+        raise ValueError("Counterfactual valid mask must contain a future frame")
+    spatial_valid = pixel_valid.float().amin(dim=1, keepdim=True)
+    spatial_valid = F.interpolate(
+        spatial_valid,
+        size=(int(latent_height), int(latent_width)),
+        mode="nearest",
+    )
+    return spatial_valid.unsqueeze(2)
+
+
+def masked_flow_mse(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    """Mean flow-matching error over only the explicitly valid latent region."""
+
+    if prediction.shape != target.shape:
+        raise ValueError(
+            f"Flow prediction/target shapes differ: {tuple(prediction.shape)} vs {tuple(target.shape)}"
+        )
+    try:
+        expanded_valid = torch.broadcast_to(valid.float(), prediction.shape)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"Latent valid mask {tuple(valid.shape)} cannot broadcast to {tuple(prediction.shape)}"
+        ) from exc
+    denominator = expanded_valid.sum().clamp_min(1.0)
+    squared_error = (prediction.float() - target.float()).pow(2)
+    return (squared_error * expanded_valid).sum() / denominator
+
+
 def set_counterfactual_mask_trainable_scope(transformer, scope: str) -> int:
     """Apply the mask mechanism-control freeze and return trainable parameters."""
 
@@ -155,16 +226,20 @@ class CasualWATrainerMoT(Trainer):
         if self.counterfactual_mask_alignment_mode not in {
             "hidden_head",
             "clean_latent_probe",
+            "shared_mask_video_flow",
         }:
             raise ValueError(
                 "counterfactual_mask_alignment_mode must be one of "
-                "hidden_head, clean_latent_probe"
+                "hidden_head, clean_latent_probe, shared_mask_video_flow"
             )
         if (
-            self.counterfactual_mask_alignment_mode == "clean_latent_probe"
+            self.counterfactual_mask_alignment_mode
+            in {"clean_latent_probe", "shared_mask_video_flow"}
             and self.counterfactual_mask_trainable_scope != "all"
         ):
-            raise ValueError("clean_latent_probe requires trainable scope 'all'")
+            raise ValueError(
+                f"{self.counterfactual_mask_alignment_mode} requires trainable scope 'all'"
+            )
         if (
             self.counterfactual_mask_trainable_scope == "head_only"
             and self.counterfactual_mask_loss_weight <= 0.0
@@ -239,6 +314,17 @@ class CasualWATrainerMoT(Trainer):
         ):
             raise ValueError(
                 "counterfactual_mask_frames_per_latent must be enabled when mask loss is active"
+            )
+        if (
+            (
+                self.counterfactual_mask_loss_weight > 0.0
+                or self.counterfactual_mask_compute_control
+            )
+            and self.counterfactual_mask_alignment_mode == "shared_mask_video_flow"
+            and not bool(transformer_cfg.get("use_mask_video_modality_embedding", False))
+        ):
+            raise ValueError(
+                "shared_mask_video_flow requires use_mask_video_modality_embedding"
             )
         transformer = CasualWorldActionTransformer_MoT(**transformer_cfg)
         transformer = load_pretrained_weights(
@@ -380,11 +466,13 @@ class CasualWATrainerMoT(Trainer):
             "action_loss": self.action_loss_weight * action_loss,
         }
         if self._should_compute_counterfactual_mask_loss():
-            required_keys = (
+            required_keys = [
                 "counterfactual_action",
                 "counterfactual_robot_masks",
                 "counterfactual_robot_mask_valid",
-            )
+            ]
+            if self.counterfactual_mask_alignment_mode == "shared_mask_video_flow":
+                required_keys.append("counterfactual_initial_robot_mask")
             missing_keys = [key for key in required_keys if key not in batch_dict]
             if missing_keys:
                 raise KeyError(f"Counterfactual mask batch is missing keys: {missing_keys}")
@@ -402,34 +490,61 @@ class CasualWATrainerMoT(Trainer):
                     f"training action tokens {num_action_tokens}"
                 )
 
-            counterfactual_future_noise = torch.randn_like(visual_latents[:, :, 1:]).to(
-                self.dtype
-            )
-            counterfactual_timestep = torch.zeros_like(timestep)
-            counterfactual_timestep[
-                :, num_state_tokens + num_action_tokens + num_clean_latent_tokens :
-            ] = 1000
-            if self.counterfactual_mask_alignment_mode == "hidden_head":
-                counterfactual_output = transformer(
-                    ref_latents=ref_latents,
-                    noisy_latents=counterfactual_future_noise,
-                    timestep=counterfactual_timestep,
-                    encoder_hidden_states=prompt_embeds,
-                    return_dict=True,
-                    action=counterfactual_action.detach(),
-                    state=state,
-                    embodiment_id=embodiment_id,
-                    output_counterfactual_mask=True,
-                    output_action=False,
-                    output_visual=False,
+            if self.counterfactual_mask_alignment_mode == "shared_mask_video_flow":
+                counterfactual_initial_mask = batch_dict[
+                    "counterfactual_initial_robot_mask"
+                ].to(device=state.device, dtype=torch.float32)
+                counterfactual_future_masks = batch_dict[
+                    "counterfactual_robot_masks"
+                ].to(device=state.device, dtype=torch.float32)
+                counterfactual_mask_video = build_counterfactual_mask_video(
+                    counterfactual_initial_mask,
+                    counterfactual_future_masks,
                 )
-                mask_logits = counterfactual_output[
-                    "counterfactual_mask_logits"
-                ].float()
-            else:
+                if counterfactual_mask_video.shape != images.shape:
+                    raise ValueError(
+                        "Counterfactual mask video does not match RGB video shape: "
+                        f"{tuple(counterfactual_mask_video.shape)} vs {tuple(images.shape)}"
+                    )
+                counterfactual_mask_latents = self.forward_vae(
+                    counterfactual_mask_video
+                )
+                if counterfactual_mask_latents.shape != visual_latents.shape:
+                    raise ValueError(
+                        "Counterfactual mask/RGB latent shapes differ: "
+                        f"{tuple(counterfactual_mask_latents.shape)} vs "
+                        f"{tuple(visual_latents.shape)}"
+                    )
+                counterfactual_mask_future = counterfactual_mask_latents[:, :, 1:]
+                (
+                    counterfactual_visual_timestep,
+                    counterfactual_visual_sigma,
+                ) = self.get_timestep_and_sigma(
+                    bs,
+                    counterfactual_mask_future.ndim,
+                    self.visual_flow_shift,
+                )
+                counterfactual_future_noise = torch.randn_like(
+                    counterfactual_mask_future
+                )
+                counterfactual_noisy_future = (
+                    counterfactual_future_noise * counterfactual_visual_sigma
+                    + counterfactual_mask_future
+                    * (1.0 - counterfactual_visual_sigma)
+                ).to(self.dtype)
+                counterfactual_flow_target = (
+                    counterfactual_future_noise - counterfactual_mask_future
+                )
+                counterfactual_timestep = torch.zeros_like(timestep)
+                counterfactual_timestep[
+                    :,
+                    num_state_tokens
+                    + num_action_tokens
+                    + num_clean_latent_tokens :,
+                ] = counterfactual_visual_timestep[:, None]
                 counterfactual_output = transformer(
                     ref_latents=ref_latents,
-                    noisy_latents=counterfactual_future_noise,
+                    noisy_latents=counterfactual_noisy_future,
                     timestep=counterfactual_timestep,
                     encoder_hidden_states=prompt_embeds,
                     return_dict=True,
@@ -439,41 +554,104 @@ class CasualWATrainerMoT(Trainer):
                     output_counterfactual_mask=False,
                     output_action=False,
                     output_visual=True,
+                    future_visual_modality="mask",
                 )
-                counterfactual_flow = counterfactual_output.sample[:, :, 1:].float()
-                if counterfactual_flow.shape != counterfactual_future_noise.shape:
-                    raise ValueError(
-                        "Counterfactual video flow/future-noise shape mismatch: "
-                        f"{tuple(counterfactual_flow.shape)} vs "
-                        f"{tuple(counterfactual_future_noise.shape)}"
+                counterfactual_flow = counterfactual_output.sample[:, :, 1:]
+                latent_valid = counterfactual_latent_valid_mask(
+                    batch_dict["counterfactual_robot_mask_valid"].to(
+                        device=counterfactual_flow.device,
+                        dtype=torch.float32,
+                    ),
+                    counterfactual_flow.shape[-2],
+                    counterfactual_flow.shape[-1],
+                )
+                raw_mask_loss = masked_flow_mse(
+                    counterfactual_flow,
+                    counterfactual_flow_target,
+                    latent_valid,
+                )
+            else:
+                counterfactual_future_noise = torch.randn_like(
+                    visual_latents[:, :, 1:]
+                ).to(self.dtype)
+                counterfactual_timestep = torch.zeros_like(timestep)
+                counterfactual_timestep[
+                    :,
+                    num_state_tokens
+                    + num_action_tokens
+                    + num_clean_latent_tokens :,
+                ] = 1000
+                if self.counterfactual_mask_alignment_mode == "hidden_head":
+                    counterfactual_output = transformer(
+                        ref_latents=ref_latents,
+                        noisy_latents=counterfactual_future_noise,
+                        timestep=counterfactual_timestep,
+                        encoder_hidden_states=prompt_embeds,
+                        return_dict=True,
+                        action=counterfactual_action.detach(),
+                        state=state,
+                        embodiment_id=embodiment_id,
+                        output_counterfactual_mask=True,
+                        output_action=False,
+                        output_visual=False,
                     )
-                # At sigma=1, x_t=noise and flow target=noise-clean, so the
-                # one-step predicted clean latent is noise-predicted_flow.
-                predicted_clean_future = (
-                    counterfactual_future_noise.float() - counterfactual_flow
+                    mask_logits = counterfactual_output[
+                        "counterfactual_mask_logits"
+                    ].float()
+                else:
+                    counterfactual_output = transformer(
+                        ref_latents=ref_latents,
+                        noisy_latents=counterfactual_future_noise,
+                        timestep=counterfactual_timestep,
+                        encoder_hidden_states=prompt_embeds,
+                        return_dict=True,
+                        action=counterfactual_action.detach(),
+                        state=state,
+                        embodiment_id=embodiment_id,
+                        output_counterfactual_mask=False,
+                        output_action=False,
+                        output_visual=True,
+                    )
+                    counterfactual_flow = counterfactual_output.sample[
+                        :, :, 1:
+                    ].float()
+                    if counterfactual_flow.shape != counterfactual_future_noise.shape:
+                        raise ValueError(
+                            "Counterfactual video flow/future-noise shape mismatch: "
+                            f"{tuple(counterfactual_flow.shape)} vs "
+                            f"{tuple(counterfactual_future_noise.shape)}"
+                        )
+                    # At sigma=1, x_t=noise and flow target=noise-clean, so the
+                    # one-step predicted clean latent is noise-predicted_flow.
+                    predicted_clean_future = (
+                        counterfactual_future_noise.float() - counterfactual_flow
+                    )
+                    if self.counterfactual_latent_mask_probe is None:
+                        raise RuntimeError("clean_latent_probe was not initialized")
+                    mask_logits = self.counterfactual_latent_mask_probe(
+                        predicted_clean_future
+                    ).float()
+                mask_target = batch_dict["counterfactual_robot_masks"].to(
+                    device=mask_logits.device,
+                    dtype=torch.float32,
                 )
-                if self.counterfactual_latent_mask_probe is None:
-                    raise RuntimeError("clean_latent_probe was not initialized")
-                mask_logits = self.counterfactual_latent_mask_probe(
-                    predicted_clean_future
-                ).float()
-            mask_target = batch_dict["counterfactual_robot_masks"].to(
-                device=mask_logits.device,
-                dtype=torch.float32,
-            )
-            mask_valid = batch_dict["counterfactual_robot_mask_valid"].to(
-                device=mask_logits.device,
-                dtype=torch.float32,
-            )
-            mask_target = F.interpolate(mask_target, size=mask_logits.shape[-2:], mode="nearest")
-            mask_valid = F.interpolate(mask_valid, size=mask_logits.shape[-2:], mode="nearest")
-            raw_mask_loss = masked_bce_dice_loss(
-                mask_logits,
-                mask_target,
-                mask_valid,
-                bce_weight=self.counterfactual_mask_bce_weight,
-                dice_weight=self.counterfactual_mask_dice_weight,
-            )
+                mask_valid = batch_dict["counterfactual_robot_mask_valid"].to(
+                    device=mask_logits.device,
+                    dtype=torch.float32,
+                )
+                mask_target = F.interpolate(
+                    mask_target, size=mask_logits.shape[-2:], mode="nearest"
+                )
+                mask_valid = F.interpolate(
+                    mask_valid, size=mask_logits.shape[-2:], mode="nearest"
+                )
+                raw_mask_loss = masked_bce_dice_loss(
+                    mask_logits,
+                    mask_target,
+                    mask_valid,
+                    bce_weight=self.counterfactual_mask_bce_weight,
+                    dice_weight=self.counterfactual_mask_dice_weight,
+                )
             losses["counterfactual_mask_loss"] = (
                 self.counterfactual_mask_loss_weight * raw_mask_loss
             )

@@ -90,9 +90,14 @@ counterfactual_mask_trainable_scope = _env(
 counterfactual_mask_alignment_mode = _env(
     "GWP_COUNTERFACTUAL_MASK_ALIGNMENT_MODE", "hidden_head"
 )
-if counterfactual_mask_alignment_mode not in {"hidden_head", "clean_latent_probe"}:
+if counterfactual_mask_alignment_mode not in {
+    "hidden_head",
+    "clean_latent_probe",
+    "shared_mask_video_flow",
+}:
     raise ValueError(
-        "GWP_COUNTERFACTUAL_MASK_ALIGNMENT_MODE must be hidden_head or clean_latent_probe"
+        "GWP_COUNTERFACTUAL_MASK_ALIGNMENT_MODE must be hidden_head, "
+        "clean_latent_probe, or shared_mask_video_flow"
     )
 counterfactual_mask_probe_pretrained = _env(
     "GWP_COUNTERFACTUAL_MASK_PROBE_PRETRAINED"
@@ -218,6 +223,10 @@ config = dict(
                 if counterfactual_mask_cache_paths
                 and counterfactual_mask_alignment_mode == "hidden_head"
                 else 0
+            ),
+            use_mask_video_modality_embedding=(
+                bool(counterfactual_mask_cache_paths)
+                and counterfactual_mask_alignment_mode == "shared_mask_video_flow"
             ),
         ),
         visual_flow_shift=2.0,
