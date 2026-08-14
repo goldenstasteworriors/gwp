@@ -120,6 +120,97 @@ def configure_libero_path(dataset_root: Path) -> Path:
     )
 
 
+def load_libero_runtime() -> tuple[Any, Any, Any]:
+    """Load LeRobot's LIBERO adapter or an equivalent lightweight fallback.
+
+    LeRobot 0.4 requires a newer Python than LIBERO's official Python 3.8
+    environment.  Mask rendering only needs the environment adapter, so the
+    fallback below mirrors that adapter without importing the rest of LeRobot.
+    """
+
+    try:
+        from lerobot.envs.libero import LiberoEnv, _get_suite, get_libero_dummy_action
+
+        return LiberoEnv, _get_suite, get_libero_dummy_action
+    except ModuleNotFoundError as error:
+        if error.name != "lerobot":
+            raise
+
+    from libero.libero import benchmark, get_libero_path
+    from libero.libero.envs import OffScreenRenderEnv
+
+    def get_suite(name: str) -> Any:
+        suites = benchmark.get_benchmark_dict()
+        if name not in suites:
+            raise ValueError(
+                f"Unknown LIBERO suite {name!r}; available: {sorted(suites)}"
+            )
+        return suites[name]()
+
+    def get_dummy_action() -> list[int]:
+        return [0, 0, 0, 0, 0, 0, -1]
+
+    class LiberoEnv:
+        """Minimal semantic equivalent of ``lerobot.envs.libero.LiberoEnv``."""
+
+        def __init__(
+            self,
+            task_suite: Any,
+            task_id: int,
+            task_suite_name: str,
+            obs_type: str,
+            camera_name: str,
+            init_states: bool,
+            n_envs: int,
+            num_steps_wait: int,
+        ) -> None:
+            del task_suite_name, init_states, n_envs, num_steps_wait
+            if obs_type != "pixels_agent_pos":
+                raise ValueError(f"Unsupported fallback observation type: {obs_type}")
+            self.camera_name = camera_name
+            task = task_suite.get_task(task_id)
+            bddl_path = Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
+            self._env = OffScreenRenderEnv(
+                bddl_file_name=str(bddl_path),
+                camera_heights=256,
+                camera_widths=256,
+            )
+            self._env.reset()
+
+        def _format_raw_obs(self, raw_obs: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "pixels": {"image": raw_obs[self.camera_name]},
+                "robot_state": {
+                    "eef": {
+                        "pos": raw_obs["robot0_eef_pos"],
+                        "quat": raw_obs["robot0_eef_quat"],
+                        "mat": self._env.robots[0].controller.ee_ori_mat,
+                    },
+                    "gripper": {
+                        "qpos": raw_obs["robot0_gripper_qpos"],
+                        "qvel": raw_obs["robot0_gripper_qvel"],
+                    },
+                    "joints": {
+                        "pos": raw_obs["robot0_joint_pos"],
+                        "vel": raw_obs["robot0_joint_vel"],
+                    },
+                },
+            }
+
+        def reset(self, seed: int) -> dict[str, Any]:
+            self._env.seed(seed)
+            return self._format_raw_obs(self._env.reset())
+
+        def step(self, action: np.ndarray) -> tuple[Any, ...]:
+            raw_obs, reward, done, info = self._env.step(action)
+            return self._format_raw_obs(raw_obs), reward, done, info
+
+        def close(self) -> None:
+            self._env.close()
+
+    return LiberoEnv, get_suite, get_dummy_action
+
+
 def discover_predictions(root: Path, episodes: list[int] | None) -> dict[int, Path]:
     discovered: dict[int, Path] = {}
     for path in sorted(root.glob("episode_*/predicted_actions.npy")):
@@ -452,9 +543,9 @@ def main() -> None:
         raise FileNotFoundError(info_path)
     dataset_info_sha256 = sha256_file(info_path)
     libero_config_path = configure_libero_path(args.dataset_root)
-    from lerobot.envs.libero import LiberoEnv, _get_suite, get_libero_dummy_action
+    LiberoEnv, get_suite, get_libero_dummy_action = load_libero_runtime()
 
-    suite = _get_suite(args.suite)
+    suite = get_suite(args.suite)
     suite_language_index = suite_task_index_by_language(suite)
     raw_sources: dict[int, dict[str, Any]] = {}
     matched_demos: dict[int, tuple[dict[str, Any], float]] = {}
