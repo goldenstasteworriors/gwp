@@ -85,6 +85,12 @@ def path_is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
+def filesystem_id(path: Path) -> int:
+    """Return the filesystem id, including across OverlayFS lower/upper inodes."""
+
+    return int(os.statvfs(path).f_fsid)
+
+
 def load_source_episodes(
     dataset_root: Path,
     requested_episodes: set[int],
@@ -426,11 +432,13 @@ def main() -> None:
             raise FileExistsError(f"Refusing existing stage-one output: {output}")
         if not output.parent.is_dir():
             raise FileNotFoundError(f"Stage-one output parent does not exist: {output.parent}")
-    if os.stat(args.matched_output.parent).st_dev != os.stat(args.full_output.parent).st_dev:
+    if filesystem_id(args.matched_output.parent) != filesystem_id(
+        args.full_output.parent
+    ):
         raise ValueError("Matched and full outputs must use the same mounted filesystem")
-    output_device = os.stat(args.matched_output.parent).st_dev
+    output_filesystem = filesystem_id(args.matched_output.parent)
     for source in (args.checkpoint, args.train_cache, args.heldout_cache):
-        if os.stat(source).st_dev != output_device:
+        if filesystem_id(source) != output_filesystem:
             raise ValueError(f"Large stage-one source/output crosses filesystems: {source}")
 
     split_manifest_path = args.split_dir / "manifest.json"
@@ -484,7 +492,7 @@ def main() -> None:
     if train_audit["metadata"] != heldout_audit["metadata"]:
         raise ValueError("Train and held-out cache metadata differ")
     for raw_file in train_audit["raw_demo_files"] + heldout_audit["raw_demo_files"]:
-        if os.stat(raw_file).st_dev != output_device:
+        if filesystem_id(Path(raw_file)) != output_filesystem:
             raise ValueError(f"Raw demo/cache/output crosses filesystems: {raw_file}")
 
     source_weight_bytes = checkpoint_weight_bytes(args.checkpoint)
