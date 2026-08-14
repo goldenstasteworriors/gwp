@@ -45,7 +45,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def task_prompt_files(dataset_root: Path) -> dict[int, Path]:
+def task_prompt_files(
+    dataset_root: Path, suite: Any
+) -> tuple[dict[int, Path], dict[int, dict[str, Any]]]:
+    """Match dataset prompts to suite tasks by language, never by integer order."""
+
     paths = sorted(dataset_root.glob("data/chunk-*/file-*.parquet"))
     if not paths:
         raise FileNotFoundError(f"No parquet data under {dataset_root}")
@@ -53,11 +57,53 @@ def task_prompt_files(dataset_root: Path) -> dict[int, Path]:
         [pd.read_parquet(path, columns=["episode_index", "task_index"]) for path in paths],
         ignore_index=True,
     )
-    first_episodes = frames.groupby("task_index")["episode_index"].min().to_dict()
-    return {
-        int(task_id): dataset_root / "t5_embedding" / f"episode_{int(episode):06d}.pt"
-        for task_id, episode in first_episodes.items()
-    }
+    metadata_paths = sorted(dataset_root.glob("meta/episodes/chunk-*/file-*.parquet"))
+    if not metadata_paths:
+        raise FileNotFoundError(f"No episode metadata under {dataset_root}")
+    metadata = pd.concat(
+        [pd.read_parquet(path, columns=["episode_index", "tasks"]) for path in metadata_paths],
+        ignore_index=True,
+    )
+    episode_languages: dict[int, str] = {}
+    for _, row in metadata.iterrows():
+        episode = int(row["episode_index"])
+        tasks = list(row["tasks"])
+        if len(tasks) != 1 or not str(tasks[0]).strip():
+            raise ValueError(f"Episode {episode} must have one language task: {tasks}")
+        episode_languages[episode] = str(tasks[0]).strip()
+
+    dataset_by_language: dict[str, tuple[int, int, Path]] = {}
+    for dataset_task_id, group in frames.groupby("task_index", sort=True):
+        episodes = sorted({int(value) for value in group["episode_index"]})
+        languages = {episode_languages[episode] for episode in episodes}
+        if len(languages) != 1:
+            raise ValueError(
+                f"Dataset task {dataset_task_id} has multiple languages: {sorted(languages)}"
+            )
+        language = next(iter(languages))
+        if language in dataset_by_language:
+            raise ValueError(f"Duplicate dataset task language: {language!r}")
+        episode = episodes[0]
+        prompt = dataset_root / "t5_embedding" / f"episode_{episode:06d}.pt"
+        if not prompt.is_file():
+            raise FileNotFoundError(prompt)
+        dataset_by_language[language] = (int(dataset_task_id), episode, prompt)
+
+    prompts: dict[int, Path] = {}
+    mapping: dict[int, dict[str, Any]] = {}
+    for suite_task_id in range(suite.n_tasks):
+        language = str(suite.get_task(suite_task_id).language).strip()
+        if language not in dataset_by_language:
+            raise ValueError(f"Suite task language is absent from dataset: {language!r}")
+        dataset_task_id, episode, prompt = dataset_by_language[language]
+        prompts[suite_task_id] = prompt
+        mapping[suite_task_id] = {
+            "dataset_task_id": dataset_task_id,
+            "prompt_episode_index": episode,
+            "task_language": language,
+            "prompt_path": str(prompt.resolve()),
+        }
+    return prompts, mapping
 
 
 def load_prompt(path: Path) -> torch.Tensor:
@@ -252,13 +298,13 @@ def load_libero_runtime() -> tuple[Any, Any]:
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    prompts = task_prompt_files(args.dataset_root)
     client = RobotInferenceClient(host=args.host, port=args.port)
 
     configure_libero_path(args.dataset_root)
     LiberoEnv, _get_suite = load_libero_runtime()
 
     suite = _get_suite(args.suite)
+    prompts, prompt_mapping = task_prompt_files(args.dataset_root, suite)
     rows: list[dict[str, Any]] = []
     prompt_sent: set[int] = set()
     for task_id in args.task_ids:
@@ -346,6 +392,7 @@ def main() -> None:
         "num_rollouts": len(rows),
         "success_rate": float(np.mean([row["success"] for row in rows])),
         "success_rate_by_task": by_task,
+        "prompt_mapping": {str(key): value for key, value in prompt_mapping.items()},
         "protocol": {
             "dataset_root": str(args.dataset_root.resolve()),
             "task_ids": [int(task_id) for task_id in args.task_ids],
