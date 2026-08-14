@@ -84,7 +84,17 @@ def main() -> None:
         raise ValueError("Dataset metadata changed after counterfactual cache generation")
     libero_config_path = configure_libero_path(dataset_root)
 
-    from lerobot.envs.libero import LiberoEnv, _get_suite, get_libero_dummy_action
+    try:
+        from lerobot.envs.libero import LiberoEnv, _get_suite, get_libero_dummy_action
+    except ModuleNotFoundError as error:
+        if error.name != "lerobot":
+            raise
+        from evaluate_libero_closed_loop import load_libero_runtime
+
+        LiberoEnv, _get_suite = load_libero_runtime()
+
+        def get_libero_dummy_action() -> np.ndarray:
+            return np.asarray([0, 0, 0, 0, 0, 0, -1], dtype=np.float32)
 
     suite_name = str(source_manifest["suite"])
     suite = _get_suite(suite_name)

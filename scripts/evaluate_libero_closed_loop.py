@@ -197,20 +197,18 @@ def load_libero_runtime() -> tuple[Any, Any]:
             self,
             task_suite: Any,
             task_id: int,
-            task_suite_name: str,
-            episode_length: int,
-            camera_name: str,
-            obs_type: str,
-            init_states: bool,
-            episode_index: int,
-            n_envs: int,
-            num_steps_wait: int,
+            task_suite_name: str = "",
+            episode_length: int = 1000,
+            camera_name: str = "agentview_image",
+            obs_type: str = "pixels_agent_pos",
+            init_states: bool = True,
+            episode_index: int = 0,
+            n_envs: int = 1,
+            num_steps_wait: int = 10,
         ) -> None:
             del task_suite_name
             if obs_type != "pixels_agent_pos":
                 raise ValueError(f"Unsupported fallback observation type: {obs_type}")
-            if not init_states:
-                raise ValueError("Closed-loop fallback requires benchmark initial states")
             if n_envs != 1:
                 raise ValueError("Closed-loop fallback supports exactly one environment")
             camera_names = [
@@ -225,10 +223,12 @@ def load_libero_runtime() -> tuple[Any, Any]:
             self._episode_length = int(episode_length)
             self._num_steps_wait = int(num_steps_wait)
             self._steps = 0
-            initial_states = task_suite.get_task_init_states(task_id)
-            self._initial_state = np.asarray(
-                initial_states[episode_index % len(initial_states)], dtype=np.float64
-            )
+            self._initial_state = None
+            if init_states:
+                initial_states = task_suite.get_task_init_states(task_id)
+                self._initial_state = np.asarray(
+                    initial_states[episode_index % len(initial_states)], dtype=np.float64
+                )
             bddl_path = (
                 Path(get_libero_path("bddl_files"))
                 / task.problem_folder
@@ -267,8 +267,9 @@ def load_libero_runtime() -> tuple[Any, Any]:
 
         def reset(self, seed: int) -> tuple[dict[str, Any], dict[str, bool]]:
             self._env.seed(seed)
-            self._env.reset()
-            raw_obs = self._env.set_init_state(self._initial_state)
+            raw_obs = self._env.reset()
+            if self._initial_state is not None:
+                raw_obs = self._env.set_init_state(self._initial_state)
             for _ in range(self._num_steps_wait):
                 raw_obs, _, _, _ = self._env.step([0, 0, 0, 0, 0, 0, -1])
             for robot in self._env.robots:
