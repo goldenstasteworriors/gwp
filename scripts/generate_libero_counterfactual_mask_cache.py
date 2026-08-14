@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Render policy-action robot masks without requiring a future RGB target.
+"""LEGACY: render policy-action masks with a simulator dynamics oracle.
 
 Each input ``predicted_actions.npy`` is executed from the matching LIBERO
-demonstration initial state.  The resulting simulator robot masks are valid
-embodiment-consequence targets for those predicted actions; demonstration
-future frames and demonstration actions are intentionally never loaded.
+demonstration initial state.  This queries benchmark dynamics through
+``env.step`` and is therefore ineligible for the dynamics-free alignment
+protocol.  It is retained only to reproduce and audit historical v3--v5
+results; use ``generate_libero_joint_trajectory_mask_cache.py`` for direct
+q-space FK/rasterization targets.
 """
 
 from __future__ import annotations
@@ -73,6 +75,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-match-atol", type=float, default=1e-6)
     parser.add_argument("--source-state-atol", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=20260813)
+    parser.add_argument(
+        "--allow-simulator-dynamics-oracle",
+        action="store_true",
+        help=(
+            "Required acknowledgement that this legacy generator calls env.step "
+            "and is not eligible for dynamics-free action/video alignment."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -520,6 +530,12 @@ def stack_captures(captures: list[dict[str, np.ndarray]]) -> dict[str, np.ndarra
 
 def main() -> None:
     args = parse_args()
+    if not args.allow_simulator_dynamics_oracle:
+        raise ValueError(
+            "This legacy generator queries benchmark dynamics with env.step. "
+            "Pass --allow-simulator-dynamics-oracle only for historical reproduction; "
+            "use generate_libero_joint_trajectory_mask_cache.py for valid q-space masks."
+        )
     horizons = sorted(set(args.horizons))
     if not horizons or horizons[0] < 0:
         raise ValueError("Horizons must be non-negative")
@@ -704,6 +720,8 @@ def main() -> None:
 
     manifest = {
         "schema_version": SCHEMA_VERSION,
+        "benchmark_dynamics_oracle_used": True,
+        "dynamics_free_alignment_eligible": False,
         "target_semantics": "robot embodiment after executing the matching policy-predicted action prefix",
         "policy_action_encoding": POLICY_ACTION_ENCODING,
         "simulator_action_encoding": SIMULATOR_ACTION_ENCODING,
