@@ -280,6 +280,12 @@ action-gap 中 expert action 的语义也做了真实数据核对：episode 0 �
 
 真实 mask-video VAE gate 输出为 `/workspace/WM/gwp-action-video-results/mask_video_vae_audit_op104/report.json`。当前 v3 smoke cache 只有 1 个 episode，故这是实现前的表示可行性 gate，不是跨 episode 统计结论；在双视图布局、仅左侧 agent-view 计分且不使用 counterfactual RGB 的条件下，initial/full/dynamic/new-occupancy IoU 分别为 0.9962/0.9872/0.9807/0.9790，gripper recall 为 0.9913，有效区域 MAE 为 0.00404，预注册 11 项检查全部通过。由此允许下一轮只实现 zero-init modality embedding 与 shared mask-video flow；正式 200/50 cache 到位后仍须按同一脚本重跑 p05 gate，不能把单 episode pass 当作方法有效性结论。
 
+commit `d8de6fd` 先独立加入可选的 zero-init mask-video modality embedding，只作用于 patch embedding 之后的 future visual tokens。目标机 mini-MoT 数值 smoke 验证：默认模型的 state dict 不增加 key，开启模型加载同一权重后 RGB tokens 逐值相等；zero-init mask tokens 与 RGB tokens 逐值相等；把 embedding 手动设为 0.25 后 ref tokens 不变、future tokens 差值严格为 0.25，且 embedding 梯度有限。该提交没有接 loss，因此先证明正常 RGB 路径是 no-op，再进入下一改动。
+
+commit `6e08d8c` 才新增 `shared_mask_video_flow`：把 cache 的 initial+4 future robot masks 拼成三通道 `[-1,1]` 五帧视频，经冻结 Wan VAE 得到与 RGB 相同的 48-channel latent；policy action 保持 detach，future mask latent 使用与 RGB flow 相同的随机 sigma/noise 参数化，并由原 visual expert、`norm_out`、`proj_out` 回归 `noise-mask_latent`。RGB 首帧仍是 visual context；mask modality embedding 只标记 future target domain。pixel-valid 在时间维取交集后 nearest-downsample 到 latent，loss 只覆盖已知 agent-view；合成测试中 wrist-only error 的 loss 与梯度严格为 0，agent-view unit error 的 loss 为 1。完整 `forward_step` 可微 harness 还验证随机 timestep 172--944、mask modality 参数传递、policy action 无梯度和 transformer 有限梯度。
+
+真模型 1-step smoke 位于 `/workspace/WM/gwp-action-video-results/shared_mask_video_flow_smoke_op108/`，结构化证据为 `report.json`。它使用 1 张 PPU、batch 1、真实 5B GWP-0.5、真实 Wan VAE、真实双视图 LIBERO sample 与 v3 predicted-action cache，关闭 EMA/checkpoint；step 用时 4.453 s，观测显存快照 27,199 MiB，visual/action/加权 mask-flow/total loss 分别为 0.1484/0.3306/0.0722/0.5512，前向、反向和 optimizer step 正常完成。cache mask 实际为 256×256；该 Wan VAE 的真实 temporal/spatial scale 为 4/16，因此双视图 `[1,5,3,256,512]` 合法编码为 `[1,48,2,16,32]`。这仍只是单样本工程 smoke，不构成控制收益或泛化证据；下一门禁应先建立正式 200/50 cache，再跑 matched compute control 与短程 shared-flow 训练。
+
 ## 结果位置
 
 - 当前 4×PPU 服务器：`/workspace/WM/gwp-action-video-results/`
