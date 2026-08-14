@@ -14,7 +14,7 @@ from giga_datasets.datasets.lerobot_dataset import FastLeRobotDataset, _LeRobotD
 
 _SUBTASK_MARKER_RE = re.compile(r"\bsubtask\s*:\s*", flags=re.IGNORECASE)
 _T5_LOAD_FROM_CHOICES = ("dir", "pkl", "path")
-_COUNTERFACTUAL_MASK_SCHEMA = "libero-counterfactual-robot-mask-v4"
+_COUNTERFACTUAL_MASK_SCHEMA = "libero-counterfactual-robot-mask-v5"
 _COUNTERFACTUAL_MASK_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 
 
@@ -355,7 +355,7 @@ class WAMLeRobotDataset(BaseDataset):
             cache_path = self._counterfactual_cache_root / counterfactual_record["cache_file"]
             with np.load(cache_path, allow_pickle=False) as cache:
                 data_dict["counterfactual_action"] = torch.from_numpy(
-                    cache["executed_actions"].copy()
+                    cache["policy_actions_lerobot"].copy()
                 )
                 data_dict["counterfactual_robot_masks"] = torch.from_numpy(
                     cache["robot_mask"].copy()

@@ -88,7 +88,7 @@ def read_manifest(cache_root: Path) -> dict[str, Any]:
     if not manifest_path.is_file():
         raise FileNotFoundError(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "libero-counterfactual-robot-mask-v4":
+    if manifest.get("schema_version") != "libero-counterfactual-robot-mask-v5":
         raise ValueError(f"Unsupported cache schema: {manifest.get('schema_version')!r}")
     if (
         manifest.get("image_orientation")
@@ -131,6 +131,8 @@ def validate_mean_mask_cache(
         "raw_demo_files",
         "action_match_atol",
         "source_state_atol",
+        "policy_action_array",
+        "simulator_action_array",
         "image_size",
         "num_steps_wait",
     ):
@@ -186,7 +188,7 @@ def normalize_cached_actions(
     actions = []
     for record in manifest["episodes"]:
         with np.load(cache_root / record["cache_file"], allow_pickle=False) as cache:
-            action = cache["executed_actions"].astype(np.float32)
+            action = cache["policy_actions_lerobot"].astype(np.float32)
         if action.ndim != 2 or action.shape[0] != 48:
             raise ValueError(f"Expected [48,D] cached action, got {action.shape}")
         effective_dim = min(action.shape[-1], low.shape[0], high.shape[0])

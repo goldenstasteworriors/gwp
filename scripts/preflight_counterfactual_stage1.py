@@ -30,7 +30,7 @@ from libero_action_encoding import (
 
 
 SPLIT_SCHEMA = "libero-counterfactual-split-v1"
-CACHE_SCHEMA = "libero-counterfactual-robot-mask-v4"
+CACHE_SCHEMA = "libero-counterfactual-robot-mask-v5"
 EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]
 
@@ -209,6 +209,8 @@ def audit_cache(
         "policy_action_encoding": POLICY_ACTION_ENCODING,
         "simulator_action_encoding": SIMULATOR_ACTION_ENCODING,
         "policy_to_simulator_conversion": POLICY_TO_SIMULATOR_CONVERSION,
+        "policy_action_array": "policy_actions_lerobot",
+        "simulator_action_array": "simulator_actions",
     }
     for key, expected in expected_action_semantics.items():
         if manifest.get(key) != expected:
@@ -297,8 +299,8 @@ def audit_cache(
         with np.load(cache_path, allow_pickle=False) as arrays:
             required = {
                 "horizons",
-                "raw_actions",
-                "executed_actions",
+                "policy_actions_lerobot",
+                "simulator_actions",
                 "raw_initial_state",
                 "source_observation_state",
                 "rendered_initial_observation_state",
@@ -315,8 +317,8 @@ def audit_cache(
             if missing:
                 raise ValueError(f"{cache_path}: missing arrays {missing}")
             horizons = arrays["horizons"]
-            raw_actions = arrays["raw_actions"]
-            executed_actions = arrays["executed_actions"]
+            policy_actions = arrays["policy_actions_lerobot"]
+            simulator_actions = arrays["simulator_actions"]
             raw_initial_state = arrays["raw_initial_state"]
             source_observation_state = arrays["source_observation_state"]
             rendered_initial_observation_state = arrays[
@@ -325,8 +327,10 @@ def audit_cache(
             robot_mask = arrays["robot_mask"]
             gripper_mask = arrays["gripper_mask"]
             require_shape("horizons", horizons, (5,), cache_path)
-            require_shape("raw_actions", raw_actions, (48, 7), cache_path)
-            require_shape("executed_actions", executed_actions, (48, 7), cache_path)
+            require_shape(
+                "policy_actions_lerobot", policy_actions, (48, 7), cache_path
+            )
+            require_shape("simulator_actions", simulator_actions, (48, 7), cache_path)
             require_shape(
                 "raw_initial_state",
                 raw_initial_state,
@@ -344,10 +348,10 @@ def audit_cache(
             require_shape("gripper_mask", gripper_mask, (5, 256, 256), cache_path)
             if horizons.tolist() != EXPECTED_HORIZONS:
                 raise ValueError(f"{cache_path}: wrong horizons")
-            expected_executed_actions = lerobot_action_to_libero(raw_actions)
-            if not np.array_equal(executed_actions, expected_executed_actions):
+            expected_simulator_actions = lerobot_action_to_libero(policy_actions)
+            if not np.array_equal(simulator_actions, expected_simulator_actions):
                 raise ValueError(
-                    f"{cache_path}: executed action has wrong simulator encoding"
+                    f"{cache_path}: simulator_actions has wrong simulator encoding"
                 )
             if not np.array_equal(raw_initial_state, authoritative_raw_state):
                 raise ValueError(f"{cache_path}: raw initial state changed")
@@ -395,8 +399,10 @@ def audit_cache(
                 raise ValueError(f"{cache_path}: robot pixel summary mismatch")
             robot_pixels_by_horizon += robot_pixels
             gripper_pixels_by_horizon += gripper_mask.sum(axis=(-2, -1), dtype=np.int64)
-            converted_values += int(np.count_nonzero(raw_actions != executed_actions))
-            action_values += int(raw_actions.size)
+            converted_values += int(
+                np.count_nonzero(policy_actions != simulator_actions)
+            )
+            action_values += int(policy_actions.size)
 
     return {
         "root": str(root.resolve()),
@@ -422,6 +428,8 @@ def audit_cache(
                 "policy_action_encoding",
                 "simulator_action_encoding",
                 "policy_to_simulator_conversion",
+                "policy_action_array",
+                "simulator_action_array",
                 "image_size",
                 "num_steps_wait",
             )

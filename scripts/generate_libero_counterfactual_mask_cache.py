@@ -29,7 +29,7 @@ from libero_action_encoding import (
 )
 
 
-SCHEMA_VERSION = "libero-counterfactual-robot-mask-v4"
+SCHEMA_VERSION = "libero-counterfactual-robot-mask-v5"
 IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EPISODE_PATTERN = re.compile(r"episode_(\d+)$")
 
@@ -611,7 +611,9 @@ def main() -> None:
         raw_initial_state = matched_demo["initial_state"]
         raw_source = raw_sources[task_index]
         libero_task_index = int(raw_source["libero_task_index"])
-        raw_actions, executed_actions = load_actions(prediction_path, max(horizons))
+        policy_actions_lerobot, simulator_actions = load_actions(
+            prediction_path, max(horizons)
+        )
         env = LiberoEnv(
             task_suite=suite,
             task_id=libero_task_index,
@@ -651,7 +653,7 @@ def main() -> None:
                 )
             }
             for step in range(1, max(horizons) + 1):
-                obs, *_ = env.step(executed_actions[step - 1])
+                obs, *_ = env.step(simulator_actions[step - 1])
                 if step in horizons:
                     captures_by_horizon[step] = capture_state(
                         env,
@@ -670,8 +672,8 @@ def main() -> None:
         np.savez_compressed(
             cache_path,
             horizons=np.asarray(horizons, dtype=np.int32),
-            raw_actions=raw_actions,
-            executed_actions=executed_actions,
+            policy_actions_lerobot=policy_actions_lerobot,
+            simulator_actions=simulator_actions,
             raw_initial_state=raw_initial_state,
             source_observation_state=source_observation_state,
             rendered_initial_observation_state=rendered_initial_observation_state,
@@ -706,6 +708,8 @@ def main() -> None:
         "policy_action_encoding": POLICY_ACTION_ENCODING,
         "simulator_action_encoding": SIMULATOR_ACTION_ENCODING,
         "policy_to_simulator_conversion": POLICY_TO_SIMULATOR_CONVERSION,
+        "policy_action_array": "policy_actions_lerobot",
+        "simulator_action_array": "simulator_actions",
         "rgb_supervision": None,
         "suite": args.suite,
         "dataset_root": str(args.dataset_root.resolve()),
