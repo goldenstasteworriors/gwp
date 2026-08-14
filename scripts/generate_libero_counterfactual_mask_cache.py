@@ -21,8 +21,15 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from libero_action_encoding import (
+    POLICY_ACTION_ENCODING,
+    POLICY_TO_SIMULATOR_CONVERSION,
+    SIMULATOR_ACTION_ENCODING,
+    lerobot_action_to_libero,
+)
 
-SCHEMA_VERSION = "libero-counterfactual-robot-mask-v3"
+
+SCHEMA_VERSION = "libero-counterfactual-robot-mask-v4"
 IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EPISODE_PATTERN = re.compile(r"episode_(\d+)$")
 
@@ -446,7 +453,7 @@ def load_actions(path: Path, max_horizon: int) -> tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"{path} has {len(actions)} actions, need at least {max_horizon}")
     if not np.isfinite(actions).all():
         raise ValueError(f"Non-finite action values in {path}")
-    return actions, np.clip(actions, -1.0, 1.0)
+    return actions, lerobot_action_to_libero(actions)
 
 
 def robot_geom_ids(env: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -696,6 +703,9 @@ def main() -> None:
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "target_semantics": "robot embodiment after executing the matching policy-predicted action prefix",
+        "policy_action_encoding": POLICY_ACTION_ENCODING,
+        "simulator_action_encoding": SIMULATOR_ACTION_ENCODING,
+        "policy_to_simulator_conversion": POLICY_TO_SIMULATOR_CONVERSION,
         "rgb_supervision": None,
         "suite": args.suite,
         "dataset_root": str(args.dataset_root.resolve()),

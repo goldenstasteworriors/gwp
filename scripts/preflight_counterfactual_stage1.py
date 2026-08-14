@@ -21,10 +21,16 @@ from generate_libero_counterfactual_mask_cache import (
     normalize_raw_demo_actions,
     sha256_array,
 )
+from libero_action_encoding import (
+    POLICY_ACTION_ENCODING,
+    POLICY_TO_SIMULATOR_CONVERSION,
+    SIMULATOR_ACTION_ENCODING,
+    lerobot_action_to_libero,
+)
 
 
 SPLIT_SCHEMA = "libero-counterfactual-split-v1"
-CACHE_SCHEMA = "libero-counterfactual-robot-mask-v3"
+CACHE_SCHEMA = "libero-counterfactual-robot-mask-v4"
 EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]
 
@@ -199,6 +205,14 @@ def audit_cache(
         raise ValueError(f"Cache policy_id does not match checkpoint: {manifest_path}")
     if manifest.get("episode_selection_sha256") != sha256_file(selection_file):
         raise ValueError(f"Episode selection hash mismatch: {manifest_path}")
+    expected_action_semantics = {
+        "policy_action_encoding": POLICY_ACTION_ENCODING,
+        "simulator_action_encoding": SIMULATOR_ACTION_ENCODING,
+        "policy_to_simulator_conversion": POLICY_TO_SIMULATOR_CONVERSION,
+    }
+    for key, expected in expected_action_semantics.items():
+        if manifest.get(key) != expected:
+            raise ValueError(f"Cache has unexpected {key}: {manifest_path}")
 
     records = list(manifest.get("episodes", []))
     got_episodes = [int(record["episode_index"]) for record in records]
@@ -209,7 +223,7 @@ def audit_cache(
 
     robot_pixels_by_horizon = np.zeros(5, dtype=np.int64)
     gripper_pixels_by_horizon = np.zeros(5, dtype=np.int64)
-    clipped_values = 0
+    converted_values = 0
     action_values = 0
     for record in records:
         episode = int(record["episode_index"])
@@ -330,8 +344,11 @@ def audit_cache(
             require_shape("gripper_mask", gripper_mask, (5, 256, 256), cache_path)
             if horizons.tolist() != EXPECTED_HORIZONS:
                 raise ValueError(f"{cache_path}: wrong horizons")
-            if not np.array_equal(executed_actions, np.clip(raw_actions, -1.0, 1.0)):
-                raise ValueError(f"{cache_path}: executed action is not clipped raw action")
+            expected_executed_actions = lerobot_action_to_libero(raw_actions)
+            if not np.array_equal(executed_actions, expected_executed_actions):
+                raise ValueError(
+                    f"{cache_path}: executed action has wrong simulator encoding"
+                )
             if not np.array_equal(raw_initial_state, authoritative_raw_state):
                 raise ValueError(f"{cache_path}: raw initial state changed")
             if sha256_array(raw_initial_state) != record.get("raw_initial_state_sha256"):
@@ -378,7 +395,7 @@ def audit_cache(
                 raise ValueError(f"{cache_path}: robot pixel summary mismatch")
             robot_pixels_by_horizon += robot_pixels
             gripper_pixels_by_horizon += gripper_mask.sum(axis=(-2, -1), dtype=np.int64)
-            clipped_values += int(np.count_nonzero(raw_actions != executed_actions))
+            converted_values += int(np.count_nonzero(raw_actions != executed_actions))
             action_values += int(raw_actions.size)
 
     return {
@@ -387,7 +404,9 @@ def audit_cache(
         "num_episodes": len(records),
         "robot_pixels_mean": (robot_pixels_by_horizon / len(records)).tolist(),
         "gripper_pixels_mean": (gripper_pixels_by_horizon / len(records)).tolist(),
-        "action_clipped_fraction": float(clipped_values / action_values),
+        "action_values_changed_by_sim_conversion_fraction": float(
+            converted_values / action_values
+        ),
         "metadata": {
             key: manifest.get(key)
             for key in (
@@ -400,6 +419,9 @@ def audit_cache(
                 "raw_demo_files",
                 "action_match_atol",
                 "source_state_atol",
+                "policy_action_encoding",
+                "simulator_action_encoding",
+                "policy_to_simulator_conversion",
                 "image_size",
                 "num_steps_wait",
             )

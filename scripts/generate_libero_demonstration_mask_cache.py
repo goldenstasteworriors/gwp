@@ -31,7 +31,7 @@ from generate_libero_counterfactual_mask_cache import (
 
 
 SCHEMA_VERSION = "libero-demonstration-robot-mask-v1"
-COUNTERFACTUAL_SCHEMA = "libero-counterfactual-robot-mask-v3"
+COUNTERFACTUAL_SCHEMA = "libero-counterfactual-robot-mask-v4"
 
 
 def parse_args() -> argparse.Namespace:

@@ -21,6 +21,12 @@ if str(GIGA_MODELS) not in sys.path:
 os.environ.setdefault("GIGA_MODELS_LIGHT_IMPORT", "1")
 
 from giga_models.sockets import RobotInferenceClient  # noqa: E402
+from libero_action_encoding import (  # noqa: E402
+    POLICY_ACTION_ENCODING,
+    POLICY_TO_SIMULATOR_CONVERSION,
+    SIMULATOR_ACTION_ENCODING,
+    lerobot_action_to_libero,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -332,6 +338,7 @@ def main() -> None:
             )
             observation, _ = env.reset(seed=args.seed + rollout)
             executed: list[np.ndarray] = []
+            policy_actions: list[np.ndarray] = []
             success = False
             step = 0
             chunk = 0
@@ -356,10 +363,10 @@ def main() -> None:
                 if action_chunk.ndim != 2 or action_chunk.shape[1] < 7:
                     raise ValueError(f"Policy returned malformed actions: {action_chunk.shape}")
                 for action in action_chunk[: args.replan_steps, :7]:
-                    observation, reward, terminated, truncated, _ = env.step(
-                        np.clip(action, -1.0, 1.0)
-                    )
-                    executed.append(action.copy())
+                    simulator_action = lerobot_action_to_libero(action)
+                    observation, reward, terminated, truncated, _ = env.step(simulator_action)
+                    policy_actions.append(action.copy())
+                    executed.append(simulator_action.copy())
                     step += 1
                     success = success or bool(reward > 0.5)
                     if success or terminated or truncated or step >= args.max_steps:
@@ -369,6 +376,10 @@ def main() -> None:
             rollout_dir = args.output_dir / f"task_{task_id:02d}" / f"rollout_{rollout:02d}"
             rollout_dir.mkdir(parents=True, exist_ok=True)
             np.save(rollout_dir / "executed_actions.npy", np.asarray(executed, dtype=np.float32))
+            np.save(
+                rollout_dir / "policy_actions_lerobot.npy",
+                np.asarray(policy_actions, dtype=np.float32),
+            )
             row = {
                 "suite": args.suite,
                 "task_id": task_id,
@@ -388,7 +399,7 @@ def main() -> None:
         for task_id in args.task_ids
     }
     summary = {
-        "schema_version": "libero-closed-loop-v3",
+        "schema_version": "libero-closed-loop-v4",
         "suite": args.suite,
         "num_rollouts": len(rows),
         "success_rate": float(np.mean([row["success"] for row in rows])),
@@ -408,6 +419,9 @@ def main() -> None:
             "task_prompt_mapping": {
                 str(key): value for key, value in prompt_mapping.items()
             },
+            "policy_action_encoding": POLICY_ACTION_ENCODING,
+            "simulator_action_encoding": SIMULATOR_ACTION_ENCODING,
+            "policy_to_simulator_conversion": POLICY_TO_SIMULATOR_CONVERSION,
         },
         "rollouts": rows,
     }

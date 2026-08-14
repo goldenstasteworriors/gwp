@@ -20,7 +20,7 @@ ALIGNMENT_MODES = (
     "clean_latent_probe",
     "shared_mask_video_flow",
 )
-EXPECTED_CACHE_SCHEMA = "libero-counterfactual-robot-mask-v3"
+EXPECTED_CACHE_SCHEMA = "libero-counterfactual-robot-mask-v4"
 EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EXPECTED_TRAIN_EPISODES = 200
 EXPECTED_HELDOUT_EPISODES = 50

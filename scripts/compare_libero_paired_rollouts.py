@@ -29,6 +29,11 @@ REQUIRED_V2_PROTOCOL_FIELDS = {
     "policy_seed",
 }
 REQUIRED_V3_PROTOCOL_FIELDS = REQUIRED_V2_PROTOCOL_FIELDS | {"task_prompt_mapping"}
+REQUIRED_V4_PROTOCOL_FIELDS = REQUIRED_V3_PROTOCOL_FIELDS | {
+    "policy_action_encoding",
+    "simulator_action_encoding",
+    "policy_to_simulator_conversion",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,14 +105,19 @@ def validated_protocol(
     if protocol is not None and not isinstance(protocol, dict):
         raise ValueError(f"{side} protocol must be a JSON object when present")
     schema_version = summary.get("schema_version")
-    if schema_version in {"libero-closed-loop-v2", "libero-closed-loop-v3"}:
+    if schema_version in {
+        "libero-closed-loop-v2",
+        "libero-closed-loop-v3",
+        "libero-closed-loop-v4",
+    }:
         if not isinstance(protocol, dict):
             raise ValueError(f"{side} {schema_version} summary is missing its protocol")
-        required_fields = (
-            REQUIRED_V3_PROTOCOL_FIELDS
-            if schema_version == "libero-closed-loop-v3"
-            else REQUIRED_V2_PROTOCOL_FIELDS
-        )
+        if schema_version == "libero-closed-loop-v4":
+            required_fields = REQUIRED_V4_PROTOCOL_FIELDS
+        elif schema_version == "libero-closed-loop-v3":
+            required_fields = REQUIRED_V3_PROTOCOL_FIELDS
+        else:
+            required_fields = REQUIRED_V2_PROTOCOL_FIELDS
         missing = sorted(
             key
             for key in required_fields
@@ -126,7 +136,7 @@ def validated_protocol(
             raise ValueError(
                 f"{side} protocol rollouts_per_task does not match rollout records"
             )
-        if schema_version == "libero-closed-loop-v3":
+        if schema_version in {"libero-closed-loop-v3", "libero-closed-loop-v4"}:
             prompt_mapping = protocol["task_prompt_mapping"]
             if not isinstance(prompt_mapping, dict):
                 raise ValueError(f"{side} task_prompt_mapping must be a JSON object")

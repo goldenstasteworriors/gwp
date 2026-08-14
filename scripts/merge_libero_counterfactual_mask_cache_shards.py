@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "libero-counterfactual-robot-mask-v3"
+SCHEMA_VERSION = "libero-counterfactual-robot-mask-v4"
 VARIABLE_MANIFEST_KEYS = {
     "episodes",
     "num_episodes",
