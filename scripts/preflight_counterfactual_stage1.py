@@ -75,6 +75,16 @@ def require_shape(name: str, value: np.ndarray, shape: tuple[int, ...], path: Pa
         raise ValueError(f"{path}: {name} shape {value.shape}, expected {shape}")
 
 
+def path_is_relative_to(path: Path, root: Path) -> bool:
+    """Python 3.8-compatible equivalent of ``Path.is_relative_to``."""
+
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def load_source_episodes(
     dataset_root: Path,
     requested_episodes: set[int],
@@ -164,7 +174,7 @@ def audit_cache(
         if task_index in raw_files_by_task:
             raise ValueError(f"Duplicate raw-demo task {task_index} in {manifest_path}")
         raw_path = Path(str(raw_record["path"])).resolve()
-        if not raw_path.is_relative_to(raw_demos_root):
+        if not path_is_relative_to(raw_path, raw_demos_root):
             raise ValueError(f"Raw demo file is outside raw_demos_root: {raw_path}")
         if not raw_path.is_file():
             raise FileNotFoundError(raw_path)
