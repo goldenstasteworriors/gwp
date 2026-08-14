@@ -292,7 +292,12 @@ def main() -> None:
         ]
         closed_env = os.environ.copy()
         closed_env["MUJOCO_GL"] = "egl"
-        closed_env["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+        # The policy server uses the selected PPU, but LIBERO rendering runs in a
+        # separate Python environment against the host EGL devices. Hiding every
+        # device except the PPU index makes MuJoCo fail to initialize EGL on the
+        # node2 setup. Keep the host visibility unchanged and select the first EGL
+        # device explicitly, matching the standalone replay pipeline.
+        closed_env["MUJOCO_EGL_DEVICE_ID"] = "0"
         run_logged(
             closed_command,
             cwd=project_root,
