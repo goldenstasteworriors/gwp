@@ -387,12 +387,11 @@ def main() -> None:
         for task_id in args.task_ids
     }
     summary = {
-        "schema_version": "libero-closed-loop-v2",
+        "schema_version": "libero-closed-loop-v3",
         "suite": args.suite,
         "num_rollouts": len(rows),
         "success_rate": float(np.mean([row["success"] for row in rows])),
         "success_rate_by_task": by_task,
-        "prompt_mapping": {str(key): value for key, value in prompt_mapping.items()},
         "protocol": {
             "dataset_root": str(args.dataset_root.resolve()),
             "task_ids": [int(task_id) for task_id in args.task_ids],
@@ -405,6 +404,9 @@ def main() -> None:
             "policy_num_inference_steps": args.policy_num_inference_steps,
             "policy_model_dtype": args.policy_model_dtype,
             "policy_seed": args.policy_seed,
+            "task_prompt_mapping": {
+                str(key): value for key, value in prompt_mapping.items()
+            },
         },
         "rollouts": rows,
     }

@@ -28,6 +28,7 @@ REQUIRED_V2_PROTOCOL_FIELDS = {
     "policy_model_dtype",
     "policy_seed",
 }
+REQUIRED_V3_PROTOCOL_FIELDS = REQUIRED_V2_PROTOCOL_FIELDS | {"task_prompt_mapping"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,16 +99,22 @@ def validated_protocol(
     protocol = summary.get("protocol")
     if protocol is not None and not isinstance(protocol, dict):
         raise ValueError(f"{side} protocol must be a JSON object when present")
-    if summary.get("schema_version") == "libero-closed-loop-v2":
+    schema_version = summary.get("schema_version")
+    if schema_version in {"libero-closed-loop-v2", "libero-closed-loop-v3"}:
         if not isinstance(protocol, dict):
-            raise ValueError(f"{side} v2 summary is missing its protocol")
+            raise ValueError(f"{side} {schema_version} summary is missing its protocol")
+        required_fields = (
+            REQUIRED_V3_PROTOCOL_FIELDS
+            if schema_version == "libero-closed-loop-v3"
+            else REQUIRED_V2_PROTOCOL_FIELDS
+        )
         missing = sorted(
             key
-            for key in REQUIRED_V2_PROTOCOL_FIELDS
+            for key in required_fields
             if key not in protocol or protocol[key] is None
         )
         if missing:
-            raise ValueError(f"{side} v2 protocol is incomplete: {missing}")
+            raise ValueError(f"{side} {schema_version} protocol is incomplete: {missing}")
         task_ids = sorted({key[1] for key in rows})
         if [int(value) for value in protocol["task_ids"]] != task_ids:
             raise ValueError(f"{side} protocol task_ids do not match rollout records")
@@ -119,6 +126,27 @@ def validated_protocol(
             raise ValueError(
                 f"{side} protocol rollouts_per_task does not match rollout records"
             )
+        if schema_version == "libero-closed-loop-v3":
+            prompt_mapping = protocol["task_prompt_mapping"]
+            if not isinstance(prompt_mapping, dict):
+                raise ValueError(f"{side} task_prompt_mapping must be a JSON object")
+            if sorted(int(key) for key in prompt_mapping) != task_ids:
+                raise ValueError(
+                    f"{side} task_prompt_mapping keys do not match rollout task ids"
+                )
+            for task_id in task_ids:
+                entry = prompt_mapping[str(task_id)]
+                if not isinstance(entry, dict):
+                    raise ValueError(f"{side} prompt mapping {task_id} must be an object")
+                expected_language = {
+                    str(row["task_description"])
+                    for key, row in rows.items()
+                    if key[1] == task_id
+                }
+                if expected_language != {str(entry.get("task_language", ""))}:
+                    raise ValueError(
+                        f"{side} prompt language differs from rollout task {task_id}"
+                    )
     return protocol
 
 
