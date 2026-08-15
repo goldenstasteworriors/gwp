@@ -21,7 +21,6 @@ ALIGNMENT_MODES = (
     "shared_mask_video_flow",
 )
 EXPECTED_CACHE_SCHEMAS = {
-    "libero-counterfactual-robot-mask-v5",
     "libero-support-constrained-action-standalone-mask-v2",
 }
 EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"

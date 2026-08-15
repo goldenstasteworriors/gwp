@@ -30,7 +30,6 @@ from world_action_model.alignment import binary_mask_metrics, counterfactual_mas
 
 SCHEMA_VERSION = "counterfactual-mask-video-vae-audit-v1"
 CACHE_SCHEMAS = {
-    "libero-counterfactual-robot-mask-v5",
     "libero-support-constrained-action-standalone-mask-v2",
 }
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]

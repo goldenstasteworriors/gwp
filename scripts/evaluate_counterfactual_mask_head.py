@@ -90,7 +90,6 @@ def read_manifest(cache_root: Path) -> dict[str, Any]:
         raise FileNotFoundError(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") not in {
-        "libero-counterfactual-robot-mask-v5",
         "libero-policy-action-standalone-mask-v2",
         "libero-support-constrained-action-standalone-mask-v2",
     }:
