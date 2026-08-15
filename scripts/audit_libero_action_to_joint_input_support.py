@@ -27,6 +27,7 @@ K_NEIGHBORS = 5
 CALIBRATION_QUANTILE = 95.0
 THRESHOLD_MULTIPLIER = 1.5
 MIN_POLICY_ACCEPTED_FRACTION = 0.80
+INTERPOLATION_ALPHAS = [0.0, 0.25, 0.5, 0.75, 1.0]
 SAMPLE_INDICES = np.asarray([0, 5, 11, 23, 35, 47], dtype=np.int64)
 
 
@@ -143,6 +144,75 @@ def load_policy_features(root: Path) -> tuple[np.ndarray, list[dict[str, int]]]:
     return np.stack(features), rows
 
 
+def load_interpolated_features(
+    joint_split_root: Path,
+    policy_root: Path,
+    alpha: float,
+) -> tuple[np.ndarray, list[dict[str, int]]]:
+    joint_manifest = load_json(joint_split_root / "manifest.json")
+    policy_manifest = load_json(policy_root / "manifest.json")
+    joint_records = {
+        int(record["episode_index"]): record
+        for record in joint_manifest.get("episodes", [])
+    }
+    policy_records = {
+        int(record["episode_index"]): record
+        for record in policy_manifest.get("episodes", [])
+    }
+    if list(joint_records) != list(policy_records):
+        raise ValueError("Expert/policy episode order differs for interpolation")
+    features: list[np.ndarray] = []
+    rows: list[dict[str, int]] = []
+    for episode, joint_record in joint_records.items():
+        policy_record = policy_records[episode]
+        joint_path = joint_split_root / str(joint_record["cache_file"])
+        policy_path = policy_root / str(policy_record["cache_file"])
+        if sha256_file(joint_path) != joint_record["cache_sha256"]:
+            raise ValueError(f"Joint cache changed: {joint_path}")
+        if sha256_file(policy_path) != policy_record["cache_sha256"]:
+            raise ValueError(f"Policy cache changed: {policy_path}")
+        with np.load(joint_path, allow_pickle=False) as arrays:
+            expert_actions = np.asarray(
+                arrays["policy_actions_lerobot"][:ACTION_HORIZON],
+                dtype=np.float32,
+            )
+            expert_q0 = np.concatenate(
+                [
+                    np.asarray(arrays["arm_qpos"][0], dtype=np.float32),
+                    np.asarray(arrays["gripper_qpos"][0], dtype=np.float32),
+                ]
+            )
+        with np.load(policy_path, allow_pickle=False) as arrays:
+            policy_actions = np.asarray(
+                arrays["policy_actions_lerobot"], dtype=np.float32
+            )
+            policy_q0 = np.concatenate(
+                [
+                    np.asarray(
+                        arrays["predicted_joint_qpos"][0], dtype=np.float32
+                    ),
+                    np.asarray(
+                        arrays["predicted_gripper_qpos"][0], dtype=np.float32
+                    ),
+                ]
+            )
+        if not np.array_equal(expert_q0, policy_q0):
+            raise ValueError(f"Expert/policy q0 differs episode {episode}")
+        interpolated = (
+            (1.0 - float(alpha)) * expert_actions
+            + float(alpha) * policy_actions
+        ).astype(np.float32)
+        features.append(action_features(expert_q0, interpolated))
+        rows.append(
+            {
+                "episode_index": episode,
+                "task_index": int(joint_record["task_index"]),
+                "source_frame_index": 0,
+            }
+        )
+    return np.stack(features), rows
+
+
 def transform_features(
     train: np.ndarray, *queries: np.ndarray
 ) -> tuple[np.ndarray, list[np.ndarray], dict[str, Any]]:
@@ -236,19 +306,67 @@ def main() -> None:
     policy_heldout_features, policy_heldout_rows = load_policy_features(
         args.policy_heldout_cache
     )
+    interpolation_features: dict[str, dict[str, tuple[np.ndarray, list[dict[str, int]]]]] = {
+        "train": {},
+        "heldout": {},
+    }
+    for alpha in INTERPOLATION_ALPHAS:
+        key = f"{alpha:.2f}"
+        interpolation_features["train"][key] = load_interpolated_features(
+            args.joint_dataset_root / "train", args.policy_train_cache, alpha
+        )
+        interpolation_features["heldout"][key] = load_interpolated_features(
+            args.joint_dataset_root / "heldout", args.policy_heldout_cache, alpha
+        )
+    interpolation_query_arrays = [
+        interpolation_features[split][f"{alpha:.2f}"][0]
+        for split in ("train", "heldout")
+        for alpha in INTERPOLATION_ALPHAS
+    ]
     bank, queries, transform = transform_features(
         train_features,
         heldout_features,
         policy_train_features,
         policy_heldout_features,
+        *interpolation_query_arrays,
     )
-    heldout, policy_train, policy_heldout = [
-        knn_distance(bank, query, K_NEIGHBORS) for query in queries
-    ]
+    distances = [knn_distance(bank, query, K_NEIGHBORS) for query in queries]
+    heldout, policy_train, policy_heldout = distances[:3]
     calibration_p95 = float(np.percentile(heldout, CALIBRATION_QUANTILE))
     threshold = calibration_p95 * THRESHOLD_MULTIPLIER
     train_result = policy_result(policy_train, policy_train_rows, threshold)
     heldout_result = policy_result(policy_heldout, policy_heldout_rows, threshold)
+    interpolation_distances = iter(distances[3:])
+    interpolation_results: dict[str, dict[str, Any]] = {"train": {}, "heldout": {}}
+    for split in ("train", "heldout"):
+        for alpha in INTERPOLATION_ALPHAS:
+            key = f"{alpha:.2f}"
+            _, rows = interpolation_features[split][key]
+            interpolation_results[split][key] = policy_result(
+                next(interpolation_distances), rows, threshold
+            )
+    maximum_supported_alpha: dict[str, list[dict[str, Any]]] = {}
+    for split in ("train", "heldout"):
+        rows = interpolation_results[split]["0.00"]["episodes"]
+        selected: list[dict[str, Any]] = []
+        for index, row in enumerate(rows):
+            accepted_alphas = [
+                alpha
+                for alpha in INTERPOLATION_ALPHAS
+                if interpolation_results[split][f"{alpha:.2f}"]["episodes"][index][
+                    "accepted"
+                ]
+            ]
+            selected.append(
+                {
+                    "episode_index": int(row["episode_index"]),
+                    "task_index": int(row["task_index"]),
+                    "maximum_supported_alpha": (
+                        float(max(accepted_alphas)) if accepted_alphas else None
+                    ),
+                }
+            )
+        maximum_supported_alpha[split] = selected
     checks = {
         "policy_train_accepted_fraction": (
             train_result["accepted_fraction"] >= MIN_POLICY_ACCEPTED_FRACTION
@@ -286,10 +404,17 @@ def main() -> None:
         "calibration_quantile": CALIBRATION_QUANTILE,
         "threshold_multiplier_fixed_before_policy_evaluation": THRESHOLD_MULTIPLIER,
         "minimum_policy_accepted_fraction": MIN_POLICY_ACCEPTED_FRACTION,
+        "interpolation_semantics": (
+            "a_alpha=(1-alpha)*expert_action+alpha*policy_action; choose the "
+            "largest predeclared alpha whose input-support distance passes"
+        ),
+        "interpolation_alphas_fixed_before_evaluation": INTERPOLATION_ALPHAS,
         "heldout_expert_calibration_distance": summary(heldout),
         "support_threshold": threshold,
         "policy_train": train_result,
         "policy_heldout": heldout_result,
+        "interpolation": interpolation_results,
+        "maximum_supported_alpha": maximum_supported_alpha,
         "checks": checks,
         "simulator_runtime_imported": False,
         "simulator_step_calls": 0,
