@@ -17,6 +17,7 @@ _T5_LOAD_FROM_CHOICES = ("dir", "pkl", "path")
 _COUNTERFACTUAL_MASK_SCHEMAS = {
     "libero-counterfactual-robot-mask-v5",
     "libero-policy-action-kinematic-mask-v1",
+    "libero-support-constrained-action-kinematic-mask-v1",
 }
 _COUNTERFACTUAL_MASK_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 
@@ -91,7 +92,10 @@ class WAMLeRobotDataset(BaseDataset):
             )
         if manifest.get("rgb_supervision") is not None:
             raise ValueError("Counterfactual mask cache must not contain RGB supervision")
-        if manifest.get("schema_version") == "libero-policy-action-kinematic-mask-v1":
+        if manifest.get("schema_version") in {
+            "libero-policy-action-kinematic-mask-v1",
+            "libero-support-constrained-action-kinematic-mask-v1",
+        }:
             calls = manifest.get("dynamics_attempted_calls", {})
             if manifest.get("dynamics") != "forbidden" or set(calls) != {
                 "env_step",

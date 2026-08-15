@@ -91,9 +91,13 @@ def read_manifest(cache_root: Path) -> dict[str, Any]:
     if manifest.get("schema_version") not in {
         "libero-counterfactual-robot-mask-v5",
         "libero-policy-action-kinematic-mask-v1",
+        "libero-support-constrained-action-kinematic-mask-v1",
     }:
         raise ValueError(f"Unsupported cache schema: {manifest.get('schema_version')!r}")
-    if manifest.get("schema_version") == "libero-policy-action-kinematic-mask-v1":
+    if manifest.get("schema_version") in {
+        "libero-policy-action-kinematic-mask-v1",
+        "libero-support-constrained-action-kinematic-mask-v1",
+    }:
         calls = manifest.get("dynamics_attempted_calls", {})
         if manifest.get("dynamics") != "forbidden" or set(calls) != {
             "env_step",
