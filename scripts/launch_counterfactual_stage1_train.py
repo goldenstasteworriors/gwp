@@ -78,6 +78,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--required-env-name", default="gigaworld-policy")
     parser.add_argument(
+        "--execution-profile",
+        choices=("four_device", "single_device_fallback"),
+        default="four_device",
+    )
+    parser.add_argument("--distributed-failure-manifest", type=Path)
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate and print the launch record without creating output or training.",
@@ -655,10 +661,12 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
     if args.mask_weight <= 0.0:
         raise ValueError("--mask-weight must be positive")
     fixed_protocol = {
-        "gpu_ids": [0, 1, 2, 3],
+        "gpu_ids": [0, 1, 2, 3] if args.execution_profile == "four_device" else [0],
         "steps": 200,
         "batch_size_per_gpu": 1,
-        "gradient_accumulation_steps": 4,
+        "gradient_accumulation_steps": (
+            4 if args.execution_profile == "four_device" else 16
+        ),
         "num_workers": 4,
         "seed": 6666,
         "mask_weight": 0.1,
@@ -676,6 +684,30 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         raise ValueError(
             "Stage-one protocol is fixed; received "
             f"{actual_protocol}, expected {fixed_protocol}"
+        )
+    distributed_failure = None
+    if args.execution_profile == "single_device_fallback":
+        if args.distributed_failure_manifest is None:
+            raise ValueError(
+                "single_device_fallback requires --distributed-failure-manifest"
+            )
+        failure_path = args.distributed_failure_manifest.resolve()
+        distributed_failure = load_json(failure_path)
+        if (
+            distributed_failure.get("status") != "failed"
+            or int(distributed_failure.get("exit_code", -1)) != 1
+            or distributed_failure.get("variant") != "matched"
+            or distributed_failure.get("common", {}).get("alignment_mode")
+            != args.alignment_mode
+            or Path(
+                str(distributed_failure.get("common", {}).get("train_cache"))
+            ).resolve()
+            != train_cache
+        ):
+            raise ValueError("Distributed failure manifest does not match this stage")
+    elif args.distributed_failure_manifest is not None:
+        raise ValueError(
+            "--distributed-failure-manifest is only valid for single_device_fallback"
         )
 
     effective_global_batch = (
@@ -713,7 +745,15 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         "log_interval": args.log_interval,
         "python": sys.executable,
         "required_env_name": args.required_env_name,
+        "execution_profile": args.execution_profile,
     }
+    if distributed_failure is not None:
+        common["distributed_failure"] = {
+            "manifest": str(args.distributed_failure_manifest.resolve()),
+            "manifest_sha256": sha256_file(args.distributed_failure_manifest.resolve()),
+            "comparison_id": distributed_failure.get("comparison_id"),
+            "exit_code": distributed_failure.get("exit_code"),
+        }
     if clean_latent_gates is not None:
         common["clean_latent_gates"] = clean_latent_gates
     if shared_mask_video_gate is not None:
