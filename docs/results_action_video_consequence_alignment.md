@@ -339,6 +339,37 @@ GWP/LIBERO 的控制输出是 normalized OSC delta，不是 q，因此还单独�
 
 `scripts/generate_libero_joint_trajectory_mask_cache.py` 已实现这个新数据契约，只接受每集 `predicted_joint_qpos.npy` 与 `predicted_gripper_qpos.npy`，manifest 明确记录 `action_input=None`、`simulator_future_state_input=None`、`raw_demonstration_future_state_input=None` 和三类 step 计数。单集静态 frame-0 q 的集成 smoke 位于 `joint_mask_static_q_cache_op176`，五帧 mask 像素逐帧完全相同，证明工具不会暗中推进状态。该 smoke 只验证接口，不是 future-q 方法结果；在 joint predictor/control bottleneck 完成并通过 q/EEF/mask held-out gate 前，不启动新的 mask-video matched/full 训练，也不继续 clean-latent probe pipeline。
 
+### 2026-08-16：无 simulator 的 action→q adapter 与合法对齐 sidecar
+
+固定 differential IK 失败后，没有再调 gain 或查询 simulator，而是只用 authoritative raw HDF5 中同步记录的 expert action、arm q 和 gripper q 训练冻结的 action→joint adapter。`scripts/build_libero_logged_action_joint_dataset.py` 生成 200 train / 50 held-out episode、14,811 / 3,755 个完整 48-step window；构建过程不导入 LIBERO/MuJoCo，`simulator_runtime_imported=false`、`simulator_step_calls=0`。两层 128-hidden GRU 位于 `scripts/train_libero_action_to_joint_predictor.py`，输入 current q0 和 48-step LeRobot action chunk，输出 48 个 post-action q。60-epoch CPU 训练的 best validation epoch 为 36；held-out frame-0 window 在 horizon 12/24/36/48 的 arm-q MAE 分别为 `0.00731/0.01269/0.01807/0.02651 rad`，horizon 48 gripper-q MAE 为 `0.00178`。
+
+正式几何 gate 为 `/workspace/WM/gwp-action-video-results/action_to_joint_geometry_audit_op190.json`。50 个 held-out episode 的 horizon-48 EEF position error mean/p95 为 `0.02019/0.04121 m`，robot-mask IoU mean/p05/min 为 `0.85395/0.75693/0.63988`；horizon-12 robot-mask IoU mean 为 `0.92453`。预先固定的绝对阈值全部通过，并明显超过 fixed-IK，因此 decision 为 `eligible_for_frozen_gwp_alignment_adapter`。这个 gate 使用 logged future q 只作 held-out accuracy target，部署 target 生成时不读取 future q。
+
+baseline policy 的 200/50 action chunks 随后由 `scripts/infer_libero_action_to_joint_predictor.py` 映射到 q0+48 predicted q。该脚本从旧 v5 文件只读取哈希固定的 `policy_actions_lerobot`，明确不读取旧 rollout mask、rollout qpos 或 simulator action；train/held-out arm joint clipping fraction 均为 0。q 再由 `scripts/generate_libero_joint_trajectory_mask_cache.py` 直接做 FK 与 CPU robot visual-mesh rasterization，正式 policy mask 位于 `policy_action_joint_masks_op193/train|heldout`，三种 dynamics attempted count 全为 0。
+
+为防止 probe 与反事实 target 混淆，当前数据流严格分成两个 sidecar：
+
+```text
+real demo video + simultaneous logged q --direct FK mask--> frozen latent probe
+
+baseline policy action + logged current q0
+    --frozen action-to-q adapter--> predicted future q
+    --direct FK mask--> counterfactual policy-action geometry target
+```
+
+真实视频 probe 的 mask cache 来自 `logged_joint_masks_op201/train|heldout`，为 200/50 episode，`q_source=logged_demonstration_joint_trajectory` 且三类 step 计数为 0。`scripts/train_libero_latent_mask_probe.py` 已改为只接受这种 logged-q direct-mask schema，并用 `kinematic_mask_audit_op178_gain023_heldout50_gate.json` 中独立的 renderer registration（robot IoU mean/p05 `0.89831/0.88055`）作相机/mesh gate；旧的 `env.step` replay demonstration cache 被排除。
+
+训练消费的两个自包含 cache 分别由 `scripts/build_libero_logged_action_kinematic_mask_cache.py` 和 `scripts/build_libero_policy_action_kinematic_mask_cache.py` 构建，位于 `logged_action_kinematic_mask_cache_op205` 与 `policy_action_kinematic_mask_cache_op203`。后者 manifest 明确记录旧 v5 sidecar 只读 `policy_actions_lerobot`，`legacy_rollout_masks_read=false`、`legacy_rollout_qpos_read=false`、`simulator_actions_read=false`。`WAMLeRobotDataset` 与 clean-latent evaluator 只在这些安全字段和 dynamics gate 通过后接受新 schema。
+
+target 注册/非平凡性 gate 位于 `kinematic_alignment_target_audit_op207_train.json` 和 `kinematic_alignment_target_audit_op208_heldout.json`，三项检查均通过：250/250 的 q0、robot mask 与 gripper mask 逐值一致；policy target 在 horizon 48 相对 q0 有明显运动；expert 与 policy future 非同一轨迹。held-out horizon-48 的 policy-vs-initial robot IoU 为 `0.46152`，expert-vs-policy robot IoU 为 `0.30723`，EEF distance mean 为 `0.25621 m`。这些数值只证明 target 已注册且包含动作相关变化，不把 expert/policy 差异误当成 policy prediction error，因为两者本来对应不同 action chunk。
+
+当前最清楚的控制叙事是一个两阶段而非单个对称 consistency loss：
+
+1. **consequence calibration**：冻结 policy action 与 action→q adapter，用 predicted-q mask 监督 clean-video-latent probe 输出，使视频分支在 baseline policy 的 off-expert action 分布上学会机器人几何后果；先用 correct-vs-shuffled action gate 证明它没有忽略 action。
+2. **policy improvement**：只有第一阶段通过后才冻结 consequence model，让 action head 预测动作诱导的 q/mask 或视频 mask 朝 logged expert future mask 靠近，同时保留原 action imitation loss。这样第二阶段的梯度目标是 demonstrated desired consequence，而不是“让同一个动作产生的两种预测彼此一致”；后者没有任务最优方向，可能只让 action 与 video 一起犯同一个错。
+
+因此当前 clean-latent matched/full 只属于第一阶段，不宣称已经改善动作。node2 当前容器未暴露 H20 device，且现有 `.venv-ppu` 在该容器导入 torch 时缺少其厂商 runtime；为遵守环境与驱动约束，没有安装替代 CUDA/torch 或修改系统库。CPU 数据、FK、cache 与 gate 均已完成；冻结 probe 的 VAE 编码训练及随后 matched/full 要等原项目 GPU runtime 恢复后执行。
+
 ## 结果位置
 
 - 当前 4×PPU 服务器：`/workspace/WM/gwp-action-video-results/`
