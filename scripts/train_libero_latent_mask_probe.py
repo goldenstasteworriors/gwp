@@ -35,8 +35,8 @@ from world_action_model.alignment import (
 )
 
 
-CACHE_SCHEMA = "libero-demonstration-robot-mask-v1"
-REGISTRATION_SCHEMA = "libero-demonstration-mask-registration-audit-v1"
+CACHE_SCHEMA = "libero-joint-kinematic-robot-mask-v1"
+RENDERER_AUDIT_SCHEMA = "libero-kinematic-mask-pipeline-audit-v1"
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]
 PROBE_VIEW_KEYS = (
     "observation.images.image",
@@ -49,8 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train-cache", type=Path, required=True)
     parser.add_argument("--heldout-cache", type=Path, required=True)
-    parser.add_argument("--train-registration", type=Path, required=True)
-    parser.add_argument("--heldout-registration", type=Path, required=True)
+    parser.add_argument("--renderer-audit", type=Path, required=True)
     parser.add_argument("--vae", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
@@ -88,10 +87,15 @@ def read_cache(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         raise ValueError(f"Unexpected cache schema in {manifest_path}")
     if manifest.get("rgb_supervision") is not None:
         raise ValueError("Probe cache must not contain a video-generation target")
-    if manifest.get("rendered_rgb_role") != (
-        "registration_audit_only_not_a_probe_or_video_target"
+    if manifest.get("q_source") != "logged_demonstration_joint_trajectory":
+        raise ValueError("Probe targets must come from logged q, not predicted q")
+    if manifest.get("dynamics") != "forbidden" or any(
+        int(value) != 0
+        for value in manifest.get("dynamics_attempted_calls", {}).values()
     ):
-        raise ValueError("Rendered RGB role is not restricted to registration audit")
+        raise ValueError("Probe cache attempted simulator dynamics")
+    if manifest.get("robot_visibility") != "amodal_robot_only_no_task_object_occlusion":
+        raise ValueError("Unexpected robot-mask visibility semantics")
     if [int(value) for value in manifest.get("horizons", [])] != EXPECTED_HORIZONS:
         raise ValueError(f"Unexpected horizons in {manifest_path}")
     records = list(manifest.get("episodes", []))
@@ -104,23 +108,20 @@ def read_cache(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return manifest, records
 
 
-def validate_registration(
-    report_path: Path,
-    cache_root: Path,
-    manifest_path: Path,
-    num_episodes: int,
-) -> dict[str, Any]:
+def validate_renderer_audit(report_path: Path) -> dict[str, Any]:
     report = load_json(report_path)
-    if report.get("schema_version") != REGISTRATION_SCHEMA:
-        raise ValueError(f"Unexpected registration schema in {report_path}")
-    if report.get("status") != "passed" or not all(report.get("checks", {}).values()):
-        raise RuntimeError(f"Registration gate did not pass: {report_path}")
-    if Path(str(report.get("cache"))).resolve() != cache_root.resolve():
-        raise ValueError(f"Registration/cache mismatch in {report_path}")
-    if report.get("manifest_sha256") != sha256_file(manifest_path):
-        raise ValueError(f"Registration/manifest hash mismatch in {report_path}")
-    if int(report.get("num_episodes", -1)) != num_episodes:
-        raise ValueError(f"Registration episode count mismatch in {report_path}")
+    if report.get("schema_version") != RENDERER_AUDIT_SCHEMA:
+        raise ValueError(f"Unexpected renderer audit schema in {report_path}")
+    attempted = report.get("dynamics_prohibition", {}).get("attempted_calls", {})
+    if set(attempted) != {"env_step", "sim_step", "mj_step"} or any(
+        int(value) != 0 for value in attempted.values()
+    ):
+        raise RuntimeError("Renderer audit attempted simulator dynamics")
+    registration = report.get("renderer_registration", {}).get("robot_mask_iou", {})
+    if float(registration.get("mean", -1.0)) < 0.85 or float(
+        registration.get("p05", -1.0)
+    ) < 0.80:
+        raise RuntimeError("Direct-q renderer registration gate did not pass")
     return report
 
 
@@ -152,7 +153,7 @@ class DemoMaskDataset(Dataset):
             source_to_index[(int(episode), int(frame))] = index
         self.sample_indices = [
             source_to_index[
-                (int(record["episode_index"]), int(record["source_frame_index"]))
+                (int(record["episode_index"]), int(record.get("source_frame_index", 0)))
             ]
             for record in records
         ]
@@ -294,18 +295,7 @@ def main() -> None:
     heldout_episodes = {int(record["episode_index"]) for record in heldout_records}
     if train_episodes & heldout_episodes:
         raise ValueError("Train/held-out probe caches overlap")
-    train_registration = validate_registration(
-        args.train_registration,
-        train_root,
-        train_root / "manifest.json",
-        len(train_records),
-    )
-    heldout_registration = validate_registration(
-        args.heldout_registration,
-        heldout_root,
-        heldout_root / "manifest.json",
-        len(heldout_records),
-    )
+    renderer_audit = validate_renderer_audit(args.renderer_audit)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -425,14 +415,13 @@ def main() -> None:
         "heldout_cache": str(heldout_root),
         "train_manifest_sha256": sha256_file(train_root / "manifest.json"),
         "heldout_manifest_sha256": sha256_file(heldout_root / "manifest.json"),
-        "train_registration": str(args.train_registration.resolve()),
-        "heldout_registration": str(args.heldout_registration.resolve()),
-        "train_registration_sha256": sha256_file(args.train_registration),
-        "heldout_registration_sha256": sha256_file(args.heldout_registration),
-        "registration_thresholds": {
-            "train": train_registration["thresholds"],
-            "heldout": heldout_registration["thresholds"],
-        },
+        "renderer_audit": str(args.renderer_audit.resolve()),
+        "renderer_audit_sha256": sha256_file(args.renderer_audit),
+        "renderer_registration": renderer_audit["renderer_registration"],
+        "probe_target_semantics": (
+            "real camera video latent paired with logged q rendered by direct FK "
+            "and robot-mesh rasterization; no dynamics replay"
+        ),
         "vae": str(args.vae.resolve()),
         "input_views": list(PROBE_VIEW_KEYS),
         "view_concat_mode": PROBE_VIEW_CONCAT_MODE,

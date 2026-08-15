@@ -45,6 +45,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--suite", required=True)
     parser.add_argument("--joint-trajectories-root", type=Path, required=True)
     parser.add_argument("--joint-predictor-id", required=True)
+    parser.add_argument(
+        "--q-source",
+        choices=(
+            "external_joint_predictor_outputs_only",
+            "logged_demonstration_joint_trajectory",
+        ),
+        default="external_joint_predictor_outputs_only",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--episodes", type=int, nargs="+")
     parser.add_argument("--episodes-file", type=Path)
@@ -219,6 +227,8 @@ def main() -> None:
                 )
                 row = {
                     "episode_index": episode,
+                    "source_frame_index": 0,
+                    "action_chunk_index": 0,
                     "task_index": int(task["task_index"]),
                     "libero_task_index": libero_task_index,
                     "task_language": language,
@@ -247,7 +257,7 @@ def main() -> None:
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "target_mapping": "specified q + gripper q + camera calibration -> FK -> mesh rasterization -> robot mask",
-        "q_source": "external_joint_predictor_outputs_only",
+        "q_source": args.q_source,
         "action_input": None,
         "simulator_future_state_input": None,
         "raw_demonstration_future_state_input": None,
@@ -279,4 +289,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
