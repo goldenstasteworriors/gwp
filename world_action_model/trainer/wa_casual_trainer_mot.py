@@ -627,13 +627,17 @@ class CasualWATrainerMoT(Trainer):
                     self.counterfactual_action_rank_loss_weight > 0.0
                     or self.counterfactual_action_rank_compute_control
                 ):
+                    negative_action = action.detach().to(
+                        device=counterfactual_action.device,
+                        dtype=counterfactual_action.dtype,
+                    )
                     negative_output = transformer(
                         ref_latents=ref_latents,
                         noisy_latents=counterfactual_noisy_future,
                         timestep=counterfactual_timestep,
                         encoder_hidden_states=prompt_embeds,
                         return_dict=True,
-                        action=action.detach(),
+                        action=negative_action,
                         state=state,
                         embodiment_id=embodiment_id,
                         output_counterfactual_mask=False,
@@ -653,7 +657,7 @@ class CasualWATrainerMoT(Trainer):
                         latent_valid,
                     )
                     action_mse = (
-                        counterfactual_action.float() - action.detach().float()
+                        counterfactual_action.float() - negative_action.float()
                     ).pow(2).mean(dim=(1, 2))
                     active = action_mse >= self.counterfactual_action_rank_min_mse
                     if active.any():
