@@ -353,7 +353,9 @@ def main() -> None:
                     ),
                 )
             )
-    mean_mask = per_horizon_mean_mask_baseline(np.stack(training_masks), args.threshold)
+    mean_mask = per_horizon_mean_mask_baseline(
+        np.stack(training_masks), threshold=args.threshold
+    )
 
     history = []
     for epoch in range(1, args.epochs + 1):
