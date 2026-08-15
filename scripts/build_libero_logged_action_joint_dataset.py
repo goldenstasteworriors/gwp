@@ -107,6 +107,7 @@ def build_split(
     episodes_root.mkdir(parents=True)
     raw_candidate_cache: dict[Path, list[dict[str, Any]]] = {}
     raw_metadata_cache: dict[str, tuple[str, Path]] = {}
+    raw_hash_cache: dict[Path, str] = {}
     rows: list[dict[str, Any]] = []
 
     for episode in episodes:
@@ -123,6 +124,8 @@ def build_split(
             raw_candidate_cache[raw_path] = load_raw_demo_candidates(
                 raw_path, language
             )
+        if raw_path not in raw_hash_cache:
+            raw_hash_cache[raw_path] = sha256_file(raw_path)
         matched, match_error = match_raw_demo(
             episode,
             source["demonstration_actions"],
@@ -181,7 +184,7 @@ def build_split(
             "task_language": language,
             "task_name": task_name,
             "raw_hdf5_path": str(raw_path.resolve()),
-            "raw_hdf5_sha256": sha256_file(raw_path),
+            "raw_hdf5_sha256": raw_hash_cache[raw_path],
             "raw_demo_name": demo_name,
             "raw_demo_action_match_max_abs": float(match_error),
             "num_steps": int(len(policy_actions)),
@@ -287,4 +290,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
