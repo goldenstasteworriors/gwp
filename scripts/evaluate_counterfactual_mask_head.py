@@ -28,6 +28,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from diffusers.models import AutoencoderKLWan  # noqa: E402
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler  # noqa: E402
 
 from world_action_model.alignment import (  # noqa: E402
     LatentRobotMaskProbe,
@@ -345,13 +346,13 @@ def predict_mask_logits(
         raise ValueError("clean_latent_probe evaluation requires a frozen mask probe")
     if flow_rollout_steps <= 0:
         raise ValueError("flow_rollout_steps must be positive")
+    scheduler = FlowMatchEulerDiscreteScheduler(shift=5.0)
+    scheduler.set_timesteps(flow_rollout_steps, device=ref_latents.device)
     predicted_clean = future_noise.float()
-    for step in range(flow_rollout_steps):
-        sigma = 1.0 - step / flow_rollout_steps
-        next_sigma = 1.0 - (step + 1) / flow_rollout_steps
+    for scheduler_timestep in scheduler.timesteps:
         timestep.zero_()
-        timestep[:, num_state_tokens + num_action_tokens + frame_tokens :] = round(
-            sigma * 1000.0
+        timestep[:, num_state_tokens + num_action_tokens + frame_tokens :] = (
+            scheduler_timestep.to(dtype=timestep.dtype)
         )
         common["noisy_latents"] = predicted_clean.to(dtype=dtype)
         common["timestep"] = timestep
@@ -366,7 +367,12 @@ def predict_mask_logits(
                 "Predicted flow/future-noise shape mismatch: "
                 f"{tuple(predicted_flow.shape)} vs {tuple(future_noise.shape)}"
             )
-        predicted_clean = predicted_clean + (next_sigma - sigma) * predicted_flow
+        predicted_clean = scheduler.step(
+            predicted_flow,
+            scheduler_timestep,
+            predicted_clean,
+            return_dict=False,
+        )[0]
     return mask_probe(predicted_clean).float()
 
 

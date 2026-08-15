@@ -497,7 +497,8 @@ def main() -> None:
         "threshold": args.threshold,
         "bootstrap_samples": args.bootstrap_samples,
         "flow_rollout": {
-            "solver": "fixed-step Euler in normalized Wan latent space",
+            "solver": "diffusers FlowMatchEulerDiscreteScheduler",
+            "shift": 5.0,
             "sigma_start": 1.0,
             "sigma_end": 0.0,
             "steps": args.flow_rollout_steps,
