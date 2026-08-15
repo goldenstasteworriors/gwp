@@ -10,7 +10,10 @@ objects, contacts, rewards, and environment transitions are not consulted.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import importlib
+import os
 from pathlib import Path
+import sys
 from typing import Any, Iterator
 
 import cv2
@@ -27,6 +30,34 @@ KINEMATIC_TRANSITION = (
 )
 
 
+def import_mujoco_without_render_context() -> tuple[Any, Any, Any]:
+    """Import MuJoCo/robosuite without requiring an EGL device.
+
+    Robosuite 1.4 forces ``MUJOCO_GL=egl`` while importing its bindings when
+    GPU rendering is enabled in its installed macros, even when the requested
+    environment has both renderers disabled.  This kinematic path never
+    creates a GL context.  Preloading MuJoCo with its lazy GLFW backend and
+    using robosuite's accepted ``glx`` sentinel during the binding import
+    prevents that unnecessary EGL initialization.  No package or driver is
+    modified.
+    """
+
+    original_gl = os.environ.get("MUJOCO_GL")
+    try:
+        if "mujoco" not in sys.modules:
+            os.environ["MUJOCO_GL"] = "glfw"
+        mujoco = importlib.import_module("mujoco")
+        os.environ["MUJOCO_GL"] = "glx"
+        base = importlib.import_module("robosuite.environments.base")
+        binding = importlib.import_module("robosuite.utils.binding_utils")
+    finally:
+        if original_gl is None:
+            os.environ.pop("MUJOCO_GL", None)
+        else:
+            os.environ["MUJOCO_GL"] = original_gl
+    return mujoco, base.MujocoEnv, binding.MjSim
+
+
 @contextmanager
 def forbid_mujoco_dynamics() -> Iterator[dict[str, int]]:
     """Raise immediately if code inside the context attempts ``mj_step``.
@@ -36,9 +67,7 @@ def forbid_mujoco_dynamics() -> Iterator[dict[str, int]]:
     FK operation required by this renderer.
     """
 
-    import mujoco
-    from robosuite.environments.base import MujocoEnv
-    from robosuite.utils.binding_utils import MjSim
+    mujoco, MujocoEnv, MjSim = import_mujoco_without_render_context()
 
     counts = {"mj_step": 0, "sim_step": 0, "env_step": 0}
     original_mj_step = mujoco.mj_step
