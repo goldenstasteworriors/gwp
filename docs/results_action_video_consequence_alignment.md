@@ -331,7 +331,7 @@ specified arm joint q + specified gripper q + calibrated camera
     -> amodal robot / gripper mask
 ```
 
-生成期间禁止 `env.step`、`sim.step` 和 `mj_step`；task XML 只提供 Panda joint tree、visual mesh、base transform 与 camera calibration。task objects 不参与 rasterization，因此 mask 不受碰撞、接触、物体状态或物体遮挡影响。`scripts/libero_kinematic_robot_mask.py` 用运行时 monkeypatch 将三类 step 调用变成硬错误，只保留 `mj_forward` 作为 FK，并用 CPU triangle-union rasterizer直接投影 robot visual mesh。50-episode held-out 注册审计中，把旧 cache 已有的同一个 q 写入新渲染器后，robot-mask IoU mean/median/min 为 `0.89831/0.89803/0.87531`；差异预期来自新 mask 是 amodal robot-only，而旧 MuJoCo segmentation 会被 task object 遮挡。三类 forbidden-step attempted count 均为 0，说明相机方向和 mesh 坐标注册成立且没有执行动力学。
+以下实现后来又被更严格的 simulator-independent contract 废止：生成期间虽禁止 `env.step`、`sim.step` 和 `mj_step`，但 `scripts/libero_kinematic_robot_mask.py` 仍构造 `ControlEnv`、把 q 写进 `sim.data.qpos` 并调用 `sim.forward()`。它没有查询 future state 或动力学真值，但接口上仍依赖 benchmark environment，不能作为最终 benchmark target generator。对应旧 cache 和审计只保留用于历史复现。
 
 GWP/LIBERO 的控制输出是 normalized OSC delta，不是 q，因此还单独审计了“current q + action chunk -> fixed differential IK -> future q”。直接使用 OSC 完整命令幅度在 2-episode diagnostic 上到 horizon 12 已产生约 `0.278 m` EEF error，立即判为不可用。10 条 demo 的相邻记录状态显示，实际平移只实现 command delta 的约 `0.228`，各轴 command/realized correlation 为 `0.89--0.99`；据此仅作为诊断测试固定 gain 0.23，而不在生成时调用 dynamics。正式 50-episode held-out gate 位于 `/workspace/WM/gwp-action-video-results/kinematic_mask_audit_op178_gain023_heldout50_gate.json`：horizon 12 的 EEF error mean=`0.01302 m`、robot-mask IoU mean=`0.86429`；horizon 48 漂移到 EEF error mean/p95=`0.05410/0.10668 m`、robot-mask IoU mean/p05/min=`0.67958/0.54874/0.48236`。renderer registration gate 通过，但 fixed-gain action-to-q gate 失败，结构化 decision 为 `require_explicit_future_joint_trajectory_prediction`。所以固定 action-to-q adapter 不具备长时 target 精度，不能替代 simulator rollout 生成正式监督。
 
@@ -357,7 +357,7 @@ baseline policy action + logged current q0
     --direct FK mask--> counterfactual policy-action geometry target
 ```
 
-真实视频 probe 的 mask cache 来自 `logged_joint_masks_op201/train|heldout`，为 200/50 episode，`q_source=logged_demonstration_joint_trajectory` 且三类 step 计数为 0。`scripts/train_libero_latent_mask_probe.py` 已改为只接受这种 logged-q direct-mask schema，并用 `kinematic_mask_audit_op178_gain023_heldout50_gate.json` 中独立的 renderer registration（robot IoU mean/p05 `0.89831/0.88055`）作相机/mesh gate；旧的 `env.step` replay demonstration cache 被排除。
+真实视频 probe 的旧 mask cache 来自 `logged_joint_masks_op201/train|heldout`，为 200/50 episode，`q_source=logged_demonstration_joint_trajectory` 且三类 step 计数为 0。它排除了 `env.step` replay，但仍使用 `ControlEnv + sim.forward()`，因此在 2026-08-16 的严格接口纠正后也被降级为 historical-only，必须以 standalone v2 cache 重建 probe 后才能继续训练。
 
 训练消费的两个自包含 cache 分别由 `scripts/build_libero_logged_action_kinematic_mask_cache.py` 和 `scripts/build_libero_policy_action_kinematic_mask_cache.py` 构建，位于 `logged_action_kinematic_mask_cache_op205` 与 `policy_action_kinematic_mask_cache_op203`。后者 manifest 明确记录旧 v5 sidecar 只读 `policy_actions_lerobot`，`legacy_rollout_masks_read=false`、`legacy_rollout_qpos_read=false`、`simulator_actions_read=false`。`WAMLeRobotDataset` 与 clean-latent evaluator 只在这些安全字段和 dynamics gate 通过后接受新 schema。
 
@@ -372,7 +372,7 @@ target 注册/非平凡性 gate 位于 `kinematic_alignment_target_audit_op207_t
 
 ### 2026-08-16：action support、frozen probe 与训练一致的动作敏感性门
 
-完整 baseline policy action 不能直接交给 action→q GRU。`scripts/audit_libero_action_to_joint_input_support.py` 在 current q0 与 48-step action temporal feature 上，以 14,811 个 logged train window 建立标准化 PCA-32、5-NN support distance；阈值预先固定为 held-out expert distance p95 的 1.5 倍。full policy chunk 在 train/held-out 均只有 8% 通过，故正式对齐禁止使用完整 policy-action q/mask。固定插值 `a_alpha=(1-alpha)expert+alpha policy` 后，held-out 的 alpha 0/0.25/0.5/0.75/1.0 接受率为 1/1/1/0.98/0.08；每条样本选最大 supported alpha，最终 held-out 50 条中 1 条为 0.5、45 条为 0.75、4 条为 1.0。冻结 GRU 推理与 direct FK mask 位于 `support_constrained_action_to_joint_op219` 和 `support_constrained_joint_masks_op221`，自包含 cache 位于 `support_constrained_action_kinematic_mask_cache_op230`。它们没有读取 simulator future state，三类 dynamics attempted call 均为 0。
+完整 baseline policy action 不能直接交给 action→q GRU。`scripts/audit_libero_action_to_joint_input_support.py` 在 current q0 与 48-step action temporal feature 上，以 14,811 个 logged train window 建立标准化 PCA-32、5-NN support distance；阈值预先固定为 held-out expert distance p95 的 1.5 倍。full policy chunk 在 train/held-out 均只有 8% 通过，故正式对齐禁止使用完整 policy-action q/mask。固定插值 `a_alpha=(1-alpha)expert+alpha policy` 后，held-out 的 alpha 0/0.25/0.5/0.75/1.0 接受率为 1/1/1/0.98/0.08；每条样本选最大 supported alpha，最终 held-out 50 条中 1 条为 0.5、45 条为 0.75、4 条为 1.0。action support 与冻结 GRU 数值仍有效，因为这两步不导入 simulator；旧 `support_constrained_joint_masks_op221` 和组合 cache `op230` 则因 renderer 接口不够严格而降级，等待 standalone v2 重建。
 
 真实 5-frame 双视图视频与 simultaneous logged-q direct mask 训练出的 frozen probe 位于 `latent_mask_probe_logged_q_op220`。50 条 held-out 的 full/dynamic/new-occupancy IoU 和 gripper recall 分别为 0.8342/0.7670/0.7521/0.8652；copy-initial 对应为 0.3795/0/0/0.1492，预注册绝对与相对门全部通过。这排除了“后续动作敏感性为零只是 probe 看不懂 latent”的混杂。
 
@@ -390,6 +390,16 @@ target 注册/非平凡性 gate 位于 `kinematic_alignment_target_audit_op207_t
 报告依次为 `clean_latent_fullvideo_purenoise_op245.json`、`clean_latent_fullvideo_teacher050_op246.json`、`clean_latent_fullvideo_teacher075_op247.json` 和 `clean_latent_fullvideo_teacher090_op248.json`。sigma 0.50/0.75 证明 latent/probe 在该点能准确恢复真实机器人运动，但换成同任务 shuffled future action 几乎不改变输出；所有 action-sensitivity bootstrap gate 均失败。严格结论不是“未来动作条件没有必要对齐”，而是恰好相反：**提供 future action token 并不保证 video branch 使用它**。同时该结果否决了直接在原 clean RGB latent 上启动对齐训练，因为其基线没有可测的 action-faithful consequence mount。
 
 控制目标因此固定为非对称两阶段：第一阶段只校准可微 consequence model `C(context, action)->robot geometry`，并要求训练后 correct-vs-shuffled 明显为正；第二阶段冻结 `C`，把 action head 的 predicted-clean action 输入 `C`，朝 logged expert-q direct-FK mask 优化，同时保留 imitation action loss。只有第二阶段的梯度更新 action prediction，才可声称目标是控制；第一阶段 mask loss 降低只能声称 consequence calibration。五个几何 target 对应 `[0,12,24,36,48]`，天然解决视频帧与 48-step action token 的时间尺度差异。
+
+### 2026-08-16：严格 simulator-independent mask v2
+
+最终 benchmark contract 进一步固定为：`specified arm q + gripper q + explicit camera intrinsics/extrinsics -> standalone robot-tree FK -> robot visual-mesh CPU rasterization -> mask`。生成器不得构造或导入 LIBERO task environment，不得读取 task object/state，不得调用 controller/contact；即使只是 `ControlEnv + sim.forward()` 也不再接受。`scripts/build_libero_standalone_robot_asset.py` 只从静态 Panda、mount、gripper MJCF 构建 robot-only `.mjb`，base pose 与相机内外参显式作为 CLI 输入；`scripts/libero_standalone_robot_mask.py` 在生成时只加载该模型和 camera JSON，并且只调用 `mujoco.mj_kinematics`。`mj_step/mj_step1/mj_step2/mj_forward/mj_forwardSkip` 全部在运行时 monkeypatch 为硬错误。
+
+第一次 asset `libero_spatial_standalone_robot_asset_op268` 暴露并保留了一个失败：脱离 arena 后缺少 `compiler angle=radian`，Panda 关节限位被缩小约 57.3 倍，因此判 invalid、未生成 mask。commit `c477681` 显式固定 radian 并加入七关节精确限位 gate；合法 asset 位于 `/workspace/WM/gwp-action-video-results/libero_spatial_standalone_robot_asset_op270`。
+
+50-episode held-out v2 mask 位于 `support_constrained_standalone_joint_masks_heldout_op271`，schema 为 `libero-joint-standalone-kinematic-robot-mask-v2`。manifest 明确记录 `benchmark_environment_imported=false`、`benchmark_environment_constructed=false`、`benchmark_state_read=false`、`controller_used=false`、`contact_used=false`、`fk_api=mujoco.mj_kinematics`，五类 forbidden API attempted count 均为 0。`support_constrained_standalone_mask_audit_op272.json` 对 250 个相同指定 q frame 做一次性 renderer registration：standalone 与旧 FK mask 的 robot/gripper IoU mean/p05/min 都是 `1.0/1.0/1.0`，且 AST source audit 中 LIBERO/robosuite/gym prohibited import 为空。旧 cache 在此只作一次性实现等价性检查，不被复制到 v2、不作为训练 target。
+
+基于旧 `ControlEnv + sim.forward()` cache 的 matched run `support_constrained_shared_mask_stage1_matched_op257` 在 step 60 主动终止，full watcher 与 post-pair evaluator 同时停止，未形成实验结论。后续训练入口、dataset、probe、VAE audit 和 evaluator 已统一升级为只接受 standalone v2 schema；必须重建 train/heldout logged 与 support-constrained sidecar 并重新通过 preflight，旧 schema 不能继续训练。
 
 ## 结果位置
 
