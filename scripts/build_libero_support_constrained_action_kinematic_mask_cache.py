@@ -85,10 +85,13 @@ def main() -> None:
         raise ValueError("Unexpected source policy schema")
     if sha256_file(source_policy_path) != inference["policy_cache_manifest_sha256"]:
         raise ValueError("Source policy changed after q inference")
+    source_policy_records = index_records(source_policy)
     inference_records = index_records(inference)
     mask_records = index_records(masks)
-    if list(inference_records) != list(mask_records):
-        raise ValueError("Inference/mask episode order differs")
+    if list(inference_records) != list(mask_records) or list(inference_records) != list(
+        source_policy_records
+    ):
+        raise ValueError("Inference/mask/source-policy episode order differs")
 
     args.output_dir.mkdir(parents=True)
     episodes_root = args.output_dir / "episodes"
@@ -96,6 +99,7 @@ def main() -> None:
     rows: list[dict[str, Any]] = []
     for episode, inference_record in inference_records.items():
         mask_record = mask_records[episode]
+        source_policy_record = source_policy_records[episode]
         action_path = args.joint_inference / str(inference_record["condition_action_path"])
         direct_mask_path = args.joint_mask_cache / str(mask_record["cache_file"])
         if sha256_file(action_path) != inference_record["condition_action_sha256"]:
@@ -125,8 +129,7 @@ def main() -> None:
             raise ValueError(f"Wrong horizons episode {episode}")
         output_path = episodes_root / f"episode_{episode:06d}.npz"
         np.savez_compressed(output_path, policy_actions_lerobot=action, **selected)
-        rows.append(
-            {
+        row = {
                 "episode_index": episode,
                 "source_frame_index": 0,
                 "action_chunk_index": 0,
@@ -146,8 +149,18 @@ def main() -> None:
                 "direct_q_mask_cache_sha256": mask_record["cache_sha256"],
                 "cache_file": str(output_path.relative_to(args.output_dir)),
                 "cache_sha256": sha256_file(output_path),
-            }
-        )
+        }
+        for key in (
+            "raw_demo_name",
+            "raw_hdf5_path",
+            "raw_hdf5_sha256",
+            "raw_initial_state_sha256",
+            "prediction_path",
+            "prediction_sha256",
+        ):
+            if key in source_policy_record:
+                row[key] = source_policy_record[key]
+        rows.append(row)
 
     output = {
         "schema_version": OUTPUT_SCHEMA,
