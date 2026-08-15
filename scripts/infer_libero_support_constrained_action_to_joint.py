@@ -141,7 +141,10 @@ def main() -> None:
     if set(joint_records) != set(policy_records) or set(joint_records) != set(alphas):
         raise ValueError("Joint/policy/support episode sets differ")
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    # This checkpoint was produced by this repository and contains NumPy q
+    # statistics in addition to tensors, so PyTorch >=2.6's tensor-only
+    # default is intentionally disabled after the SHA256/provenance checks.
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     model = ActionToJointGRU(
         int(checkpoint["hidden_dim"]), int(checkpoint["num_layers"])
     )
