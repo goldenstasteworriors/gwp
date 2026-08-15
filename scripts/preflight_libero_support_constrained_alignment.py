@@ -16,8 +16,8 @@ import numpy as np
 
 
 SPLIT_SCHEMA = "libero-counterfactual-split-v1"
-EXPERT_SCHEMA = "libero-logged-action-kinematic-mask-v1"
-TARGET_SCHEMA = "libero-support-constrained-action-kinematic-mask-v1"
+EXPERT_SCHEMA = "libero-logged-action-standalone-mask-v2"
+TARGET_SCHEMA = "libero-support-constrained-action-standalone-mask-v2"
 SUPPORT_SCHEMA = "libero-action-to-joint-input-support-audit-v1"
 TARGET_AUDIT_SCHEMA = "libero-kinematic-alignment-target-audit-v1"
 HORIZONS = [0, 12, 24, 36, 48]
@@ -97,11 +97,24 @@ def validate_cache(
         raise ValueError(f"Unexpected horizons: {manifest_path}")
     calls = manifest.get("dynamics_attempted_calls", {})
     if manifest.get("dynamics") != "forbidden" or set(calls) != {
-        "env_step",
-        "sim_step",
         "mj_step",
+        "mj_step1",
+        "mj_step2",
+        "mj_forward",
+        "mj_forwardSkip",
     } or any(int(value) != 0 for value in calls.values()):
         raise ValueError(f"Dynamics attempt in {manifest_path}: {calls}")
+    for key in (
+        "benchmark_environment_imported",
+        "benchmark_environment_constructed",
+        "benchmark_state_read",
+        "controller_used",
+        "contact_used",
+    ):
+        if manifest.get(key) is not False:
+            raise ValueError(f"Standalone cache violates {key}: {manifest_path}")
+    if manifest.get("fk_api") != "mujoco.mj_kinematics":
+        raise ValueError(f"Cache did not use standalone FK: {manifest_path}")
     records = list(manifest.get("episodes", []))
     episodes = [int(record["episode_index"]) for record in records]
     if episodes != expected_episodes or len(records) != int(

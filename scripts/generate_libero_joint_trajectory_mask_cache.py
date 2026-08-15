@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Render LIBERO robot masks directly from predicted joint trajectories.
+"""Render LIBERO robot masks from q without constructing a benchmark environment.
 
 The input contract is intentionally q-space, not action-space.  For every
 episode this tool consumes ``predicted_joint_qpos.npy`` and
 ``predicted_gripper_qpos.npy`` and performs only FK plus robot-mesh
-rasterization.  It never restores a demonstration future state, executes an
-action, evaluates contacts, or advances simulator dynamics.
+rasterization against a robot-only compiled model and explicit camera
+calibration.  It never imports or constructs a LIBERO task environment,
+restores a demonstration state, executes an action, evaluates contacts, or
+advances simulator dynamics.
 """
 
 from __future__ import annotations
@@ -20,21 +22,18 @@ import numpy as np
 import pandas as pd
 
 from generate_libero_counterfactual_mask_cache import (
-    configure_libero_path,
     jsonable,
     load_episode_languages,
     sha256_file,
-    suite_task_index_by_language,
 )
-from libero_kinematic_robot_mask import (
+from libero_standalone_robot_mask import (
     RASTERIZER_SEMANTICS,
-    KinematicRobotMaskRenderer,
-    create_kinematic_libero_environment,
+    StandaloneRobotMaskRenderer,
     forbid_mujoco_dynamics,
 )
 
 
-SCHEMA_VERSION = "libero-joint-kinematic-robot-mask-v1"
+SCHEMA_VERSION = "libero-joint-standalone-kinematic-robot-mask-v2"
 IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EPISODE_PATTERN = re.compile(r"episode_(\d+)$")
 
@@ -45,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--suite", required=True)
     parser.add_argument("--joint-trajectories-root", type=Path, required=True)
     parser.add_argument("--joint-predictor-id", required=True)
+    parser.add_argument("--robot-asset-dir", type=Path, required=True)
     parser.add_argument(
         "--q-source",
         choices=(
@@ -57,7 +57,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, nargs="+")
     parser.add_argument("--episodes-file", type=Path)
     parser.add_argument("--horizons", type=int, nargs="+", default=[0, 12, 24, 36, 48])
-    parser.add_argument("--camera-name", default="agentview")
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--height", type=int, default=256)
     return parser.parse_args()
@@ -168,100 +167,81 @@ def main() -> None:
     )
     episode_tasks = load_episode_tasks(args.dataset_root, set(trajectories))
     dataset_info_path = args.dataset_root / "meta/info.json"
-    libero_config_path = configure_libero_path(args.dataset_root)
-
-    from libero.libero import benchmark
-
-    suite = benchmark.get_benchmark_dict()[args.suite]()
-    language_to_suite_task = suite_task_index_by_language(suite)
+    asset_manifest_path = args.robot_asset_dir / "manifest.json"
+    calibration_path = args.robot_asset_dir / "camera_calibration.json"
+    if not asset_manifest_path.is_file() or not calibration_path.is_file():
+        raise FileNotFoundError(f"Incomplete standalone robot asset: {args.robot_asset_dir}")
+    renderer = StandaloneRobotMaskRenderer(
+        args.robot_asset_dir, args.width, args.height
+    )
     args.output_dir.mkdir(parents=True)
     episodes_dir = args.output_dir / "episodes"
     episodes_dir.mkdir()
-    environments: dict[int, tuple[Any, KinematicRobotMaskRenderer]] = {}
     rows: list[dict[str, Any]] = []
     trajectory_layouts: set[str] = set()
 
     with forbid_mujoco_dynamics() as dynamics_counts:
-        try:
-            for episode, (arm_path, gripper_path) in trajectories.items():
-                task = episode_tasks[episode]
-                language = str(task["task_language"])
-                if language not in language_to_suite_task:
-                    raise ValueError(f"Dataset language absent from suite: {language!r}")
-                libero_task_index = int(language_to_suite_task[language])
-                if libero_task_index not in environments:
-                    environment = create_kinematic_libero_environment(
-                        suite, libero_task_index
-                    )
-                    environments[libero_task_index] = (
-                        environment,
-                        KinematicRobotMaskRenderer(
-                            environment,
-                            args.camera_name,
-                            args.width,
-                            args.height,
-                        ),
-                    )
-                _, renderer = environments[libero_task_index]
-                arm_qpos, arm_layout = sample_horizons(arm_path, 7, horizons)
-                gripper_qpos, gripper_layout = sample_horizons(
-                    gripper_path, 2, horizons
+        for episode, (arm_path, gripper_path) in trajectories.items():
+            task = episode_tasks[episode]
+            language = str(task["task_language"])
+            arm_qpos, arm_layout = sample_horizons(arm_path, 7, horizons)
+            gripper_qpos, gripper_layout = sample_horizons(
+                gripper_path, 2, horizons
+            )
+            if arm_layout != gripper_layout:
+                raise ValueError(
+                    f"Arm/gripper trajectory layouts differ for episode {episode}"
                 )
-                if arm_layout != gripper_layout:
-                    raise ValueError(
-                        f"Arm/gripper trajectory layouts differ for episode {episode}"
-                    )
-                trajectory_layouts.add(arm_layout)
-                captures: list[dict[str, np.ndarray]] = []
-                for arm_q, gripper_q in zip(arm_qpos, gripper_qpos):
-                    renderer.set_configuration(arm_q, gripper_q)
-                    captures.append(renderer.render_masks())
-                arrays = stack_captures(captures)
-                cache_path = episodes_dir / f"episode_{episode:06d}.npz"
-                np.savez_compressed(
-                    cache_path,
-                    horizons=np.asarray(horizons, dtype=np.int32),
-                    predicted_joint_qpos=arm_qpos,
-                    predicted_gripper_qpos=gripper_qpos,
-                    **arrays,
-                )
-                row = {
-                    "episode_index": episode,
-                    "source_frame_index": 0,
-                    "action_chunk_index": 0,
-                    "task_index": int(task["task_index"]),
-                    "libero_task_index": libero_task_index,
-                    "task_language": language,
-                    "joint_qpos_path": str(arm_path.resolve()),
-                    "joint_qpos_sha256": sha256_file(arm_path),
-                    "gripper_qpos_path": str(gripper_path.resolve()),
-                    "gripper_qpos_sha256": sha256_file(gripper_path),
-                    "trajectory_layout": arm_layout,
-                    "cache_file": str(cache_path.relative_to(args.output_dir)),
-                    "cache_sha256": sha256_file(cache_path),
-                    "robot_pixels": [
-                        int(mask.sum()) for mask in arrays["robot_mask"]
-                    ],
-                    "gripper_pixels": [
-                        int(mask.sum()) for mask in arrays["gripper_mask"]
-                    ],
-                }
-                rows.append(row)
-                print(json.dumps(jsonable(row)), flush=True)
-        finally:
-            for environment, _ in environments.values():
-                environment.close()
+            trajectory_layouts.add(arm_layout)
+            captures: list[dict[str, np.ndarray]] = []
+            for arm_q, gripper_q in zip(arm_qpos, gripper_qpos):
+                renderer.set_configuration(arm_q, gripper_q)
+                captures.append(renderer.render_masks())
+            arrays = stack_captures(captures)
+            cache_path = episodes_dir / f"episode_{episode:06d}.npz"
+            np.savez_compressed(
+                cache_path,
+                horizons=np.asarray(horizons, dtype=np.int32),
+                predicted_joint_qpos=arm_qpos,
+                predicted_gripper_qpos=gripper_qpos,
+                **arrays,
+            )
+            row = {
+                "episode_index": episode,
+                "source_frame_index": 0,
+                "action_chunk_index": 0,
+                "task_index": int(task["task_index"]),
+                "libero_task_index": int(task["task_index"]),
+                "task_language": language,
+                "joint_qpos_path": str(arm_path.resolve()),
+                "joint_qpos_sha256": sha256_file(arm_path),
+                "gripper_qpos_path": str(gripper_path.resolve()),
+                "gripper_qpos_sha256": sha256_file(gripper_path),
+                "trajectory_layout": arm_layout,
+                "cache_file": str(cache_path.relative_to(args.output_dir)),
+                "cache_sha256": sha256_file(cache_path),
+                "robot_pixels": [int(mask.sum()) for mask in arrays["robot_mask"]],
+                "gripper_pixels": [int(mask.sum()) for mask in arrays["gripper_mask"]],
+            }
+            rows.append(row)
+            print(json.dumps(jsonable(row)), flush=True)
 
     if any(value != 0 for value in dynamics_counts.values()):
         raise RuntimeError(f"Forbidden dynamics call attempted: {dynamics_counts}")
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "target_mapping": "specified q + gripper q + camera calibration -> FK -> mesh rasterization -> robot mask",
+        "target_mapping": "specified q + gripper q + explicit camera calibration -> standalone robot FK -> mesh rasterization -> robot mask",
         "q_source": args.q_source,
         "action_input": None,
         "simulator_future_state_input": None,
         "raw_demonstration_future_state_input": None,
         "rgb_supervision": None,
+        "benchmark_environment_imported": False,
+        "benchmark_environment_constructed": False,
+        "benchmark_state_read": False,
+        "controller_used": False,
+        "contact_used": False,
+        "fk_api": "mujoco.mj_kinematics",
         "dynamics": "forbidden",
         "dynamics_attempted_calls": dynamics_counts,
         "rasterizer_semantics": RASTERIZER_SEMANTICS,
@@ -269,13 +249,15 @@ def main() -> None:
         "suite": args.suite,
         "dataset_root": str(args.dataset_root.resolve()),
         "dataset_info_sha256": sha256_file(dataset_info_path),
-        "libero_config_path": str(libero_config_path),
-        "libero_config_sha256": sha256_file(libero_config_path),
+        "standalone_robot_asset_dir": str(args.robot_asset_dir.resolve()),
+        "standalone_robot_asset_manifest_sha256": sha256_file(asset_manifest_path),
+        "camera_calibration_sha256": sha256_file(calibration_path),
         "joint_trajectories_root": str(args.joint_trajectories_root.resolve()),
         "joint_predictor_id": args.joint_predictor_id,
         "trajectory_layouts": sorted(trajectory_layouts),
         "horizons": horizons,
-        "camera_name": args.camera_name,
+        "camera_profile_id": renderer.calibration["profile_id"],
+        "camera_name": renderer.calibration["camera_name"],
         "image_size": [args.height, args.width],
         "image_orientation": IMAGE_ORIENTATION,
         "num_episodes": len(rows),

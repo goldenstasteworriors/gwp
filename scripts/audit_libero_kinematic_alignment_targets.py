@@ -12,10 +12,10 @@ from typing import Any
 import numpy as np
 
 
-EXPERT_SCHEMA = "libero-logged-action-kinematic-mask-v1"
+EXPERT_SCHEMA = "libero-logged-action-standalone-mask-v2"
 POLICY_SCHEMAS = {
-    "libero-policy-action-kinematic-mask-v1",
-    "libero-support-constrained-action-kinematic-mask-v1",
+    "libero-policy-action-standalone-mask-v2",
+    "libero-support-constrained-action-standalone-mask-v2",
 }
 REPORT_SCHEMA = "libero-kinematic-alignment-target-audit-v1"
 HORIZONS = [0, 12, 24, 36, 48]
@@ -56,11 +56,24 @@ def validate_manifest(
         raise ValueError("Alignment cache contains RGB supervision")
     calls = manifest.get("dynamics_attempted_calls", {})
     if manifest.get("dynamics") != "forbidden" or set(calls) != {
-        "env_step",
-        "sim_step",
         "mj_step",
+        "mj_step1",
+        "mj_step2",
+        "mj_forward",
+        "mj_forwardSkip",
     } or any(int(value) != 0 for value in calls.values()):
         raise ValueError(f"Dynamics call in {path}: {calls}")
+    if manifest.get("fk_api") != "mujoco.mj_kinematics" or any(
+        manifest.get(key) is not False
+        for key in (
+            "benchmark_environment_imported",
+            "benchmark_environment_constructed",
+            "benchmark_state_read",
+            "controller_used",
+            "contact_used",
+        )
+    ):
+        raise ValueError(f"Cache is not standalone FK-only: {path}")
     if manifest.get("horizons") != HORIZONS:
         raise ValueError(f"Unexpected horizons: {path}")
     records = list(manifest.get("episodes", []))
@@ -200,7 +213,13 @@ def main() -> None:
             "same logged q0; future policy action -> frozen q predictor -> direct FK "
             "robot mesh mask, compared only for registration and non-triviality"
         ),
-        "dynamics_attempted_calls": {"env_step": 0, "sim_step": 0, "mj_step": 0},
+        "dynamics_attempted_calls": {
+            "mj_step": 0,
+            "mj_step1": 0,
+            "mj_step2": 0,
+            "mj_forward": 0,
+            "mj_forwardSkip": 0,
+        },
         "checks": checks,
         "by_horizon": summary,
     }

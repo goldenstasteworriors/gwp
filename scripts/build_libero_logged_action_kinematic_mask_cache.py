@@ -13,8 +13,8 @@ import numpy as np
 
 
 JOINT_DATA_SCHEMA = "libero-logged-action-joint-trajectory-v1"
-JOINT_MASK_SCHEMA = "libero-joint-kinematic-robot-mask-v1"
-OUTPUT_SCHEMA = "libero-logged-action-kinematic-mask-v1"
+JOINT_MASK_SCHEMA = "libero-joint-standalone-kinematic-robot-mask-v2"
+OUTPUT_SCHEMA = "libero-logged-action-standalone-mask-v2"
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]
 
 
@@ -70,11 +70,24 @@ def main() -> None:
         raise ValueError("Expert mask must use simultaneous logged q")
     calls = masks.get("dynamics_attempted_calls", {})
     if masks.get("dynamics") != "forbidden" or set(calls) != {
-        "env_step",
-        "sim_step",
         "mj_step",
+        "mj_step1",
+        "mj_step2",
+        "mj_forward",
+        "mj_forwardSkip",
     } or any(int(value) != 0 for value in calls.values()):
         raise ValueError("Direct-q mask cache attempted dynamics")
+    for key in (
+        "benchmark_environment_imported",
+        "benchmark_environment_constructed",
+        "benchmark_state_read",
+        "controller_used",
+        "contact_used",
+    ):
+        if masks.get(key) is not False:
+            raise ValueError(f"Standalone direct-q mask violates {key}")
+    if masks.get("fk_api") != "mujoco.mj_kinematics":
+        raise ValueError("Direct-q mask did not use standalone FK")
 
     joint_records = index_records(joint)
     mask_records = index_records(masks)
@@ -112,6 +125,7 @@ def main() -> None:
                     "eef_rotation",
                     "camera_position",
                     "camera_rotation",
+                    "camera_intrinsic",
                     "camera_fovy",
                 )
             }
@@ -152,6 +166,12 @@ def main() -> None:
         "robot_visibility": masks["robot_visibility"],
         "dynamics": "forbidden",
         "dynamics_attempted_calls": calls,
+        "benchmark_environment_imported": False,
+        "benchmark_environment_constructed": False,
+        "benchmark_state_read": False,
+        "controller_used": False,
+        "contact_used": False,
+        "fk_api": "mujoco.mj_kinematics",
         "joint_dataset_split": str(args.joint_dataset_split.resolve()),
         "joint_dataset_manifest_sha256": sha256_file(joint_manifest_path),
         "joint_mask_cache": str(args.joint_mask_cache.resolve()),

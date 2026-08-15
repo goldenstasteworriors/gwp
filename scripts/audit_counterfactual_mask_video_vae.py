@@ -31,7 +31,7 @@ from world_action_model.alignment import binary_mask_metrics, counterfactual_mas
 SCHEMA_VERSION = "counterfactual-mask-video-vae-audit-v1"
 CACHE_SCHEMAS = {
     "libero-counterfactual-robot-mask-v5",
-    "libero-support-constrained-action-kinematic-mask-v1",
+    "libero-support-constrained-action-standalone-mask-v2",
 }
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]
 
@@ -80,12 +80,13 @@ def read_manifest(cache_root: Path) -> dict[str, Any]:
     if manifest.get("schema_version") not in CACHE_SCHEMAS:
         raise ValueError(f"Unsupported cache schema: {manifest.get('schema_version')!r}")
     if manifest.get("schema_version") == (
-        "libero-support-constrained-action-kinematic-mask-v1"
+        "libero-support-constrained-action-standalone-mask-v2"
     ):
         calls = manifest.get("dynamics_attempted_calls", {})
         if (
             manifest.get("dynamics") != "forbidden"
-            or set(calls) != {"env_step", "sim_step", "mj_step"}
+            or set(calls)
+            != {"mj_step", "mj_step1", "mj_step2", "mj_forward", "mj_forwardSkip"}
             or any(int(value) != 0 for value in calls.values())
         ):
             raise ValueError("Kinematic cache attempted simulator dynamics")
@@ -98,6 +99,17 @@ def read_manifest(cache_root: Path) -> dict[str, Any]:
             )
         ):
             raise ValueError("Kinematic cache read a simulator-oracle field")
+        if manifest.get("fk_api") != "mujoco.mj_kinematics" or any(
+            manifest.get(key) is not False
+            for key in (
+                "benchmark_environment_imported",
+                "benchmark_environment_constructed",
+                "benchmark_state_read",
+                "controller_used",
+                "contact_used",
+            )
+        ):
+            raise ValueError("Mask cache is not standalone FK-only")
     if manifest.get("rgb_supervision") is not None:
         raise ValueError("Counterfactual cache unexpectedly contains RGB supervision")
     if (

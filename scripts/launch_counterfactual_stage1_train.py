@@ -22,7 +22,7 @@ ALIGNMENT_MODES = (
 )
 EXPECTED_CACHE_SCHEMAS = {
     "libero-counterfactual-robot-mask-v5",
-    "libero-support-constrained-action-kinematic-mask-v1",
+    "libero-support-constrained-action-standalone-mask-v2",
 }
 EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EXPECTED_TRAIN_EPISODES = 200
@@ -143,14 +143,26 @@ def validate_cache_manifest(
         raise ValueError(f"Unexpected cache schema: {manifest_path}")
     if audit.get("schema_version") not in {None, schema}:
         raise ValueError(f"Preflight/cache schema mismatch: {manifest_path}")
-    if schema == "libero-support-constrained-action-kinematic-mask-v1":
+    if schema == "libero-support-constrained-action-standalone-mask-v2":
         calls = manifest.get("dynamics_attempted_calls", {})
         if (
             manifest.get("dynamics") != "forbidden"
-            or set(calls) != {"env_step", "sim_step", "mj_step"}
+            or set(calls)
+            != {"mj_step", "mj_step1", "mj_step2", "mj_forward", "mj_forwardSkip"}
             or any(int(value) != 0 for value in calls.values())
         ):
             raise ValueError(f"Kinematic cache attempted dynamics: {manifest_path}")
+        if manifest.get("fk_api") != "mujoco.mj_kinematics" or any(
+            manifest.get(key) is not False
+            for key in (
+                "benchmark_environment_imported",
+                "benchmark_environment_constructed",
+                "benchmark_state_read",
+                "controller_used",
+                "contact_used",
+            )
+        ):
+            raise ValueError(f"Cache is not standalone FK-only: {manifest_path}")
         if any(
             manifest.get(key) is not False
             for key in (

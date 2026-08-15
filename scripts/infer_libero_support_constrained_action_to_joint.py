@@ -16,7 +16,7 @@ from train_libero_action_to_joint_predictor import ActionToJointGRU, REPORT_SCHE
 
 
 JOINT_SCHEMA = "libero-logged-action-joint-trajectory-v1"
-POLICY_SCHEMA = "libero-policy-action-kinematic-mask-v1"
+POLICY_SCHEMA = "libero-policy-action-standalone-mask-v2"
 SUPPORT_SCHEMA = "libero-action-to-joint-input-support-audit-v1"
 GEOMETRY_SCHEMA = "libero-action-to-joint-geometry-audit-v1"
 OUTPUT_SCHEMA = "libero-support-constrained-action-to-joint-inference-v1"
@@ -95,6 +95,17 @@ def main() -> None:
         "engineering_gate", {}
     ).get("status") != "passed":
         raise ValueError("Action-to-q geometry gate did not pass")
+    if geometry.get("fk_api") != "mujoco.mj_kinematics" or any(
+        geometry.get(key) is not False
+        for key in (
+            "benchmark_environment_imported",
+            "benchmark_environment_constructed",
+            "benchmark_state_read",
+            "controller_used",
+            "contact_used",
+        )
+    ):
+        raise ValueError("Action-to-q geometry gate is not standalone FK-only")
     if geometry.get("predictor_report_sha256") != sha256_file(predictor_report_path):
         raise ValueError("Geometry gate/predictor mismatch")
 

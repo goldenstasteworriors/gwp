@@ -20,9 +20,9 @@ import numpy as np
 
 POLICY_SCHEMA = "libero-counterfactual-robot-mask-v5"
 JOINT_INFERENCE_SCHEMA = "libero-policy-action-to-joint-inference-v1"
-JOINT_MASK_SCHEMA = "libero-joint-kinematic-robot-mask-v1"
+JOINT_MASK_SCHEMA = "libero-joint-standalone-kinematic-robot-mask-v2"
 GEOMETRY_GATE_SCHEMA = "libero-action-to-joint-geometry-audit-v1"
-OUTPUT_SCHEMA = "libero-policy-action-kinematic-mask-v1"
+OUTPUT_SCHEMA = "libero-policy-action-standalone-mask-v2"
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]
 
 
@@ -64,7 +64,13 @@ def require_zero_dynamics(manifest: dict[str, Any]) -> None:
     if manifest.get("dynamics") != "forbidden":
         raise ValueError("Joint masks do not forbid dynamics")
     calls = manifest.get("dynamics_attempted_calls", {})
-    if set(calls) != {"env_step", "sim_step", "mj_step"} or any(
+    if set(calls) != {
+        "mj_step",
+        "mj_step1",
+        "mj_step2",
+        "mj_forward",
+        "mj_forwardSkip",
+    } or any(
         int(value) != 0 for value in calls.values()
     ):
         raise ValueError(f"Joint-mask dynamics attempt detected: {calls}")
@@ -102,11 +108,33 @@ def main() -> None:
         raise ValueError("Unexpected direct-q mask schema")
     if masks.get("q_source") != "external_joint_predictor_outputs_only":
         raise ValueError("Policy mask q must come from the frozen predictor")
+    for key in (
+        "benchmark_environment_imported",
+        "benchmark_environment_constructed",
+        "benchmark_state_read",
+        "controller_used",
+        "contact_used",
+    ):
+        if masks.get(key) is not False:
+            raise ValueError(f"Standalone direct-q mask violates {key}")
+    if masks.get("fk_api") != "mujoco.mj_kinematics":
+        raise ValueError("Direct-q mask did not use standalone FK")
     if Path(str(masks.get("joint_trajectories_root"))).resolve() != args.joint_inference.resolve():
         raise ValueError("Joint-mask cache refers to another q inference")
     require_zero_dynamics(masks)
     if geometry.get("schema_version") != GEOMETRY_GATE_SCHEMA:
         raise ValueError("Unexpected geometry gate schema")
+    if geometry.get("fk_api") != "mujoco.mj_kinematics" or any(
+        geometry.get(key) is not False
+        for key in (
+            "benchmark_environment_imported",
+            "benchmark_environment_constructed",
+            "benchmark_state_read",
+            "controller_used",
+            "contact_used",
+        )
+    ):
+        raise ValueError("Action-to-joint geometry gate is not standalone FK-only")
     gate = geometry.get("engineering_gate", {})
     if gate.get("status") != "passed" or gate.get("decision") != (
         "eligible_for_frozen_gwp_alignment_adapter"
@@ -164,6 +192,7 @@ def main() -> None:
                     "eef_rotation",
                     "camera_position",
                     "camera_rotation",
+                    "camera_intrinsic",
                     "camera_fovy",
                 )
             }
@@ -231,6 +260,12 @@ def main() -> None:
         "robot_visibility": masks["robot_visibility"],
         "dynamics": "forbidden",
         "dynamics_attempted_calls": masks["dynamics_attempted_calls"],
+        "benchmark_environment_imported": False,
+        "benchmark_environment_constructed": False,
+        "benchmark_state_read": False,
+        "controller_used": False,
+        "contact_used": False,
+        "fk_api": "mujoco.mj_kinematics",
         "geometry_gate_report": str(args.geometry_gate_report.resolve()),
         "geometry_gate_report_sha256": sha256_file(args.geometry_gate_report),
         "policy_cache": str(args.policy_cache.resolve()),

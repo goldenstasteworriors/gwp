@@ -41,8 +41,8 @@ from world_action_model.alignment import (  # noqa: E402
 from world_action_model.models import CasualWorldActionTransformer_MoT  # noqa: E402
 
 
-DEMO_SCHEMA = "libero-logged-action-kinematic-mask-v1"
-RENDERER_AUDIT_SCHEMA = "libero-kinematic-mask-pipeline-audit-v1"
+DEMO_SCHEMA = "libero-logged-action-standalone-mask-v2"
+RENDERER_AUDIT_SCHEMA = "libero-standalone-kinematic-mask-audit-v1"
 GAP_KEYS = ("dynamic_iou", "new_occupancy_iou", "gripper_region_recall")
 EXPERT_CORRECT_MINIMUMS = {
     "full_iou": 0.65,
@@ -114,13 +114,26 @@ def validate_demo_inputs(
         raise ValueError("Demonstration-mask cache must not provide an RGB target")
     calls = manifest.get("dynamics_attempted_calls", {})
     if manifest.get("dynamics") != "forbidden" or set(calls) != {
-        "env_step",
-        "sim_step",
         "mj_step",
+        "mj_step1",
+        "mj_step2",
+        "mj_forward",
+        "mj_forwardSkip",
     } or any(
         int(value) != 0 for value in calls.values()
     ):
         raise ValueError("Logged-q demonstration masks attempted dynamics")
+    if manifest.get("fk_api") != "mujoco.mj_kinematics" or any(
+        manifest.get(key) is not False
+        for key in (
+            "benchmark_environment_imported",
+            "benchmark_environment_constructed",
+            "benchmark_state_read",
+            "controller_used",
+            "contact_used",
+        )
+    ):
+        raise ValueError("Demonstration mask cache is not standalone FK-only")
     if manifest.get("action_array") != "expert_actions_lerobot":
         raise ValueError("Unexpected expert action semantics")
     for key in ("dataset_root", "dataset_info_sha256", "suite", "horizons"):
@@ -164,12 +177,20 @@ def validate_demo_inputs(
     registration = renderer_audit.get("renderer_registration", {}).get(
         "robot_mask_iou", {}
     )
-    if set(attempted) != {"env_step", "sim_step", "mj_step"} or any(
+    if set(attempted) != {
+        "mj_step",
+        "mj_step1",
+        "mj_step2",
+        "mj_forward",
+        "mj_forwardSkip",
+    } or any(
         int(value) != 0 for value in attempted.values()
     ) or float(
         registration.get("mean", -1.0)
     ) < 0.85 or float(registration.get("p05", -1.0)) < 0.80:
         raise RuntimeError("Direct-q renderer audit did not pass")
+    if renderer_audit.get("benchmark_environment_constructed") is not False:
+        raise RuntimeError("Renderer audit constructed a benchmark environment")
     return manifest, records, renderer_audit
 
 

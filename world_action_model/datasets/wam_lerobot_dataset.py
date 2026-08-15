@@ -16,8 +16,8 @@ _SUBTASK_MARKER_RE = re.compile(r"\bsubtask\s*:\s*", flags=re.IGNORECASE)
 _T5_LOAD_FROM_CHOICES = ("dir", "pkl", "path")
 _COUNTERFACTUAL_MASK_SCHEMAS = {
     "libero-counterfactual-robot-mask-v5",
-    "libero-policy-action-kinematic-mask-v1",
-    "libero-support-constrained-action-kinematic-mask-v1",
+    "libero-policy-action-standalone-mask-v2",
+    "libero-support-constrained-action-standalone-mask-v2",
 }
 _COUNTERFACTUAL_MASK_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 
@@ -93,16 +93,29 @@ class WAMLeRobotDataset(BaseDataset):
         if manifest.get("rgb_supervision") is not None:
             raise ValueError("Counterfactual mask cache must not contain RGB supervision")
         if manifest.get("schema_version") in {
-            "libero-policy-action-kinematic-mask-v1",
-            "libero-support-constrained-action-kinematic-mask-v1",
+            "libero-policy-action-standalone-mask-v2",
+            "libero-support-constrained-action-standalone-mask-v2",
         }:
             calls = manifest.get("dynamics_attempted_calls", {})
             if manifest.get("dynamics") != "forbidden" or set(calls) != {
-                "env_step",
-                "sim_step",
                 "mj_step",
+                "mj_step1",
+                "mj_step2",
+                "mj_forward",
+                "mj_forwardSkip",
             } or any(int(value) != 0 for value in calls.values()):
                 raise ValueError("Kinematic mask cache attempted simulator dynamics")
+            if manifest.get("fk_api") != "mujoco.mj_kinematics" or any(
+                manifest.get(key) is not False
+                for key in (
+                    "benchmark_environment_imported",
+                    "benchmark_environment_constructed",
+                    "benchmark_state_read",
+                    "controller_used",
+                    "contact_used",
+                )
+            ):
+                raise ValueError("Mask cache is not standalone FK-only")
             for key in (
                 "legacy_rollout_masks_read",
                 "legacy_rollout_qpos_read",

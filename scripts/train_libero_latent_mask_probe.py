@@ -35,8 +35,8 @@ from world_action_model.alignment import (
 )
 
 
-CACHE_SCHEMA = "libero-joint-kinematic-robot-mask-v1"
-RENDERER_AUDIT_SCHEMA = "libero-kinematic-mask-pipeline-audit-v1"
+CACHE_SCHEMA = "libero-joint-standalone-kinematic-robot-mask-v2"
+RENDERER_AUDIT_SCHEMA = "libero-standalone-kinematic-mask-audit-v1"
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]
 PROBE_VIEW_KEYS = (
     "observation.images.image",
@@ -89,6 +89,17 @@ def read_cache(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         raise ValueError("Probe cache must not contain a video-generation target")
     if manifest.get("q_source") != "logged_demonstration_joint_trajectory":
         raise ValueError("Probe targets must come from logged q, not predicted q")
+    for key in (
+        "benchmark_environment_imported",
+        "benchmark_environment_constructed",
+        "benchmark_state_read",
+        "controller_used",
+        "contact_used",
+    ):
+        if manifest.get(key) is not False:
+            raise ValueError(f"Probe cache violates standalone contract: {key}")
+    if manifest.get("fk_api") != "mujoco.mj_kinematics":
+        raise ValueError("Probe cache did not use standalone FK")
     if manifest.get("dynamics") != "forbidden" or any(
         int(value) != 0
         for value in manifest.get("dynamics_attempted_calls", {}).values()
@@ -112,8 +123,16 @@ def validate_renderer_audit(report_path: Path) -> dict[str, Any]:
     report = load_json(report_path)
     if report.get("schema_version") != RENDERER_AUDIT_SCHEMA:
         raise ValueError(f"Unexpected renderer audit schema in {report_path}")
+    if report.get("benchmark_environment_constructed") is not False:
+        raise RuntimeError("Renderer audit constructed a benchmark environment")
     attempted = report.get("dynamics_prohibition", {}).get("attempted_calls", {})
-    if set(attempted) != {"env_step", "sim_step", "mj_step"} or any(
+    if set(attempted) != {
+        "mj_step",
+        "mj_step1",
+        "mj_step2",
+        "mj_forward",
+        "mj_forwardSkip",
+    } or any(
         int(value) != 0 for value in attempted.values()
     ):
         raise RuntimeError("Renderer audit attempted simulator dynamics")

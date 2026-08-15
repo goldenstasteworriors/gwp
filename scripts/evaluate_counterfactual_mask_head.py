@@ -91,19 +91,21 @@ def read_manifest(cache_root: Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") not in {
         "libero-counterfactual-robot-mask-v5",
-        "libero-policy-action-kinematic-mask-v1",
-        "libero-support-constrained-action-kinematic-mask-v1",
+        "libero-policy-action-standalone-mask-v2",
+        "libero-support-constrained-action-standalone-mask-v2",
     }:
         raise ValueError(f"Unsupported cache schema: {manifest.get('schema_version')!r}")
     if manifest.get("schema_version") in {
-        "libero-policy-action-kinematic-mask-v1",
-        "libero-support-constrained-action-kinematic-mask-v1",
+        "libero-policy-action-standalone-mask-v2",
+        "libero-support-constrained-action-standalone-mask-v2",
     }:
         calls = manifest.get("dynamics_attempted_calls", {})
         if manifest.get("dynamics") != "forbidden" or set(calls) != {
-            "env_step",
-            "sim_step",
             "mj_step",
+            "mj_step1",
+            "mj_step2",
+            "mj_forward",
+            "mj_forwardSkip",
         } or any(int(value) != 0 for value in calls.values()):
             raise ValueError("Kinematic counterfactual cache attempted dynamics")
         if any(
@@ -115,6 +117,17 @@ def read_manifest(cache_root: Path) -> dict[str, Any]:
             )
         ):
             raise ValueError("Kinematic counterfactual cache read a legacy oracle field")
+        if manifest.get("fk_api") != "mujoco.mj_kinematics" or any(
+            manifest.get(key) is not False
+            for key in (
+                "benchmark_environment_imported",
+                "benchmark_environment_constructed",
+                "benchmark_state_read",
+                "controller_used",
+                "contact_used",
+            )
+        ):
+            raise ValueError("Counterfactual cache is not standalone FK-only")
     if (
         manifest.get("image_orientation")
         != "lerobot_libero_visualization_flip_height_width"

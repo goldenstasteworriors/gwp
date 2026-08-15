@@ -13,9 +13,9 @@ import numpy as np
 
 
 INFERENCE_SCHEMA = "libero-support-constrained-action-to-joint-inference-v1"
-MASK_SCHEMA = "libero-joint-kinematic-robot-mask-v1"
-SOURCE_POLICY_SCHEMA = "libero-policy-action-kinematic-mask-v1"
-OUTPUT_SCHEMA = "libero-support-constrained-action-kinematic-mask-v1"
+MASK_SCHEMA = "libero-joint-standalone-kinematic-robot-mask-v2"
+SOURCE_POLICY_SCHEMA = "libero-policy-action-standalone-mask-v2"
+OUTPUT_SCHEMA = "libero-support-constrained-action-standalone-mask-v2"
 HORIZONS = [0, 12, 24, 36, 48]
 
 
@@ -68,13 +68,26 @@ def main() -> None:
         raise ValueError("Support-constrained q inference queried a simulator")
     if masks.get("schema_version") != MASK_SCHEMA:
         raise ValueError("Unexpected direct-q mask schema")
+    for key in (
+        "benchmark_environment_imported",
+        "benchmark_environment_constructed",
+        "benchmark_state_read",
+        "controller_used",
+        "contact_used",
+    ):
+        if masks.get(key) is not False:
+            raise ValueError(f"Standalone direct-q mask violates {key}")
+    if masks.get("fk_api") != "mujoco.mj_kinematics":
+        raise ValueError("Direct-q mask did not use the standalone FK-only API")
     if Path(str(masks.get("joint_trajectories_root"))).resolve() != args.joint_inference.resolve():
         raise ValueError("Mask cache refers to another q inference")
     calls = masks.get("dynamics_attempted_calls", {})
     if masks.get("dynamics") != "forbidden" or set(calls) != {
-        "env_step",
-        "sim_step",
         "mj_step",
+        "mj_step1",
+        "mj_step2",
+        "mj_forward",
+        "mj_forwardSkip",
     } or any(int(value) != 0 for value in calls.values()):
         raise ValueError("Direct-q mask cache attempted dynamics")
 
@@ -122,6 +135,7 @@ def main() -> None:
                     "eef_rotation",
                     "camera_position",
                     "camera_rotation",
+                    "camera_intrinsic",
                     "camera_fovy",
                 )
             }
@@ -184,6 +198,12 @@ def main() -> None:
         "robot_visibility": masks["robot_visibility"],
         "dynamics": "forbidden",
         "dynamics_attempted_calls": calls,
+        "benchmark_environment_imported": False,
+        "benchmark_environment_constructed": False,
+        "benchmark_state_read": False,
+        "controller_used": False,
+        "contact_used": False,
+        "fk_api": "mujoco.mj_kinematics",
         "simulator_runtime_imported": False,
         "simulator_step_calls": 0,
         "legacy_rollout_masks_read": False,

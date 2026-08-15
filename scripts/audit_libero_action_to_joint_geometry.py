@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Audit learned action-to-joint predictions in EEF and robot-mask space.
 
-All masks are rendered from predicted or logged q with the dynamics-forbidden
-FK renderer.  Logged future q is an audit oracle only and is never copied into
+All masks are rendered from predicted or logged q with a standalone robot-only
+FK asset and explicit camera calibration.  No LIBERO task environment is
+constructed.  Logged future q is an audit oracle only and is never copied into
 the predictor output or a counterfactual training target.
 """
 
@@ -16,11 +17,9 @@ from typing import Any
 
 import numpy as np
 
-from generate_libero_counterfactual_mask_cache import suite_task_index_by_language
-from libero_kinematic_robot_mask import (
+from libero_standalone_robot_mask import (
     RASTERIZER_SEMANTICS,
-    KinematicRobotMaskRenderer,
-    create_kinematic_libero_environment,
+    StandaloneRobotMaskRenderer,
     forbid_mujoco_dynamics,
 )
 
@@ -37,8 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--joint-dataset", type=Path, required=True)
     parser.add_argument("--fixed-ik-report", type=Path, required=True)
     parser.add_argument("--suite", required=True)
+    parser.add_argument("--robot-asset-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--camera-name", default="agentview")
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--height", type=int, default=256)
     return parser.parse_args()
@@ -134,11 +133,9 @@ def main() -> None:
         raise ValueError("Fixed-IK comparator did not prove zero dynamics calls")
     fixed_h48 = fixed_ik["ik_action_to_q"]["by_horizon"]["48"]
 
-    from libero.libero import benchmark
-
-    suite = benchmark.get_benchmark_dict()[args.suite]()
-    language_to_task = suite_task_index_by_language(suite)
-    environments: dict[int, tuple[Any, KinematicRobotMaskRenderer]] = {}
+    renderer = StandaloneRobotMaskRenderer(
+        args.robot_asset_dir, args.width, args.height
+    )
     metric_names = (
         "arm_q_mae_rad",
         "gripper_q_mae",
@@ -156,97 +153,77 @@ def main() -> None:
     episode_rows: list[dict[str, Any]] = []
 
     with forbid_mujoco_dynamics() as dynamics_counts:
-        try:
-            for prediction_row in prediction_rows:
-                episode = int(prediction_row["episode_index"])
-                record = records_by_episode[episode]
-                language = str(record["task_language"])
-                libero_task = int(language_to_task[language])
-                if libero_task not in environments:
-                    environment = create_kinematic_libero_environment(
-                        suite, libero_task
-                    )
-                    environments[libero_task] = (
-                        environment,
-                        KinematicRobotMaskRenderer(
-                            environment,
-                            args.camera_name,
-                            args.width,
-                            args.height,
+        for prediction_row in prediction_rows:
+            episode = int(prediction_row["episode_index"])
+            record = records_by_episode[episode]
+            arm_path = args.predictor_output / str(prediction_row["arm_path"])
+            gripper_path = args.predictor_output / str(prediction_row["gripper_path"])
+            if sha256_file(arm_path) != prediction_row["arm_sha256"]:
+                raise ValueError(f"Predicted arm q changed: {arm_path}")
+            if sha256_file(gripper_path) != prediction_row["gripper_sha256"]:
+                raise ValueError(f"Predicted gripper q changed: {gripper_path}")
+            predicted_q = np.concatenate(
+                [
+                    np.load(arm_path, allow_pickle=False),
+                    np.load(gripper_path, allow_pickle=False),
+                ],
+                axis=-1,
+            ).astype(np.float32)
+            logged_q = load_logged_q(heldout_root, record)
+            if predicted_q.shape != (49, 9) or len(logged_q) <= 48:
+                raise ValueError(f"Unexpected predicted/logged q episode {episode}")
+            q0_copy = np.repeat(logged_q[0:1], 49, axis=0)
+            episode_metric: dict[str, Any] = {}
+            for horizon in HORIZONS:
+                renderer.set_configuration(logged_q[horizon, :7], logged_q[horizon, 7:])
+                oracle = renderer.render_masks()
+                horizon_result: dict[str, Any] = {}
+                for label, q_value, target_metrics in (
+                    ("learned", predicted_q[horizon], learned_metrics),
+                    ("copy_q0", q0_copy[horizon], copy_metrics),
+                ):
+                    renderer.set_configuration(q_value[:7], q_value[7:])
+                    rendered = renderer.render_masks()
+                    values = {
+                        "arm_q_mae_rad": float(
+                            np.mean(np.abs(q_value[:7] - logged_q[horizon, :7]))
                         ),
-                    )
-                _, renderer = environments[libero_task]
-                arm_path = args.predictor_output / str(prediction_row["arm_path"])
-                gripper_path = args.predictor_output / str(
-                    prediction_row["gripper_path"]
-                )
-                if sha256_file(arm_path) != prediction_row["arm_sha256"]:
-                    raise ValueError(f"Predicted arm q changed: {arm_path}")
-                if sha256_file(gripper_path) != prediction_row["gripper_sha256"]:
-                    raise ValueError(f"Predicted gripper q changed: {gripper_path}")
-                predicted_q = np.concatenate(
-                    [
-                        np.load(arm_path, allow_pickle=False),
-                        np.load(gripper_path, allow_pickle=False),
-                    ],
-                    axis=-1,
-                ).astype(np.float32)
-                logged_q = load_logged_q(heldout_root, record)
-                if predicted_q.shape != (49, 9) or len(logged_q) <= 48:
-                    raise ValueError(f"Unexpected predicted/logged q episode {episode}")
-                q0_copy = np.repeat(logged_q[0:1], 49, axis=0)
-                episode_metric: dict[str, Any] = {}
-                for horizon in HORIZONS:
-                    renderer.set_configuration(
-                        logged_q[horizon, :7], logged_q[horizon, 7:]
-                    )
-                    oracle = renderer.render_masks()
-                    horizon_result: dict[str, Any] = {}
-                    for label, q_value, target_metrics in (
-                        ("learned", predicted_q[horizon], learned_metrics),
-                        ("copy_q0", q0_copy[horizon], copy_metrics),
-                    ):
-                        renderer.set_configuration(q_value[:7], q_value[7:])
-                        rendered = renderer.render_masks()
-                        values = {
-                            "arm_q_mae_rad": float(
-                                np.mean(np.abs(q_value[:7] - logged_q[horizon, :7]))
-                            ),
-                            "gripper_q_mae": float(
-                                np.mean(np.abs(q_value[7:] - logged_q[horizon, 7:]))
-                            ),
-                            "eef_position_error_m": float(
-                                np.linalg.norm(
-                                    rendered["eef_position"] - oracle["eef_position"]
-                                )
-                            ),
-                            "eef_rotation_error_deg": rotation_error_degrees(
-                                rendered["eef_rotation"], oracle["eef_rotation"]
-                            ),
-                            "robot_mask_iou": mask_iou(
-                                rendered["robot_mask"], oracle["robot_mask"]
-                            ),
-                            "gripper_mask_iou": mask_iou(
-                                rendered["gripper_mask"], oracle["gripper_mask"]
-                            ),
-                        }
-                        for name, value in values.items():
-                            target_metrics[horizon][name].append(value)
-                        horizon_result[label] = values
-                    episode_metric[str(horizon)] = horizon_result
-                episode_rows.append(
-                    {
-                        "episode_index": episode,
-                        "task_index": int(record["task_index"]),
-                        "libero_task_index": libero_task,
-                        "metrics": episode_metric,
+                        "gripper_q_mae": float(
+                            np.mean(np.abs(q_value[7:] - logged_q[horizon, 7:]))
+                        ),
+                        "eef_position_error_m": float(
+                            np.linalg.norm(rendered["eef_position"] - oracle["eef_position"])
+                        ),
+                        "eef_rotation_error_deg": rotation_error_degrees(
+                            rendered["eef_rotation"], oracle["eef_rotation"]
+                        ),
+                        "robot_mask_iou": mask_iou(
+                            rendered["robot_mask"], oracle["robot_mask"]
+                        ),
+                        "gripper_mask_iou": mask_iou(
+                            rendered["gripper_mask"], oracle["gripper_mask"]
+                        ),
                     }
-                )
-        finally:
-            for environment, _ in environments.values():
-                environment.close()
+                    for name, value in values.items():
+                        target_metrics[horizon][name].append(value)
+                    horizon_result[label] = values
+                episode_metric[str(horizon)] = horizon_result
+            episode_rows.append(
+                {
+                    "episode_index": episode,
+                    "task_index": int(record["task_index"]),
+                    "libero_task_index": int(record["task_index"]),
+                    "metrics": episode_metric,
+                }
+            )
 
-    if dynamics_counts != {"env_step": 0, "mj_step": 0, "sim_step": 0}:
+    if dynamics_counts != {
+        "mj_step": 0,
+        "mj_step1": 0,
+        "mj_step2": 0,
+        "mj_forward": 0,
+        "mj_forwardSkip": 0,
+    }:
         raise RuntimeError(f"Forbidden dynamics call attempted: {dynamics_counts}")
     learned_summary = {
         str(horizon): {
@@ -308,15 +285,19 @@ def main() -> None:
         "num_episodes": len(episode_rows),
         "horizons": HORIZONS,
         "target_mapping": (
-            "predicted q + gripper q + camera calibration -> FK -> robot-only rasterization"
+            "predicted q + gripper q + explicit camera calibration -> standalone FK -> robot-only rasterization"
         ),
+        "benchmark_environment_imported": False,
+        "benchmark_environment_constructed": False,
+        "benchmark_state_read": False,
+        "controller_used": False,
+        "contact_used": False,
+        "fk_api": "mujoco.mj_kinematics",
         "rasterizer_semantics": RASTERIZER_SEMANTICS,
         "logged_future_q_role": "heldout_audit_oracle_only",
         "dynamics_prohibition": {
             "attempted_calls": dynamics_counts,
-            "env_step": "runtime_monkeypatch_raises",
-            "sim_step": "runtime_monkeypatch_raises",
-            "mj_step": "runtime_monkeypatch_raises",
+            "all_dynamics_and_full_forward_apis": "runtime_monkeypatch_raises",
         },
         "learned": learned_summary,
         "copy_q0": copy_summary,

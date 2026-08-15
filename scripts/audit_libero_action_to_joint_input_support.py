@@ -19,7 +19,7 @@ import numpy as np
 
 
 JOINT_SCHEMA = "libero-logged-action-joint-trajectory-v1"
-POLICY_SCHEMA = "libero-policy-action-kinematic-mask-v1"
+POLICY_SCHEMA = "libero-policy-action-standalone-mask-v2"
 REPORT_SCHEMA = "libero-action-to-joint-input-support-audit-v1"
 ACTION_HORIZON = 48
 PCA_DIM = 32
@@ -121,6 +121,17 @@ def load_policy_features(root: Path) -> tuple[np.ndarray, list[dict[str, int]]]:
         int(value) != 0 for value in calls.values()
     ):
         raise ValueError("Policy kinematic cache attempted dynamics")
+    if manifest.get("fk_api") != "mujoco.mj_kinematics" or any(
+        manifest.get(key) is not False
+        for key in (
+            "benchmark_environment_imported",
+            "benchmark_environment_constructed",
+            "benchmark_state_read",
+            "controller_used",
+            "contact_used",
+        )
+    ):
+        raise ValueError("Policy mask cache is not standalone FK-only")
     features: list[np.ndarray] = []
     rows: list[dict[str, int]] = []
     for record in manifest.get("episodes", []):
