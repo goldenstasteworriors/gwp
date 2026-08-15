@@ -302,6 +302,8 @@ def predict_mask_logits(
     alignment_mode: str,
     mask_probe: LatentRobotMaskProbe | None,
     flow_rollout_steps: int = 1,
+    teacher_forced_clean_latents: torch.Tensor | None = None,
+    teacher_forced_sigma: float | None = None,
 ) -> torch.Tensor:
     state = sample["state"].unsqueeze(0).to(device=ref_latents.device, dtype=dtype)
     prompt = sample["prompt_embeds"].unsqueeze(0).to(device=ref_latents.device, dtype=dtype)
@@ -346,13 +348,20 @@ def predict_mask_logits(
         raise ValueError("clean_latent_probe evaluation requires a frozen mask probe")
     if flow_rollout_steps <= 0:
         raise ValueError("flow_rollout_steps must be positive")
-    scheduler = FlowMatchEulerDiscreteScheduler(shift=5.0)
-    scheduler.set_timesteps(flow_rollout_steps, device=ref_latents.device)
-    predicted_clean = future_noise.float()
-    for scheduler_timestep in scheduler.timesteps:
+    if teacher_forced_clean_latents is not None:
+        if teacher_forced_sigma is None or not 0.0 < teacher_forced_sigma < 1.0:
+            raise ValueError("Teacher-forced clean latents require sigma in (0,1)")
+        if flow_rollout_steps != 1:
+            raise ValueError("Teacher-forced diagnostic currently requires one flow step")
+        if teacher_forced_clean_latents.shape != future_noise.shape:
+            raise ValueError("Teacher-forced clean/future-noise shapes differ")
+        predicted_clean = (
+            future_noise.float() * teacher_forced_sigma
+            + teacher_forced_clean_latents.float() * (1.0 - teacher_forced_sigma)
+        )
         timestep.zero_()
         timestep[:, num_state_tokens + num_action_tokens + frame_tokens :] = (
-            scheduler_timestep.to(dtype=timestep.dtype)
+            round(teacher_forced_sigma * 1000.0)
         )
         common["noisy_latents"] = predicted_clean.to(dtype=dtype)
         common["timestep"] = timestep
@@ -367,12 +376,37 @@ def predict_mask_logits(
                 "Predicted flow/future-noise shape mismatch: "
                 f"{tuple(predicted_flow.shape)} vs {tuple(future_noise.shape)}"
             )
-        predicted_clean = scheduler.step(
-            predicted_flow,
-            scheduler_timestep,
-            predicted_clean,
-            return_dict=False,
-        )[0]
+        predicted_clean = predicted_clean - teacher_forced_sigma * predicted_flow
+    else:
+        if teacher_forced_sigma is not None:
+            raise ValueError("teacher_forced_sigma requires clean latents")
+        scheduler = FlowMatchEulerDiscreteScheduler(shift=5.0)
+        scheduler.set_timesteps(flow_rollout_steps, device=ref_latents.device)
+        predicted_clean = future_noise.float()
+        for scheduler_timestep in scheduler.timesteps:
+            timestep.zero_()
+            timestep[:, num_state_tokens + num_action_tokens + frame_tokens :] = (
+                scheduler_timestep.to(dtype=timestep.dtype)
+            )
+            common["noisy_latents"] = predicted_clean.to(dtype=dtype)
+            common["timestep"] = timestep
+            output = transformer(
+                **common,
+                output_counterfactual_mask=False,
+            )
+            video_output = output["sample"] if isinstance(output, dict) else output.sample
+            predicted_flow = video_output[:, :, 1:].float()
+            if predicted_flow.shape != future_noise.shape:
+                raise ValueError(
+                    "Predicted flow/future-noise shape mismatch: "
+                    f"{tuple(predicted_flow.shape)} vs {tuple(future_noise.shape)}"
+                )
+            predicted_clean = scheduler.step(
+                predicted_flow,
+                scheduler_timestep,
+                predicted_clean,
+                return_dict=False,
+            )[0]
     return mask_probe(predicted_clean).float()
 
 

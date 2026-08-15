@@ -44,6 +44,12 @@ from world_action_model.models import CasualWorldActionTransformer_MoT  # noqa: 
 DEMO_SCHEMA = "libero-logged-action-kinematic-mask-v1"
 RENDERER_AUDIT_SCHEMA = "libero-kinematic-mask-pipeline-audit-v1"
 GAP_KEYS = ("dynamic_iou", "new_occupancy_iou", "gripper_region_recall")
+EXPERT_CORRECT_MINIMUMS = {
+    "full_iou": 0.65,
+    "dynamic_iou": 0.40,
+    "new_occupancy_iou": 0.40,
+    "gripper_region_recall": 0.70,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +75,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--flow-rollout-steps", type=int, default=1)
     parser.add_argument("--max-samples", type=int)
+    parser.add_argument(
+        "--latent-initialization",
+        choices=("pure_noise", "teacher_forced"),
+        default="pure_noise",
+    )
+    parser.add_argument("--teacher-forced-sigma", type=float)
     return parser.parse_args()
 
 
@@ -297,6 +309,13 @@ def main() -> None:
         or (args.max_samples is not None and args.max_samples <= 0)
     ):
         raise ValueError("Invalid threshold/bootstrap count")
+    if args.latent_initialization == "teacher_forced":
+        if args.teacher_forced_sigma is None or not 0.0 < args.teacher_forced_sigma < 1.0:
+            raise ValueError("teacher_forced requires --teacher-forced-sigma in (0,1)")
+        if args.flow_rollout_steps != 1:
+            raise ValueError("teacher_forced currently requires --flow-rollout-steps 1")
+    elif args.teacher_forced_sigma is not None:
+        raise ValueError("--teacher-forced-sigma requires teacher_forced mode")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -369,9 +388,16 @@ def main() -> None:
                 sample["counterfactual_action"], expected_policy, atol=1e-5, rtol=1e-5
             ):
                 raise ValueError(f"Policy action mismatch at sample {index}")
-            ref_latents = encode_reference(
-                vae, sample["ref_images"], latent_mean, latent_std
-            ).to(dtype=dtype)
+            images = sample["images"].unsqueeze(0).permute(0, 2, 1, 3, 4)
+            images = images.to(device=vae.device, dtype=vae.dtype)
+            full_latents = vae.encode(images).latent_dist.mode()
+            full_latents = (full_latents - latent_mean) * latent_std
+            ref_latents = full_latents[:, :, :1].to(dtype=dtype)
+            teacher_forced_clean = (
+                full_latents[:, :, 1:]
+                if args.latent_initialization == "teacher_forced"
+                else None
+            )
             generator = torch.Generator(device=device).manual_seed(
                 args.seed + index * 10007
             )
@@ -411,6 +437,8 @@ def main() -> None:
                     "clean_latent_probe",
                     probe,
                     args.flow_rollout_steps,
+                    teacher_forced_clean,
+                    args.teacher_forced_sigma,
                 )
                 probability = logits.sigmoid()[0].cpu().numpy()
                 size = tuple(logits.shape[-2:])
@@ -432,7 +460,12 @@ def main() -> None:
     sensitivity = {"expert": {}, "policy": {}}
     gap = {}
     bootstrap = {"expert_sensitivity": {}, "policy_sensitivity": {}, "gap": {}}
-    checks = {}
+    checks = {
+        f"expert_correct_absolute.{key}": (
+            float(aggregate["expert_correct"]["mean"][key]) >= minimum
+        )
+        for key, minimum in EXPERT_CORRECT_MINIMUMS.items()
+    }
     for key_index, key in enumerate(GAP_KEYS):
         expert_values = metric_vector(modes["expert_correct"], key) - metric_vector(
             modes["expert_shuffled"], key
@@ -467,7 +500,11 @@ def main() -> None:
         "schema_version": "clean-latent-action-conditioning-gap-v2",
         "status": status,
         "alignment_training_allowed": status == "passed",
-        "gate_semantics": "paired_bootstrap_ci95_low_strictly_positive",
+        "gate_semantics": (
+            "expert-correct absolute metrics meet preregistered minimums and paired "
+            "bootstrap CI95 lower bounds are strictly positive"
+        ),
+        "expert_correct_minimums": EXPERT_CORRECT_MINIMUMS,
         "checkpoint": str(args.checkpoint.resolve()),
         "vae": str(args.vae.resolve()),
         "dataset": str(args.dataset.resolve()),
@@ -503,6 +540,11 @@ def main() -> None:
             "sigma_end": 0.0,
             "steps": args.flow_rollout_steps,
         },
+        "latent_initialization": args.latent_initialization,
+        "teacher_forced_sigma": args.teacher_forced_sigma,
+        "vae_encoding_semantics": (
+            "encode the complete five-frame video once, then split ref/future latents"
+        ),
         "total_available_samples": total_samples,
         "mask_resolution": list(size),
         "aggregate": aggregate,
