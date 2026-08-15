@@ -67,6 +67,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260813)
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
+    parser.add_argument("--flow-rollout-steps", type=int, default=1)
+    parser.add_argument("--max-samples", type=int)
     return parser.parse_args()
 
 
@@ -288,7 +290,12 @@ def main() -> None:
             raise FileNotFoundError(path)
     if args.output.exists():
         raise FileExistsError(f"Refusing to overwrite {args.output}")
-    if not 0.0 < args.threshold < 1.0 or args.bootstrap_samples <= 0:
+    if (
+        not 0.0 < args.threshold < 1.0
+        or args.bootstrap_samples <= 0
+        or args.flow_rollout_steps <= 0
+        or (args.max_samples is not None and args.max_samples <= 0)
+    ):
         raise ValueError("Invalid threshold/bootstrap count")
 
     random.seed(args.seed)
@@ -312,9 +319,14 @@ def main() -> None:
         args.demonstration_cache, demo_records, args.norm_stats
     )
     dataset = build_dataset(args)
-    num_samples = len(dataset)
-    if num_samples != len(demo_records) or num_samples != len(predicted_actions):
+    total_samples = len(dataset)
+    if total_samples != len(demo_records) or total_samples != len(predicted_actions):
         raise ValueError("Dataset/demo/counterfactual sample counts differ")
+    num_samples = (
+        min(total_samples, args.max_samples)
+        if args.max_samples is not None
+        else total_samples
+    )
     shuffle_indices = taskwise_shuffle_indices(counterfactual_manifest, num_samples)
     if shuffle_indices is None:
         raise ValueError("Action-gap diagnostic requires at least two samples per task")
@@ -398,6 +410,7 @@ def main() -> None:
                     dtype,
                     "clean_latent_probe",
                     probe,
+                    args.flow_rollout_steps,
                 )
                 probability = logits.sigmoid()[0].cpu().numpy()
                 size = tuple(logits.shape[-2:])
@@ -475,7 +488,7 @@ def main() -> None:
             args.mask_probe / LatentRobotMaskProbe.WEIGHTS_NAME
         ),
         "num_samples": num_samples,
-        "episodes": manifest_episode_indices(counterfactual_manifest),
+        "episodes": manifest_episode_indices(counterfactual_manifest)[:num_samples],
         "input_views": list(args.view_keys),
         "view_concat_mode": "horizontal",
         "noise_pairing": "same future noise for expert/policy and correct/shuffled",
@@ -483,6 +496,13 @@ def main() -> None:
         "seed": args.seed,
         "threshold": args.threshold,
         "bootstrap_samples": args.bootstrap_samples,
+        "flow_rollout": {
+            "solver": "fixed-step Euler in normalized Wan latent space",
+            "sigma_start": 1.0,
+            "sigma_end": 0.0,
+            "steps": args.flow_rollout_steps,
+        },
+        "total_available_samples": total_samples,
         "mask_resolution": list(size),
         "aggregate": aggregate,
         "action_sensitivity": sensitivity,

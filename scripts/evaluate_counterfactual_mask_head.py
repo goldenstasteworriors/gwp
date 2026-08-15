@@ -300,6 +300,7 @@ def predict_mask_logits(
     dtype: torch.dtype,
     alignment_mode: str,
     mask_probe: LatentRobotMaskProbe | None,
+    flow_rollout_steps: int = 1,
 ) -> torch.Tensor:
     state = sample["state"].unsqueeze(0).to(device=ref_latents.device, dtype=dtype)
     prompt = sample["prompt_embeds"].unsqueeze(0).to(device=ref_latents.device, dtype=dtype)
@@ -342,18 +343,30 @@ def predict_mask_logits(
         raise ValueError(f"Unsupported alignment mode: {alignment_mode!r}")
     if mask_probe is None:
         raise ValueError("clean_latent_probe evaluation requires a frozen mask probe")
-    output = transformer(
-        **common,
-        output_counterfactual_mask=False,
-    )
-    video_output = output["sample"] if isinstance(output, dict) else output.sample
-    predicted_flow = video_output[:, :, 1:].float()
-    if predicted_flow.shape != future_noise.shape:
-        raise ValueError(
-            "Predicted flow/future-noise shape mismatch: "
-            f"{tuple(predicted_flow.shape)} vs {tuple(future_noise.shape)}"
+    if flow_rollout_steps <= 0:
+        raise ValueError("flow_rollout_steps must be positive")
+    predicted_clean = future_noise.float()
+    for step in range(flow_rollout_steps):
+        sigma = 1.0 - step / flow_rollout_steps
+        next_sigma = 1.0 - (step + 1) / flow_rollout_steps
+        timestep.zero_()
+        timestep[:, num_state_tokens + num_action_tokens + frame_tokens :] = round(
+            sigma * 1000.0
         )
-    predicted_clean = future_noise.float() - predicted_flow
+        common["noisy_latents"] = predicted_clean.to(dtype=dtype)
+        common["timestep"] = timestep
+        output = transformer(
+            **common,
+            output_counterfactual_mask=False,
+        )
+        video_output = output["sample"] if isinstance(output, dict) else output.sample
+        predicted_flow = video_output[:, :, 1:].float()
+        if predicted_flow.shape != future_noise.shape:
+            raise ValueError(
+                "Predicted flow/future-noise shape mismatch: "
+                f"{tuple(predicted_flow.shape)} vs {tuple(future_noise.shape)}"
+            )
+        predicted_clean = predicted_clean + (next_sigma - sigma) * predicted_flow
     return mask_probe(predicted_clean).float()
 
 
