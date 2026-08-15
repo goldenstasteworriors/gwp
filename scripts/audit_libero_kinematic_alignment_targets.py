@@ -13,7 +13,10 @@ import numpy as np
 
 
 EXPERT_SCHEMA = "libero-logged-action-kinematic-mask-v1"
-POLICY_SCHEMA = "libero-policy-action-kinematic-mask-v1"
+POLICY_SCHEMAS = {
+    "libero-policy-action-kinematic-mask-v1",
+    "libero-support-constrained-action-kinematic-mask-v1",
+}
 REPORT_SCHEMA = "libero-kinematic-alignment-target-audit-v1"
 HORIZONS = [0, 12, 24, 36, 48]
 
@@ -41,10 +44,13 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def validate_manifest(root: Path, schema: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def validate_manifest(
+    root: Path, schema: str | set[str]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     path = root / "manifest.json"
     manifest = load_json(path)
-    if manifest.get("schema_version") != schema:
+    accepted = {schema} if isinstance(schema, str) else schema
+    if manifest.get("schema_version") not in accepted:
         raise ValueError(f"Unexpected schema: {path}")
     if manifest.get("rgb_supervision") is not None:
         raise ValueError("Alignment cache contains RGB supervision")
@@ -93,7 +99,7 @@ def main() -> None:
     if args.output.exists():
         raise FileExistsError(f"Refusing to overwrite {args.output}")
     expert, expert_records = validate_manifest(args.expert_cache, EXPERT_SCHEMA)
-    policy, policy_records = validate_manifest(args.policy_cache, POLICY_SCHEMA)
+    policy, policy_records = validate_manifest(args.policy_cache, POLICY_SCHEMAS)
     for key in ("dataset_root", "dataset_info_sha256", "suite", "camera_name", "image_size"):
         if expert.get(key) != policy.get(key):
             raise ValueError(f"Expert/policy metadata differs for {key}")
