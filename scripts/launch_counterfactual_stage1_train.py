@@ -74,6 +74,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=6666)
     parser.add_argument("--mask-weight", type=float, default=0.1)
+    parser.add_argument("--action-rank-weight", type=float, default=0.0)
+    parser.add_argument("--action-rank-margin", type=float, default=0.01)
+    parser.add_argument("--action-rank-min-mse", type=float, default=0.0001)
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--required-env-name", default="gigaworld-policy")
     parser.add_argument(
@@ -671,6 +674,15 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         require_positive(f"--{name.replace('_', '-')}", int(getattr(args, name)))
     if args.mask_weight <= 0.0:
         raise ValueError("--mask-weight must be positive")
+    if args.action_rank_weight < 0.0:
+        raise ValueError("--action-rank-weight must be non-negative")
+    if args.action_rank_margin <= 0.0:
+        raise ValueError("--action-rank-margin must be positive")
+    if args.action_rank_min_mse < 0.0:
+        raise ValueError("--action-rank-min-mse must be non-negative")
+    ranking_enabled = args.action_rank_weight > 0.0
+    if ranking_enabled and args.alignment_mode != "shared_mask_video_flow":
+        raise ValueError("Action-mask ranking requires shared_mask_video_flow")
     fixed_protocol = {
         "gpu_ids": [0, 1, 2, 3] if args.execution_profile == "four_device" else [0],
         "steps": 200,
@@ -681,6 +693,9 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         "num_workers": 4,
         "seed": 6666,
         "mask_weight": 0.1,
+        "action_rank_weight": 0.1 if ranking_enabled else 0.0,
+        "action_rank_margin": 0.01,
+        "action_rank_min_mse": 0.0001,
     }
     actual_protocol = {
         "gpu_ids": args.gpu_ids,
@@ -690,6 +705,9 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         "num_workers": args.num_workers,
         "seed": args.seed,
         "mask_weight": args.mask_weight,
+        "action_rank_weight": args.action_rank_weight,
+        "action_rank_margin": args.action_rank_margin,
+        "action_rank_min_mse": args.action_rank_min_mse,
     }
     if actual_protocol != fixed_protocol:
         raise ValueError(
@@ -727,13 +745,17 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         * args.gradient_accumulation_steps
     )
     common = {
-        "protocol": {
-            "hidden_head": "counterfactual-mask-stage1-v1",
-            "clean_latent_probe": "counterfactual-clean-latent-stage1-v1",
-            "shared_mask_video_flow": (
-                "counterfactual-shared-mask-video-flow-stage1-v1"
-            ),
-        }[args.alignment_mode],
+        "protocol": (
+            "counterfactual-action-mask-ranking-stage1-v1"
+            if ranking_enabled
+            else {
+                "hidden_head": "counterfactual-mask-stage1-v1",
+                "clean_latent_probe": "counterfactual-clean-latent-stage1-v1",
+                "shared_mask_video_flow": (
+                    "counterfactual-shared-mask-video-flow-stage1-v1"
+                ),
+            }[args.alignment_mode]
+        ),
         "alignment_mode": args.alignment_mode,
         "project_root": str(project_root),
         "preflight_report": str(report_path),
@@ -753,6 +775,9 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         "num_workers": args.num_workers,
         "seed": args.seed,
         "mask_weight_when_enabled": args.mask_weight,
+        "action_rank_weight_when_enabled": args.action_rank_weight,
+        "action_rank_margin": args.action_rank_margin,
+        "action_rank_min_mse": args.action_rank_min_mse,
         "log_interval": args.log_interval,
         "python": sys.executable,
         "required_env_name": args.required_env_name,
@@ -810,15 +835,25 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
         "GWP_COUNTERFACTUAL_MASK_DICE_WEIGHT": "1.0",
         "GWP_SEED": str(args.seed),
         "GWP_VISUAL_LOSS_WEIGHT": "1.0",
-        # Preserve the official 30k baseline objective; the mask term is the
-        # only intended scientific difference between matched and full.
+        # Preserve the official 30k baseline objective.  The stage protocol
+        # below chooses exactly one scientific difference between paired arms.
         "GWP_ACTION_LOSS_WEIGHT": "5.0",
         "GWP_COUNTERFACTUAL_MASK_WEIGHT": (
-            "0.0" if args.variant == "matched" else str(args.mask_weight)
+            str(args.mask_weight)
+            if ranking_enabled
+            else ("0.0" if args.variant == "matched" else str(args.mask_weight))
         ),
         "GWP_COUNTERFACTUAL_MASK_COMPUTE_CONTROL": (
-            "1" if args.variant == "matched" else "0"
+            "0" if ranking_enabled else ("1" if args.variant == "matched" else "0")
         ),
+        "GWP_COUNTERFACTUAL_ACTION_RANK_WEIGHT": (
+            "0.0" if args.variant == "matched" else str(args.action_rank_weight)
+        ),
+        "GWP_COUNTERFACTUAL_ACTION_RANK_COMPUTE_CONTROL": (
+            "1" if ranking_enabled and args.variant == "matched" else "0"
+        ),
+        "GWP_COUNTERFACTUAL_ACTION_RANK_MARGIN": str(args.action_rank_margin),
+        "GWP_COUNTERFACTUAL_ACTION_RANK_MIN_MSE": str(args.action_rank_min_mse),
     }
     command = [
         sys.executable,
@@ -849,6 +884,15 @@ def build_launch_record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[
             "counterfactual_mask_compute_control": (
                 env_overrides["GWP_COUNTERFACTUAL_MASK_COMPUTE_CONTROL"] == "1"
             ),
+            "counterfactual_action_rank_weight": float(
+                env_overrides["GWP_COUNTERFACTUAL_ACTION_RANK_WEIGHT"]
+            ),
+            "counterfactual_action_rank_compute_control": (
+                env_overrides["GWP_COUNTERFACTUAL_ACTION_RANK_COMPUTE_CONTROL"]
+                == "1"
+            ),
+            "counterfactual_action_rank_margin": args.action_rank_margin,
+            "counterfactual_action_rank_min_mse": args.action_rank_min_mse,
         },
         "output_dir": str(output_dir),
         "counterpart_output_dir": str(counterpart_dir),
