@@ -29,7 +29,10 @@ from world_action_model.alignment import binary_mask_metrics, counterfactual_mas
 
 
 SCHEMA_VERSION = "counterfactual-mask-video-vae-audit-v1"
-CACHE_SCHEMA = "libero-counterfactual-robot-mask-v5"
+CACHE_SCHEMAS = {
+    "libero-counterfactual-robot-mask-v5",
+    "libero-support-constrained-action-kinematic-mask-v1",
+}
 EXPECTED_HORIZONS = [0, 12, 24, 36, 48]
 
 
@@ -74,8 +77,27 @@ def read_manifest(cache_root: Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise ValueError(f"Expected a JSON object in {manifest_path}")
-    if manifest.get("schema_version") != CACHE_SCHEMA:
+    if manifest.get("schema_version") not in CACHE_SCHEMAS:
         raise ValueError(f"Unsupported cache schema: {manifest.get('schema_version')!r}")
+    if manifest.get("schema_version") == (
+        "libero-support-constrained-action-kinematic-mask-v1"
+    ):
+        calls = manifest.get("dynamics_attempted_calls", {})
+        if (
+            manifest.get("dynamics") != "forbidden"
+            or set(calls) != {"env_step", "sim_step", "mj_step"}
+            or any(int(value) != 0 for value in calls.values())
+        ):
+            raise ValueError("Kinematic cache attempted simulator dynamics")
+        if any(
+            manifest.get(key) is not False
+            for key in (
+                "legacy_rollout_masks_read",
+                "legacy_rollout_qpos_read",
+                "simulator_actions_read",
+            )
+        ):
+            raise ValueError("Kinematic cache read a simulator-oracle field")
     if manifest.get("rgb_supervision") is not None:
         raise ValueError("Counterfactual cache unexpectedly contains RGB supervision")
     if (

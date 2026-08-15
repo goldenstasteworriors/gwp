@@ -368,7 +368,28 @@ target 注册/非平凡性 gate 位于 `kinematic_alignment_target_audit_op207_t
 1. **consequence calibration**：冻结 policy action 与 action→q adapter，用 predicted-q mask 监督 clean-video-latent probe 输出，使视频分支在 baseline policy 的 off-expert action 分布上学会机器人几何后果；先用 correct-vs-shuffled action gate 证明它没有忽略 action。
 2. **policy improvement**：只有第一阶段通过后才冻结 consequence model，让 action head 预测动作诱导的 q/mask 或视频 mask 朝 logged expert future mask 靠近，同时保留原 action imitation loss。这样第二阶段的梯度目标是 demonstrated desired consequence，而不是“让同一个动作产生的两种预测彼此一致”；后者没有任务最优方向，可能只让 action 与 video 一起犯同一个错。
 
-因此当前 clean-latent matched/full 只属于第一阶段，不宣称已经改善动作。node2 当前容器未暴露 H20 device，且现有 `.venv-ppu` 在该容器导入 torch 时缺少其厂商 runtime；为遵守环境与驱动约束，没有安装替代 CUDA/torch 或修改系统库。CPU 数据、FK、cache 与 gate 均已完成；冻结 probe 的 VAE 编码训练及随后 matched/full 要等原项目 GPU runtime 恢复后执行。
+因此当前 clean-latent matched/full 只属于第一阶段，不宣称已经改善动作。node2 的 PPU runtime 需要先执行 `/usr/local/PPU_SDK/envsetup.sh ppu`，再加载原项目 `/workspace/WM/giga-world-policy/.venv-ppu`；按这个官方现有顺序，四张 PPU 可由 PyTorch 访问。没有安装替代 CUDA/torch，也没有修改驱动或系统库。
+
+### 2026-08-16：action support、frozen probe 与训练一致的动作敏感性门
+
+完整 baseline policy action 不能直接交给 action→q GRU。`scripts/audit_libero_action_to_joint_input_support.py` 在 current q0 与 48-step action temporal feature 上，以 14,811 个 logged train window 建立标准化 PCA-32、5-NN support distance；阈值预先固定为 held-out expert distance p95 的 1.5 倍。full policy chunk 在 train/held-out 均只有 8% 通过，故正式对齐禁止使用完整 policy-action q/mask。固定插值 `a_alpha=(1-alpha)expert+alpha policy` 后，held-out 的 alpha 0/0.25/0.5/0.75/1.0 接受率为 1/1/1/0.98/0.08；每条样本选最大 supported alpha，最终 held-out 50 条中 1 条为 0.5、45 条为 0.75、4 条为 1.0。冻结 GRU 推理与 direct FK mask 位于 `support_constrained_action_to_joint_op219` 和 `support_constrained_joint_masks_op221`，自包含 cache 位于 `support_constrained_action_kinematic_mask_cache_op230`。它们没有读取 simulator future state，三类 dynamics attempted call 均为 0。
+
+真实 5-frame 双视图视频与 simultaneous logged-q direct mask 训练出的 frozen probe 位于 `latent_mask_probe_logged_q_op220`。50 条 held-out 的 full/dynamic/new-occupancy IoU 和 gripper recall 分别为 0.8342/0.7670/0.7521/0.8652；copy-initial 对应为 0.3795/0/0/0.1492，预注册绝对与相对门全部通过。这排除了“后续动作敏感性为零只是 probe 看不懂 latent”的混杂。
+
+原 action-gap evaluator 还存在一个训练协议偏差：它把第一帧单独过 VAE，而 GWP 训练是把完整五帧视频一次编码，再切分第一 latent frame 与 future latent。commit `c33d98e` 修复为 full-video encode，并加入两种固定诊断：(1) 从纯噪声按官方 `FlowMatchEulerDiscreteScheduler(shift=5.0)` 解；(2) 在真实 future latent 与同一 noise 的插值点做单步 flow denoising。后者只用于判断 action condition 是否改变视频后果，不是 counterfactual RGB target。除 task 内无固定点 correct-vs-shuffled paired bootstrap 外，expert-correct 还必须达到 full≥0.65、dynamic/new≥0.40、gripper≥0.70，避免把不可解码输出上的微小差异写成动作利用。
+
+50 条 held-out 的固定噪声网格结果如下：
+
+| initialization | full IoU | dynamic IoU | new IoU | gripper recall | expert correct-shuffled: dynamic/new/gripper |
+|---|---:|---:|---:|---:|---:|
+| pure noise | 0.0355 | 0.1297 | 0.0028 | 0.0120 | +0.00056 / -0.00042 / -0.00212 |
+| teacher sigma 0.50 | 0.7982 | 0.7214 | 0.7127 | 0.8546 | +0.00011 / +0.00006 / -0.00009 |
+| teacher sigma 0.75 | 0.6512 | 0.5599 | 0.5796 | 0.7402 | +0.00052 / +0.00072 / -0.00046 |
+| teacher sigma 0.90 | 0.1500 | 0.1850 | 0.0870 | 0.1133 | -0.00131 / -0.00202 / -0.00119 |
+
+报告依次为 `clean_latent_fullvideo_purenoise_op245.json`、`clean_latent_fullvideo_teacher050_op246.json`、`clean_latent_fullvideo_teacher075_op247.json` 和 `clean_latent_fullvideo_teacher090_op248.json`。sigma 0.50/0.75 证明 latent/probe 在该点能准确恢复真实机器人运动，但换成同任务 shuffled future action 几乎不改变输出；所有 action-sensitivity bootstrap gate 均失败。严格结论不是“未来动作条件没有必要对齐”，而是恰好相反：**提供 future action token 并不保证 video branch 使用它**。同时该结果否决了直接在原 clean RGB latent 上启动对齐训练，因为其基线没有可测的 action-faithful consequence mount。
+
+控制目标因此固定为非对称两阶段：第一阶段只校准可微 consequence model `C(context, action)->robot geometry`，并要求训练后 correct-vs-shuffled 明显为正；第二阶段冻结 `C`，把 action head 的 predicted-clean action 输入 `C`，朝 logged expert-q direct-FK mask 优化，同时保留 imitation action loss。只有第二阶段的梯度更新 action prediction，才可声称目标是控制；第一阶段 mask loss 降低只能声称 consequence calibration。五个几何 target 对应 `[0,12,24,36,48]`，天然解决视频帧与 48-step action token 的时间尺度差异。
 
 ## 结果位置
 
