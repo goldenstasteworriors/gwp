@@ -14,7 +14,10 @@ from giga_datasets.datasets.lerobot_dataset import FastLeRobotDataset, _LeRobotD
 
 _SUBTASK_MARKER_RE = re.compile(r"\bsubtask\s*:\s*", flags=re.IGNORECASE)
 _T5_LOAD_FROM_CHOICES = ("dir", "pkl", "path")
-_COUNTERFACTUAL_MASK_SCHEMA = "libero-counterfactual-robot-mask-v5"
+_COUNTERFACTUAL_MASK_SCHEMAS = {
+    "libero-counterfactual-robot-mask-v5",
+    "libero-policy-action-kinematic-mask-v1",
+}
 _COUNTERFACTUAL_MASK_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 
 
@@ -82,12 +85,27 @@ class WAMLeRobotDataset(BaseDataset):
         if not manifest_path.is_file():
             raise FileNotFoundError(manifest_path)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("schema_version") != _COUNTERFACTUAL_MASK_SCHEMA:
+        if manifest.get("schema_version") not in _COUNTERFACTUAL_MASK_SCHEMAS:
             raise ValueError(
                 f"Unsupported counterfactual mask schema: {manifest.get('schema_version')!r}"
             )
         if manifest.get("rgb_supervision") is not None:
             raise ValueError("Counterfactual mask cache must not contain RGB supervision")
+        if manifest.get("schema_version") == "libero-policy-action-kinematic-mask-v1":
+            calls = manifest.get("dynamics_attempted_calls", {})
+            if manifest.get("dynamics") != "forbidden" or set(calls) != {
+                "env_step",
+                "sim_step",
+                "mj_step",
+            } or any(int(value) != 0 for value in calls.values()):
+                raise ValueError("Kinematic mask cache attempted simulator dynamics")
+            for key in (
+                "legacy_rollout_masks_read",
+                "legacy_rollout_qpos_read",
+                "simulator_actions_read",
+            ):
+                if manifest.get(key) is not False:
+                    raise ValueError(f"Kinematic mask cache has unsafe {key}")
         if manifest.get("image_orientation") != _COUNTERFACTUAL_MASK_ORIENTATION:
             raise ValueError(
                 "Counterfactual mask cache does not use the LeRobot LIBERO "
