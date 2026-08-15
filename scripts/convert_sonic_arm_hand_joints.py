@@ -68,6 +68,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--side", choices=("both", "left"), default="both")
+    parser.add_argument(
+        "--min-source-episode-index",
+        type=int,
+        default=0,
+        help="Keep source episodes at or above this index and renumber them from zero.",
+    )
     return parser.parse_args()
 
 
@@ -85,6 +91,13 @@ def _read_jsonl(path: Path) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _source_episode_index(path: Path) -> int:
+    prefix = "episode_"
+    if not path.stem.startswith(prefix):
+        raise ValueError(f"Unexpected source episode filename: {path.name}")
+    return int(path.stem[len(prefix) :])
 
 
 def main() -> None:
@@ -121,9 +134,19 @@ def main() -> None:
     episode_rows = []
     right_hand_min = np.full(6, np.inf, dtype=np.float64) if args.side == "both" else None
     right_hand_max = np.full(6, -np.inf, dtype=np.float64) if args.side == "both" else None
-    sources = sorted((source_root / "data").glob("*/*.parquet"))
+    if args.min_source_episode_index < 0:
+        raise ValueError("--min-source-episode-index must be non-negative")
+    all_sources = sorted((source_root / "data").glob("*/*.parquet"))
+    sources = [
+        path
+        for path in all_sources
+        if _source_episode_index(path) >= args.min_source_episode_index
+    ]
     if not sources:
-        raise FileNotFoundError(f"No parquet episodes under {source_root / 'data'}")
+        raise FileNotFoundError(
+            f"No parquet episodes at or above {args.min_source_episode_index} "
+            f"under {source_root / 'data'}"
+        )
 
     for output_index, source in enumerate(sources):
         frame = pd.read_parquet(source)
@@ -131,11 +154,12 @@ def main() -> None:
         unique_episode = np.unique(episode_values)
         if unique_episode.size != 1:
             raise ValueError(f"Expected one episode in {source}, got {unique_episode.tolist()}")
-        episode_index = int(unique_episode[0])
-        if episode_index != output_index:
+        source_episode_index = int(unique_episode[0])
+        filename_episode_index = _source_episode_index(source)
+        if source_episode_index != filename_episode_index:
             raise ValueError(
-                f"Episodes must be contiguous from zero; file {source.name} has {episode_index}, "
-                f"expected {output_index}"
+                f"Episode index in {source.name} is {source_episode_index}, "
+                f"but its filename declares {filename_episode_index}"
             )
 
         observed = np.stack(frame["observation.state"]).astype(np.float32)
@@ -149,30 +173,37 @@ def main() -> None:
         converted = frame[
             ["timestamp", "frame_index", "episode_index", "index", "task_index"]
         ].copy()
+        converted["episode_index"] = output_index
+        converted["index"] = np.arange(
+            total_frames, total_frames + len(frame), dtype=np.int64
+        )
         converted.insert(0, "action", list(action))
         converted.insert(0, "observation.state", list(state))
-        converted.to_parquet(data_dir / f"file-{episode_index:03d}.parquet", index=False)
+        converted.to_parquet(data_dir / f"file-{output_index:03d}.parquet", index=False)
 
-        source_video = source_root / "videos" / "chunk-000" / VIDEO_KEY / f"episode_{episode_index:06d}.mp4"
+        source_video = source_root / "videos" / "chunk-000" / VIDEO_KEY / f"episode_{source_episode_index:06d}.mp4"
         if not source_video.is_file():
             raise FileNotFoundError(source_video)
-        shutil.copy2(source_video, video_dir / f"file-{episode_index:03d}.mp4")
+        shutil.copy2(source_video, video_dir / f"file-{output_index:03d}.mp4")
 
         length = len(frame)
-        episode_info = source_episodes[episode_index]
+        episode_info = source_episodes[source_episode_index]
         if int(episode_info["length"]) != length:
-            raise ValueError(f"Episode {episode_index} length metadata does not match parquet")
+            raise ValueError(
+                f"Episode {source_episode_index} length metadata does not match parquet"
+            )
         episode_rows.append(
             {
-                "episode_index": episode_index,
+                "episode_index": output_index,
+                "source_episode_index": source_episode_index,
                 "tasks": np.asarray(episode_info["tasks"], dtype=object),
                 "length": length,
                 "data/chunk_index": 0,
-                "data/file_index": episode_index,
+                "data/file_index": output_index,
                 "dataset_from_index": total_frames,
                 "dataset_to_index": total_frames + length,
                 f"videos/{VIDEO_KEY}/chunk_index": 0,
-                f"videos/{VIDEO_KEY}/file_index": episode_index,
+                f"videos/{VIDEO_KEY}/file_index": output_index,
                 f"videos/{VIDEO_KEY}/from_timestamp": 0.0,
                 f"videos/{VIDEO_KEY}/to_timestamp": length / float(info["fps"]),
                 "meta/episodes/chunk_index": 0,
@@ -186,6 +217,12 @@ def main() -> None:
     info["action_schema_id"] = ACTION_SCHEMA_IDS[args.side]
     info["action_semantics"] = "absolute_joint_target"
     info["controlled_side"] = args.side
+    info["source_episode_filter"] = {
+        "min_episode_index_inclusive": args.min_source_episode_index,
+        "selected_source_episode_indices": [
+            _source_episode_index(path) for path in sources
+        ],
+    }
     if args.side == "both":
         info["right_hand_supervision"] = {
             "semantics": "recorded_default_open_pose",
