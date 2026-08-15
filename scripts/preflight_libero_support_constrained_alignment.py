@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-train-audit", type=Path, required=True)
     parser.add_argument("--target-heldout-audit", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--matched-output", type=Path, required=True)
+    parser.add_argument("--full-output", type=Path, required=True)
+    parser.add_argument("--reserve-gib", type=float, default=20.0)
+    parser.add_argument("--transient-gib", type=float, default=15.0)
     parser.add_argument("--report", type=Path, required=True)
     return parser.parse_args()
 
@@ -52,6 +58,21 @@ def load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Expected JSON object: {path}")
     return value
+
+
+def filesystem_id(path: Path) -> int:
+    return int(os.statvfs(path).f_fsid)
+
+
+def checkpoint_weight_bytes(root: Path) -> int:
+    weight_files = [
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix in {".safetensors", ".bin", ".pt", ".pth"}
+    ]
+    if not weight_files:
+        raise ValueError(f"No checkpoint weights found in {root}")
+    return sum(path.stat().st_size for path in weight_files)
 
 
 def read_episode_file(path: Path) -> list[int]:
@@ -125,6 +146,7 @@ def validate_cache(
         raise ValueError(f"Alpha counts changed: {manifest_path}")
     return manifest, {
         "root": str(root.resolve()),
+        "schema_version": schema,
         "manifest_sha256": sha256_file(manifest_path),
         "num_episodes": len(records),
         "alpha_counts": alpha_counts if schema == TARGET_SCHEMA else None,
@@ -166,6 +188,17 @@ def main() -> None:
         raise FileNotFoundError(args.project_root)
     if not args.checkpoint.is_dir():
         raise FileNotFoundError(args.checkpoint)
+    if args.reserve_gib <= 0 or args.transient_gib <= 0:
+        raise ValueError("Disk reserve/transient budgets must be positive")
+    for output in (args.matched_output, args.full_output):
+        if output.exists():
+            raise FileExistsError(output)
+        if not output.parent.is_dir():
+            raise FileNotFoundError(output.parent)
+    if filesystem_id(args.matched_output.parent) != filesystem_id(
+        args.full_output.parent
+    ):
+        raise ValueError("Matched/full outputs cross filesystems")
     split_path = args.split_dir / "manifest.json"
     split = load_json(split_path)
     if split.get("schema_version") != SPLIT_SCHEMA:
@@ -232,6 +265,26 @@ def main() -> None:
         args.expert_heldout_cache,
         args.target_heldout_cache,
     )
+    output_filesystem = filesystem_id(args.matched_output.parent)
+    for source in (
+        args.checkpoint,
+        args.expert_train_cache,
+        args.expert_heldout_cache,
+        args.target_train_cache,
+        args.target_heldout_cache,
+    ):
+        if filesystem_id(source) != output_filesystem:
+            raise ValueError(f"Large source/output crosses filesystems: {source}")
+    source_weight_bytes = checkpoint_weight_bytes(args.checkpoint)
+    required_free_bytes = source_weight_bytes + int(
+        (args.reserve_gib + args.transient_gib) * 1024**3
+    )
+    free_bytes = shutil.disk_usage(args.matched_output.parent).free
+    if free_bytes < required_free_bytes:
+        raise RuntimeError(
+            f"Insufficient disk: free={free_bytes / 1024**3:.2f} GiB, "
+            f"required={required_free_bytes / 1024**3:.2f} GiB"
+        )
     git_commit = subprocess.check_output(
         ["git", "-C", str(args.project_root), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -251,7 +304,7 @@ def main() -> None:
     report = {
         "schema_version": "libero-support-constrained-alignment-preflight-v1",
         "status": "passed",
-        "decision": "ready_for_clean_latent_probe_and_action_gap_gates",
+        "decision": "ready_for_single_method_stage1_gates",
         "project_root": str(args.project_root.resolve()),
         "git_commit": git_commit,
         "split_manifest": str(split_path.resolve()),
@@ -265,6 +318,15 @@ def main() -> None:
         "expert_heldout_cache": expert_heldout_summary,
         "target_train_cache": target_train_summary,
         "target_heldout_cache": target_heldout_summary,
+        "train_cache": target_train_summary,
+        "heldout_cache": target_heldout_summary,
+        "matched_output": str(args.matched_output.resolve()),
+        "full_output": str(args.full_output.resolve()),
+        "source_checkpoint_weight_gib": source_weight_bytes / 1024**3,
+        "free_gib": free_bytes / 1024**3,
+        "required_free_gib": required_free_bytes / 1024**3,
+        "reserve_gib": args.reserve_gib,
+        "transient_gib": args.transient_gib,
         "input_support_report": str(args.input_support_report.resolve()),
         "input_support_report_sha256": sha256_file(args.input_support_report),
         "full_policy_accepted_fraction": {

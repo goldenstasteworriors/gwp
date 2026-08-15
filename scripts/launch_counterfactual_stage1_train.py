@@ -20,7 +20,10 @@ ALIGNMENT_MODES = (
     "clean_latent_probe",
     "shared_mask_video_flow",
 )
-EXPECTED_CACHE_SCHEMA = "libero-counterfactual-robot-mask-v5"
+EXPECTED_CACHE_SCHEMAS = {
+    "libero-counterfactual-robot-mask-v5",
+    "libero-support-constrained-action-kinematic-mask-v1",
+}
 EXPECTED_IMAGE_ORIENTATION = "lerobot_libero_visualization_flip_height_width"
 EXPECTED_TRAIN_EPISODES = 200
 EXPECTED_HELDOUT_EPISODES = 50
@@ -129,8 +132,28 @@ def validate_cache_manifest(
 ) -> dict[str, Any]:
     manifest_path = cache_root / "manifest.json"
     manifest = load_json(manifest_path)
-    if manifest.get("schema_version") != EXPECTED_CACHE_SCHEMA:
+    schema = manifest.get("schema_version")
+    if schema not in EXPECTED_CACHE_SCHEMAS:
         raise ValueError(f"Unexpected cache schema: {manifest_path}")
+    if audit.get("schema_version") not in {None, schema}:
+        raise ValueError(f"Preflight/cache schema mismatch: {manifest_path}")
+    if schema == "libero-support-constrained-action-kinematic-mask-v1":
+        calls = manifest.get("dynamics_attempted_calls", {})
+        if (
+            manifest.get("dynamics") != "forbidden"
+            or set(calls) != {"env_step", "sim_step", "mj_step"}
+            or any(int(value) != 0 for value in calls.values())
+        ):
+            raise ValueError(f"Kinematic cache attempted dynamics: {manifest_path}")
+        if any(
+            manifest.get(key) is not False
+            for key in (
+                "legacy_rollout_masks_read",
+                "legacy_rollout_qpos_read",
+                "simulator_actions_read",
+            )
+        ):
+            raise ValueError(f"Kinematic cache read an oracle field: {manifest_path}")
     if manifest.get("image_orientation") != EXPECTED_IMAGE_ORIENTATION:
         raise ValueError(f"Cache/training image orientation mismatch: {manifest_path}")
     if int(manifest.get("num_episodes", -1)) != expected_count:
@@ -430,7 +453,7 @@ def validate_shared_mask_video_gate(
         raise ValueError("Mask-video VAE report uses a different held-out cache")
     if report.get("cache_manifest_sha256") != sha256_file(manifest_path):
         raise ValueError("Held-out cache changed after mask-video VAE gate")
-    if report.get("cache_schema_version") != EXPECTED_CACHE_SCHEMA:
+    if report.get("cache_schema_version") != heldout_manifest.get("schema_version"):
         raise ValueError("Unexpected cache schema in mask-video VAE report")
     if report.get("policy_id") != heldout_manifest.get("policy_id"):
         raise ValueError("Mask-video VAE report uses a different policy cache")
