@@ -88,8 +88,28 @@ def read_manifest(cache_root: Path) -> dict[str, Any]:
     if not manifest_path.is_file():
         raise FileNotFoundError(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "libero-counterfactual-robot-mask-v5":
+    if manifest.get("schema_version") not in {
+        "libero-counterfactual-robot-mask-v5",
+        "libero-policy-action-kinematic-mask-v1",
+    }:
         raise ValueError(f"Unsupported cache schema: {manifest.get('schema_version')!r}")
+    if manifest.get("schema_version") == "libero-policy-action-kinematic-mask-v1":
+        calls = manifest.get("dynamics_attempted_calls", {})
+        if manifest.get("dynamics") != "forbidden" or set(calls) != {
+            "env_step",
+            "sim_step",
+            "mj_step",
+        } or any(int(value) != 0 for value in calls.values()):
+            raise ValueError("Kinematic counterfactual cache attempted dynamics")
+        if any(
+            manifest.get(key) is not False
+            for key in (
+                "legacy_rollout_masks_read",
+                "legacy_rollout_qpos_read",
+                "simulator_actions_read",
+            )
+        ):
+            raise ValueError("Kinematic counterfactual cache read a legacy oracle field")
     if (
         manifest.get("image_orientation")
         != "lerobot_libero_visualization_flip_height_width"

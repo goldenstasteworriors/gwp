@@ -41,8 +41,8 @@ from world_action_model.alignment import (  # noqa: E402
 from world_action_model.models import CasualWorldActionTransformer_MoT  # noqa: E402
 
 
-DEMO_SCHEMA = "libero-demonstration-robot-mask-v1"
-REGISTRATION_SCHEMA = "libero-demonstration-mask-registration-audit-v1"
+DEMO_SCHEMA = "libero-logged-action-kinematic-mask-v1"
+RENDERER_AUDIT_SCHEMA = "libero-kinematic-mask-pipeline-audit-v1"
 GAP_KEYS = ("dynamic_iou", "new_occupancy_iou", "gripper_region_recall")
 
 
@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--demonstration-cache", type=Path, required=True)
-    parser.add_argument("--demonstration-registration", type=Path, required=True)
+    parser.add_argument("--renderer-audit", type=Path, required=True)
     parser.add_argument("--norm-stats", type=Path, required=True)
     parser.add_argument("--mask-probe", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -89,7 +89,7 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def validate_demo_inputs(
     demo_root: Path,
-    registration_path: Path,
+    renderer_audit_path: Path,
     counterfactual_manifest: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     manifest_path = demo_root / "manifest.json"
@@ -98,10 +98,17 @@ def validate_demo_inputs(
         raise ValueError(f"Unexpected demonstration cache schema: {manifest_path}")
     if manifest.get("rgb_supervision") is not None:
         raise ValueError("Demonstration-mask cache must not provide an RGB target")
-    if manifest.get("rendered_rgb_role") != (
-        "registration_audit_only_not_a_probe_or_video_target"
+    calls = manifest.get("dynamics_attempted_calls", {})
+    if manifest.get("dynamics") != "forbidden" or set(calls) != {
+        "env_step",
+        "sim_step",
+        "mj_step",
+    } or any(
+        int(value) != 0 for value in calls.values()
     ):
-        raise ValueError("Rendered replay RGB is not restricted to registration audit")
+        raise ValueError("Logged-q demonstration masks attempted dynamics")
+    if manifest.get("action_array") != "expert_actions_lerobot":
+        raise ValueError("Unexpected expert action semantics")
     for key in ("dataset_root", "dataset_info_sha256", "suite", "horizons"):
         if manifest.get(key) != counterfactual_manifest.get(key):
             raise ValueError(f"Demo/counterfactual cache mismatch for {key}")
@@ -125,7 +132,6 @@ def validate_demo_inputs(
             "raw_demo_name",
             "raw_hdf5_path",
             "raw_hdf5_sha256",
-            "raw_initial_state_sha256",
         ):
             if demo_record.get(key) != counterfactual_record.get(key):
                 raise ValueError(
@@ -135,18 +141,22 @@ def validate_demo_inputs(
         cache_path = demo_root / str(demo_record["cache_file"])
         if sha256_file(cache_path) != demo_record.get("cache_sha256"):
             raise ValueError(f"Demonstration cache changed: {cache_path}")
-    registration = load_json(registration_path)
-    if registration.get("schema_version") != REGISTRATION_SCHEMA:
-        raise ValueError("Unexpected demonstration registration schema")
-    if registration.get("status") != "passed" or not all(
-        registration.get("checks", {}).values()
-    ):
-        raise RuntimeError("Demonstration registration gate did not pass")
-    if Path(str(registration.get("cache"))).resolve() != demo_root:
-        raise ValueError("Registration report refers to a different demonstration cache")
-    if registration.get("manifest_sha256") != sha256_file(manifest_path):
-        raise ValueError("Registration/demonstration manifest hash mismatch")
-    return manifest, records, registration
+    renderer_audit = load_json(renderer_audit_path)
+    if renderer_audit.get("schema_version") != RENDERER_AUDIT_SCHEMA:
+        raise ValueError("Unexpected renderer audit schema")
+    attempted = renderer_audit.get("dynamics_prohibition", {}).get(
+        "attempted_calls", {}
+    )
+    registration = renderer_audit.get("renderer_registration", {}).get(
+        "robot_mask_iou", {}
+    )
+    if set(attempted) != {"env_step", "sim_step", "mj_step"} or any(
+        int(value) != 0 for value in attempted.values()
+    ) or float(
+        registration.get("mean", -1.0)
+    ) < 0.85 or float(registration.get("p05", -1.0)) < 0.80:
+        raise RuntimeError("Direct-q renderer audit did not pass")
+    return manifest, records, renderer_audit
 
 
 def normalize_demo_actions(
@@ -161,12 +171,9 @@ def normalize_demo_actions(
     normalized_actions = []
     for record in records:
         with np.load(demo_root / str(record["cache_file"]), allow_pickle=False) as cache:
-            action = cache["expert_actions"].astype(np.float32)
+            action = cache["expert_actions_lerobot"].astype(np.float32)
         if action.ndim != 2 or action.shape[0] != 48 or action.shape[1] < 7:
             raise ValueError(f"Expected [48,>=7] demo action, got {action.shape}")
-        action = action.copy()
-        # Raw LIBERO {-1=open,+1=closed} to the LeRobot {1=open,0=closed} convention.
-        action[:, 6] = (1.0 - action[:, 6]) * 0.5
         effective_dim = min(action.shape[-1], low.shape[0], high.shape[0])
         normalized = np.zeros((48, model_action_dim), dtype=np.float32)
         action_range = np.maximum(high[:effective_dim] - low[:effective_dim], 1e-8)
@@ -273,7 +280,7 @@ def main() -> None:
         args.dataset,
         args.cache,
         args.demonstration_cache,
-        args.demonstration_registration,
+        args.renderer_audit,
         args.norm_stats,
         args.mask_probe,
     ):
@@ -293,9 +300,9 @@ def main() -> None:
     dtype = resolve_dtype(args.model_dtype)
 
     counterfactual_manifest = read_manifest(args.cache)
-    demo_manifest, demo_records, registration = validate_demo_inputs(
+    demo_manifest, demo_records, renderer_audit = validate_demo_inputs(
         args.demonstration_cache.resolve(),
-        args.demonstration_registration.resolve(),
+        args.renderer_audit.resolve(),
         counterfactual_manifest,
     )
     predicted_actions = normalize_cached_actions(
@@ -457,11 +464,9 @@ def main() -> None:
         "demonstration_manifest_sha256": sha256_file(
             args.demonstration_cache / "manifest.json"
         ),
-        "demonstration_registration": str(args.demonstration_registration.resolve()),
-        "demonstration_registration_sha256": sha256_file(
-            args.demonstration_registration
-        ),
-        "registration_thresholds": registration["thresholds"],
+        "renderer_audit": str(args.renderer_audit.resolve()),
+        "renderer_audit_sha256": sha256_file(args.renderer_audit),
+        "renderer_registration": renderer_audit["renderer_registration"],
         "mask_probe": str(args.mask_probe.resolve()),
         "mask_probe_config_sha256": sha256_file(
             args.mask_probe / LatentRobotMaskProbe.CONFIG_NAME
