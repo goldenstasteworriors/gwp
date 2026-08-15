@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 
 EVALUATION_SCHEMA = "shared-mask-video-flow-evaluation-v1"
-SCHEMA_VERSION = "shared-mask-video-flow-paired-comparison-v1"
+SCHEMA_VERSION = "shared-mask-video-flow-paired-comparison-v2"
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,8 +56,11 @@ def validate_common(left: dict[str, Any], right: dict[str, Any]) -> None:
         "dataset",
         "cache",
         "cache_manifest_sha256",
+        "cache_schema_version",
         "policy_action_array",
         "simulator_action_array",
+        "condition_action_semantics",
+        "kinematic_target_provenance",
         "norm_stats",
         "num_samples",
         "num_views",
@@ -163,6 +166,52 @@ def collect_effects(
     return overall, by_timestep
 
 
+def collect_within_report_effects(
+    rows: dict[int, dict[str, Any]],
+    timesteps: list[int],
+    value: Callable[[dict[str, float]], float],
+) -> tuple[dict[int, list[float]], dict[str, dict[int, list[float]]]]:
+    overall: dict[int, list[float]] = defaultdict(list)
+    by_timestep: dict[str, dict[int, list[float]]] = {
+        str(step): defaultdict(list) for step in timesteps
+    }
+    for episode in sorted(rows):
+        row = rows[episode]
+        task = int(row["task_index"])
+        for step in timesteps:
+            key = str(step)
+            effect = value(row["timesteps"][key])
+            if not math.isfinite(effect):
+                raise ValueError(f"Non-finite within-report effect for episode {episode}")
+            overall[task].append(effect)
+            by_timestep[key][task].append(effect)
+    return overall, by_timestep
+
+
+def summarize_effects(
+    overall: dict[int, list[float]],
+    by_timestep: dict[str, dict[int, list[float]]],
+    *,
+    seed: int,
+    bootstrap_samples: int,
+) -> dict[str, Any]:
+    return {
+        "overall": task_stratified_bootstrap(
+            overall,
+            seed=seed,
+            num_resamples=bootstrap_samples,
+        ),
+        "by_timestep": {
+            step: task_stratified_bootstrap(
+                values,
+                seed=seed + index + 1,
+                num_resamples=bootstrap_samples,
+            )
+            for index, (step, values) in enumerate(by_timestep.items())
+        },
+    }
+
+
 def main() -> None:
     args = parse_args()
     if args.output.exists():
@@ -170,6 +219,12 @@ def main() -> None:
     left = load_report(args.left)
     right = load_report(args.right)
     validate_common(left, right)
+    if left.get("training_variant") != "matched" or right.get(
+        "training_variant"
+    ) != "full":
+        raise ValueError("Mechanism gate requires --left matched and --right full")
+    if args.left_label == args.right_label:
+        raise ValueError("Paired comparison labels must differ")
     left_rows = index_rows(left)
     right_rows = index_rows(right)
     if set(left_rows) != set(right_rows):
@@ -189,20 +244,55 @@ def main() -> None:
         )
         effects[name] = {
             "direction": "right_minus_left",
-            "overall": task_stratified_bootstrap(
+            **summarize_effects(
                 overall,
+                by_timestep,
                 seed=args.seed + offset * 100,
-                num_resamples=args.bootstrap_samples,
+                bootstrap_samples=args.bootstrap_samples,
             ),
-            "by_timestep": {
-                step: task_stratified_bootstrap(
-                    values,
-                    seed=args.seed + offset * 100 + index + 1,
-                    num_resamples=args.bootstrap_samples,
-                )
-                for index, (step, values) in enumerate(by_timestep.items())
-            },
         }
+    within_definitions: dict[str, Callable[[dict[str, float]], float]] = {
+        "action_sensitivity_advantage": lambda row: float(
+            row["shuffled_action_mse"] - row["correct_action_mse"]
+        ),
+        "correct_action_advantage_over_zero": lambda row: float(
+            row["zero_flow_mse"] - row["correct_action_mse"]
+        ),
+    }
+    within_variant: dict[str, Any] = {}
+    for variant_offset, (variant, rows) in enumerate(
+        (("matched", left_rows), ("full", right_rows))
+    ):
+        within_variant[variant] = {}
+        for effect_offset, (name, function) in enumerate(within_definitions.items()):
+            overall, by_timestep = collect_within_report_effects(
+                rows, timesteps, function
+            )
+            within_variant[variant][name] = {
+                "direction": name,
+                **summarize_effects(
+                    overall,
+                    by_timestep,
+                    seed=args.seed + 1000 + variant_offset * 100 + effect_offset * 10,
+                    bootstrap_samples=args.bootstrap_samples,
+                ),
+            }
+    right_action_sensitivity = within_variant["full"][
+        "action_sensitivity_advantage"
+    ]["overall"]
+    right_zero_advantage = within_variant["full"][
+        "correct_action_advantage_over_zero"
+    ]["overall"]
+    learned_sensitivity = effects["action_sensitivity_advantage"]["overall"]
+    learned_correct_mse = effects["correct_action_mse"]["overall"]
+    checks = {
+        "full_correct_beats_zero": float(right_zero_advantage["ci95_low"]) > 0.0,
+        "full_correct_beats_matched": float(learned_correct_mse["ci95_high"]) < 0.0,
+        "full_uses_correct_action": float(right_action_sensitivity["ci95_low"]) > 0.0,
+        "full_action_sensitivity_beats_matched": (
+            float(learned_sensitivity["ci95_low"]) > 0.0
+        ),
+    }
     report = {
         "schema_version": SCHEMA_VERSION,
         "left": {
@@ -225,8 +315,11 @@ def main() -> None:
                 "training_comparison_id",
                 "cache",
                 "cache_manifest_sha256",
+                "cache_schema_version",
                 "policy_action_array",
                 "simulator_action_array",
+                "condition_action_semantics",
+                "kinematic_target_provenance",
                 "num_samples",
                 "timesteps",
                 "seed",
@@ -234,6 +327,12 @@ def main() -> None:
             )
         },
         "paired_effects": effects,
+        "within_variant_effects": within_variant,
+        "mechanism_gate": {
+            "status": "passed" if all(checks.values()) else "failed",
+            "control_stage_allowed": all(checks.values()),
+            "checks": checks,
+        },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
