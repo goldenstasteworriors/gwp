@@ -91,6 +91,17 @@ def main() -> None:
     geometry_gate = load_json(args.geometry_gate_report)
     if geometry_gate.get("schema_version") != GEOMETRY_GATE_SCHEMA:
         raise ValueError("Unexpected action-to-joint geometry gate schema")
+    if geometry_gate.get("fk_api") != "mujoco.mj_kinematics" or any(
+        geometry_gate.get(key) is not False
+        for key in (
+            "benchmark_environment_imported",
+            "benchmark_environment_constructed",
+            "benchmark_state_read",
+            "controller_used",
+            "contact_used",
+        )
+    ):
+        raise ValueError("Action-to-joint geometry gate is not standalone FK-only")
     gate = geometry_gate.get("engineering_gate", {})
     if gate.get("status") != "passed" or gate.get("decision") != (
         "eligible_for_frozen_gwp_alignment_adapter"
