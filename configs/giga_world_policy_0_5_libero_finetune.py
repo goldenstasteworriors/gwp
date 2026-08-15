@@ -102,6 +102,26 @@ if counterfactual_mask_alignment_mode not in {
 counterfactual_mask_probe_pretrained = _env(
     "GWP_COUNTERFACTUAL_MASK_PROBE_PRETRAINED"
 )
+counterfactual_action_rank_weight = float(
+    _env("GWP_COUNTERFACTUAL_ACTION_RANK_WEIGHT", "0.0")
+)
+counterfactual_action_rank_compute_control = _bool(
+    "GWP_COUNTERFACTUAL_ACTION_RANK_COMPUTE_CONTROL", False
+)
+counterfactual_action_rank_margin = float(
+    _env("GWP_COUNTERFACTUAL_ACTION_RANK_MARGIN", "0.01")
+)
+counterfactual_action_rank_min_mse = float(
+    _env("GWP_COUNTERFACTUAL_ACTION_RANK_MIN_MSE", "0.0001")
+)
+if (
+    counterfactual_action_rank_weight > 0.0
+    or counterfactual_action_rank_compute_control
+):
+    if counterfactual_mask_alignment_mode != "shared_mask_video_flow":
+        raise ValueError("Action ranking requires shared_mask_video_flow")
+    if counterfactual_mask_weight <= 0.0:
+        raise ValueError("Action ranking requires positive mask-flow supervision")
 if counterfactual_mask_trainable_scope not in {"all", "head_only"}:
     raise ValueError(
         "GWP_COUNTERFACTUAL_MASK_TRAINABLE_SCOPE must be one of all, head_only"
@@ -260,6 +280,12 @@ config = dict(
         counterfactual_mask_trainable_scope=counterfactual_mask_trainable_scope,
         counterfactual_mask_alignment_mode=counterfactual_mask_alignment_mode,
         counterfactual_mask_probe_pretrained=counterfactual_mask_probe_pretrained,
+        counterfactual_action_rank_loss_weight=counterfactual_action_rank_weight,
+        counterfactual_action_rank_compute_control=(
+            counterfactual_action_rank_compute_control
+        ),
+        counterfactual_action_rank_margin=counterfactual_action_rank_margin,
+        counterfactual_action_rank_min_mse=counterfactual_action_rank_min_mse,
     ),
     optimizers=dict(type="CAME8Bit", lr=6e-5, weight_decay=1e-2),
     schedulers=dict(type="ConstantScheduler"),

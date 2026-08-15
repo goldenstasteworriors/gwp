@@ -106,6 +106,29 @@ def masked_flow_mse(
     return (squared_error * expanded_valid).sum() / denominator
 
 
+def masked_flow_mse_per_sample(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    """Per-sample flow error for action-condition ranking."""
+
+    if prediction.shape != target.shape:
+        raise ValueError(
+            f"Flow prediction/target shapes differ: {tuple(prediction.shape)} vs {tuple(target.shape)}"
+        )
+    try:
+        expanded_valid = torch.broadcast_to(valid.float(), prediction.shape)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"Latent valid mask {tuple(valid.shape)} cannot broadcast to {tuple(prediction.shape)}"
+        ) from exc
+    reduction_dims = tuple(range(1, prediction.ndim))
+    denominator = expanded_valid.sum(dim=reduction_dims).clamp_min(1.0)
+    squared_error = (prediction.float() - target.float()).pow(2)
+    return (squared_error * expanded_valid).sum(dim=reduction_dims) / denominator
+
+
 def set_counterfactual_mask_trainable_scope(transformer, scope: str) -> int:
     """Apply the mask mechanism-control freeze and return trainable parameters."""
 
@@ -205,6 +228,18 @@ class CasualWATrainerMoT(Trainer):
         self.counterfactual_mask_probe_pretrained = model_config.get(
             "counterfactual_mask_probe_pretrained"
         )
+        self.counterfactual_action_rank_loss_weight = float(
+            model_config.get("counterfactual_action_rank_loss_weight", 0.0)
+        )
+        self.counterfactual_action_rank_compute_control = bool(
+            model_config.get("counterfactual_action_rank_compute_control", False)
+        )
+        self.counterfactual_action_rank_margin = float(
+            model_config.get("counterfactual_action_rank_margin", 0.01)
+        )
+        self.counterfactual_action_rank_min_mse = float(
+            model_config.get("counterfactual_action_rank_min_mse", 1e-4)
+        )
         valid_gradient_modes = {"policy_only", "joint", "video_only"}
         if self.consequence_gradient_mode not in valid_gradient_modes:
             raise ValueError(
@@ -217,6 +252,24 @@ class CasualWATrainerMoT(Trainer):
             raise ValueError("consequence_visual_sigma must be in (0, 1]")
         if self.counterfactual_mask_loss_weight < 0.0:
             raise ValueError("counterfactual_mask_loss_weight must be non-negative")
+        if self.counterfactual_action_rank_loss_weight < 0.0:
+            raise ValueError("counterfactual_action_rank_loss_weight must be non-negative")
+        if self.counterfactual_action_rank_margin <= 0.0:
+            raise ValueError("counterfactual_action_rank_margin must be positive")
+        if self.counterfactual_action_rank_min_mse < 0.0:
+            raise ValueError("counterfactual_action_rank_min_mse must be non-negative")
+        if (
+            self.counterfactual_action_rank_loss_weight > 0.0
+            or self.counterfactual_action_rank_compute_control
+        ):
+            if self.counterfactual_mask_alignment_mode != "shared_mask_video_flow":
+                raise ValueError(
+                    "Counterfactual action ranking requires shared_mask_video_flow"
+                )
+            if self.counterfactual_mask_loss_weight <= 0.0:
+                raise ValueError(
+                    "Counterfactual action ranking requires positive mask-flow supervision"
+                )
         if self.counterfactual_mask_interval <= 0:
             raise ValueError("counterfactual_mask_interval must be positive")
         if self.counterfactual_mask_trainable_scope not in {"all", "head_only"}:
@@ -570,6 +623,50 @@ class CasualWATrainerMoT(Trainer):
                     counterfactual_flow_target,
                     latent_valid,
                 )
+                if (
+                    self.counterfactual_action_rank_loss_weight > 0.0
+                    or self.counterfactual_action_rank_compute_control
+                ):
+                    negative_output = transformer(
+                        ref_latents=ref_latents,
+                        noisy_latents=counterfactual_noisy_future,
+                        timestep=counterfactual_timestep,
+                        encoder_hidden_states=prompt_embeds,
+                        return_dict=True,
+                        action=action.detach(),
+                        state=state,
+                        embodiment_id=embodiment_id,
+                        output_counterfactual_mask=False,
+                        output_action=False,
+                        output_visual=True,
+                        future_visual_modality="mask",
+                    )
+                    negative_flow = negative_output.sample[:, :, 1:]
+                    correct_error = masked_flow_mse_per_sample(
+                        counterfactual_flow,
+                        counterfactual_flow_target,
+                        latent_valid,
+                    )
+                    negative_error = masked_flow_mse_per_sample(
+                        negative_flow,
+                        counterfactual_flow_target,
+                        latent_valid,
+                    )
+                    action_mse = (
+                        counterfactual_action.float() - action.detach().float()
+                    ).pow(2).mean(dim=(1, 2))
+                    active = action_mse >= self.counterfactual_action_rank_min_mse
+                    if active.any():
+                        raw_rank_loss = F.relu(
+                            self.counterfactual_action_rank_margin
+                            + correct_error[active]
+                            - negative_error[active]
+                        ).mean()
+                    else:
+                        raw_rank_loss = counterfactual_flow.float().sum() * 0.0
+                    losses["counterfactual_action_rank_loss"] = (
+                        self.counterfactual_action_rank_loss_weight * raw_rank_loss
+                    )
             else:
                 counterfactual_future_noise = torch.randn_like(
                     visual_latents[:, :, 1:]
