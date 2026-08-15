@@ -11,11 +11,26 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import mujoco
 import numpy as np
 
 from libero_standalone_robot_mask import ASSET_SCHEMA, CALIBRATION_SCHEMA
+
+
+EXPECTED_PANDA_ARM_LIMITS = np.asarray(
+    [
+        [-2.8973, 2.8973],
+        [-1.7628, 1.7628],
+        [-2.8973, 2.8973],
+        [-3.0718, -0.0698],
+        [-2.8973, 2.8973],
+        [-0.0175, 3.7525],
+        [-2.8973, 2.8973],
+    ],
+    dtype=np.float64,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,6 +89,14 @@ def main() -> None:
     robot.add_gripper(gripper)
     robot.set_base_xpos(np.asarray(args.robot_base_position, dtype=np.float64))
 
+    # Arena models normally contribute this compiler setting during merge.
+    # A robot-only model must declare it explicitly; otherwise MuJoCo's default
+    # degree convention would reinterpret Panda's radian joint ranges.
+    compiler = robot.root.find("compiler")
+    if compiler is None:
+        compiler = ET.SubElement(robot.root, "compiler")
+    compiler.set("angle", "radian")
+
     xml = robot.get_xml()
     model = mujoco.MjModel.from_xml_string(xml)
     model_path = args.output_dir / "robot_kinematic_model.mjb"
@@ -83,6 +106,14 @@ def main() -> None:
 
     arm_joint_names = [f"robot0_joint{index}" for index in range(1, 8)]
     gripper_joint_names = ["gripper0_finger_joint1", "gripper0_finger_joint2"]
+    arm_joint_limits = np.asarray(
+        named_joint_limits(model, arm_joint_names), dtype=np.float64
+    )
+    if not np.allclose(arm_joint_limits, EXPECTED_PANDA_ARM_LIMITS, atol=1e-7):
+        raise ValueError(
+            "Compiled Panda joint limits are not in radians: "
+            f"{arm_joint_limits.tolist()}"
+        )
     robot_visual_geom_names = list(robot.visual_geoms) + list(gripper.visual_geoms)
     gripper_visual_geom_names = list(gripper.visual_geoms)
     if len(robot_visual_geom_names) != len(set(robot_visual_geom_names)):
@@ -135,7 +166,7 @@ def main() -> None:
         "robot_base_position": [float(value) for value in args.robot_base_position],
         "arm_joint_names": arm_joint_names,
         "gripper_joint_names": gripper_joint_names,
-        "arm_joint_limits": named_joint_limits(model, arm_joint_names),
+        "arm_joint_limits": arm_joint_limits.tolist(),
         "robot_visual_geom_names": robot_visual_geom_names,
         "gripper_visual_geom_names": gripper_visual_geom_names,
         "eef_site_name": eef_site_name,
