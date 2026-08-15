@@ -368,7 +368,7 @@ target 注册/非平凡性 gate 位于 `kinematic_alignment_target_audit_op207_t
 1. **consequence calibration**：冻结 policy action 与 action→q adapter，用 predicted-q mask 监督 clean-video-latent probe 输出，使视频分支在 baseline policy 的 off-expert action 分布上学会机器人几何后果；先用 correct-vs-shuffled action gate 证明它没有忽略 action。
 2. **policy improvement**：只有第一阶段通过后才冻结 consequence model，让 action head 预测动作诱导的 q/mask 或视频 mask 朝 logged expert future mask 靠近，同时保留原 action imitation loss。这样第二阶段的梯度目标是 demonstrated desired consequence，而不是“让同一个动作产生的两种预测彼此一致”；后者没有任务最优方向，可能只让 action 与 video 一起犯同一个错。
 
-因此当前 clean-latent matched/full 只属于第一阶段，不宣称已经改善动作。node2 的 PPU runtime 需要先执行 `/usr/local/PPU_SDK/envsetup.sh ppu`，再加载原项目 `/workspace/WM/giga-world-policy/.venv-ppu`；按这个官方现有顺序，四张 PPU 可由 PyTorch 访问。没有安装替代 CUDA/torch，也没有修改驱动或系统库。
+因此当前 clean-latent matched/full 只属于第一阶段，不宣称已经改善动作。node2 的 PPU runtime 需要先执行 `source /usr/local/PPU_SDK/envsetup.sh`，再使用原项目 `/workspace/WM/giga-world-policy/.venv-ppu`；按这个服务器现有 SDK 初始化顺序，四张 PPU 可由 PyTorch 访问。没有安装替代 CUDA/torch，也没有修改驱动或系统库。
 
 ### 2026-08-16：action support、frozen probe 与训练一致的动作敏感性门
 
@@ -400,6 +400,38 @@ target 注册/非平凡性 gate 位于 `kinematic_alignment_target_audit_op207_t
 50-episode held-out v2 mask 位于 `support_constrained_standalone_joint_masks_heldout_op271`，schema 为 `libero-joint-standalone-kinematic-robot-mask-v2`。manifest 明确记录 `benchmark_environment_imported=false`、`benchmark_environment_constructed=false`、`benchmark_state_read=false`、`controller_used=false`、`contact_used=false`、`fk_api=mujoco.mj_kinematics`，五类 forbidden API attempted count 均为 0。`support_constrained_standalone_mask_audit_op272.json` 对 250 个相同指定 q frame 做一次性 renderer registration：standalone 与旧 FK mask 的 robot/gripper IoU mean/p05/min 都是 `1.0/1.0/1.0`，且 AST source audit 中 LIBERO/robosuite/gym prohibited import 为空。旧 cache 在此只作一次性实现等价性检查，不被复制到 v2、不作为训练 target。
 
 基于旧 `ControlEnv + sim.forward()` cache 的 matched run `support_constrained_shared_mask_stage1_matched_op257` 在 step 60 主动终止，full watcher 与 post-pair evaluator 同时停止，未形成实验结论。后续训练入口、dataset、probe、VAE audit 和 evaluator 已统一升级为只接受 standalone v2 schema；必须重建 train/heldout logged 与 support-constrained sidecar 并重新通过 preflight，旧 schema 不能继续训练。
+
+严格重建后的 action→q 几何报告 `action_to_joint_standalone_geometry_audit_op274.json` 通过，horizon 48 robot IoU mean/p05/min 为 `0.85395/0.75693/0.63988`，EEF distance mean/p95 为 `0.02019/0.04121 m`。最终训练 sidecar 为 logged `logged_action_standalone_mask_cache_heldout_op281/{train,heldout}` 与 support-constrained `support_constrained_action_standalone_mask_cache_op289/{train,heldout}`，分别覆盖 200/50 episode。train/heldout target audit `op292/op290` 的 initial-q/mask 精确注册、future target 运动和 expert-vs-policy 非同一轨迹三项检查全部通过；所有 manifest 均记录 benchmark environment import/construct/state read 为 false，五类 dynamics attempted call 为 0。VAE audit `support_constrained_standalone_mask_video_vae_audit_op291.json` 也通过，50 条 held-out 的 full/dynamic IoU mean 为 `0.97540/0.94114`。
+
+### 2026-08-16：standalone shared mask-flow 机制门失败
+
+在 `strict_standalone_shared_mask_sdk_preflight_op299.json` 通过后，4-device matched/full 分别训练于 `strict_standalone_shared_mask_matched_op300` 与 `strict_standalone_shared_mask_full_op301`。两臂均为 200 step、seed 6666、effective global batch 16；matched 执行相同 mask-flow compute path 但 mask weight 为 0，full mask weight 为 0.1。两者 manifest 均为 complete、exit code 0、comparison ID `83e3ee...bb9e`。
+
+50 条 held-out、timesteps 250/500/750 的报告为 `strict_standalone_shared_mask_matched_eval_op302.json` 与 `strict_standalone_shared_mask_full_eval_op303.json`，task-stratified 10,000-bootstrap 比较为 `strict_standalone_shared_mask_compare_op304.json`：
+
+| variant | correct-action MSE | shuffled-action MSE | zero-flow MSE | shuffled-correct |
+|---|---:|---:|---:|---:|
+| matched | 0.444499 | 0.444487 | 2.780207 | -0.0000124 |
+| full | 0.074307 | 0.074372 | 2.780207 | +0.0000648 |
+
+full 显著优于 matched 和 zero-flow，但 `full_uses_correct_action=false`，其 correct-vs-shuffled overall 95% CI 为 `[-1.16e-5, 1.49e-4]`；相对 matched 的 action-sensitivity 增益 CI 为 `[-5.03e-5, 2.06e-4]`。机制门因此失败，`control_stage_allowed=false`。这不是 mask target 不可学，而是 shared video-flow 学成了准确的 action-agnostic 平均机器人后果。
+
+### 2026-08-16：action-mask ranking 仍未通过泛化门
+
+只有 shared-flow 失败后才启用第二种机制。`world_action_model/trainer/wa_casual_trainer_mot.py` 在同一 context、同一 noisy target 下计算 curriculum action 的 `e_pos` 与 logged expert hard-negative 的 `e_neg`，加入 `relu(0.01 + e_pos - e_neg)`；target 和两种 action 均不更新动作头。ranking-matched 与 ranking-full 的 mask weight 都是 0.1，且两臂都执行 negative forward；前者 rank weight 为 0，后者为 0.1，保证唯一差异是 ranking 梯度。
+
+第一次正式启动 `strict_standalone_action_rank_matched_op306` 在 step 0 暴露 negative action FP32 与模型 BF16 的 dtype bug，未产生 checkpoint。commit `510de14` 将 negative action 显式转换到 curriculum action 的 device/dtype；随后 1-step smoke `strict_standalone_action_rank_smoke_op309` 成功，rank/mask loss 为 `0.0009/0.0673`。最终 paired preflight 为 `strict_standalone_action_rank_preflight_op310.json`，matched/full 位于 `strict_standalone_action_rank_matched_op311` 与 `strict_standalone_action_rank_full_op312`，均 complete、exit code 0、comparison ID `5ce9fd...673bf`。full 的训练 rank loss 从 step 10 的 `0.0016` 降至日志精度下的 0。
+
+held-out 报告 `strict_standalone_action_rank_matched_eval_op313.json`、`strict_standalone_action_rank_full_eval_op314.json` 和比较 `strict_standalone_action_rank_compare_op315.json` 的结果为：
+
+| variant | correct-action MSE | shuffled-action MSE | zero-flow MSE | shuffled-correct |
+|---|---:|---:|---:|---:|
+| matched | 0.075624 | 0.075783 | 2.780207 | +0.0001597 |
+| full | 0.078314 | 0.078502 | 2.780207 | +0.0001887 |
+
+ranking-full 的 correct MSE 反而比 matched 差；overall correct-vs-shuffled CI 为 `[-7.36e-5, 4.64e-4]`，相对 matched 的 sensitivity 增益 CI 为 `[-2.40e-4, 3.03e-4]`。只有 timestep 750 的 full sensitivity CI `[2.42e-5, 9.36e-4]` 为正，不足以通过预注册 overall gate。四项机制检查只有 `full_correct_beats_zero=true`，其余三项失败，仍为 `control_stage_allowed=false`。
+
+因此当前结论是：**standalone direct-FK mask 解决了 target 泄漏与时间注册问题，但 shared video-flow 并没有强制 action 经过可辨识的机器人几何通道；hard-negative ranking 也只拟合了训练负样本。** 不继续在该 shared-flow 路径叠加 loss，也不运行或宣称动作改善。下一步应测试显式 future-q / robot-token bottleneck：action encoder 先预测低维 joint/robot token，mask renderer 或 mask decoder 必须只从该 token 生成后果，再以 held-out task 内 shuffle 门验证 token 是否保留动作差异；只有该门通过后才冻结 consequence model 进入控制阶段。
 
 ## 结果位置
 
