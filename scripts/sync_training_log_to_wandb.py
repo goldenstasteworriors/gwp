@@ -29,6 +29,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project", default="gigaworld_lab")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-name", required=True)
+    parser.add_argument(
+        "--config-json",
+        type=Path,
+        default=None,
+        help="Optional JSON object merged into the W&B run config.",
+    )
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     return parser.parse_args()
 
@@ -46,13 +52,19 @@ def save_offset(path: Path, offset: int) -> None:
 
 def main() -> None:
     args = parse_args()
+    run_config = {"source_log": str(args.log)}
+    if args.config_json is not None:
+        extra_config = json.loads(args.config_json.read_text(encoding="utf-8"))
+        if not isinstance(extra_config, dict):
+            raise TypeError(f"Expected a JSON object in {args.config_json}")
+        run_config.update(extra_config)
     run = wandb.init(
         entity=args.entity,
         project=args.project,
         id=args.run_id,
         name=args.run_name,
         resume="allow",
-        config={"source_log": str(args.log)},
+        config=run_config,
     )
     run.define_metric("train/step")
     run.define_metric("train/*", step_metric="train/step")
