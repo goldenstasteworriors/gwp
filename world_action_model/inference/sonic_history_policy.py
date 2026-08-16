@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -13,6 +14,11 @@ from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from PIL import Image
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as vision_F
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) in sys.path:
+    sys.path.remove(str(_PROJECT_ROOT))
+sys.path.insert(0, str(_PROJECT_ROOT))
 
 from scripts.inference_openloop import WAPipeline, load_fixed_prompt_embedding, resolve_torch_dtype
 from world_action_model.models import CasualWorldActionTransformer_MoT
