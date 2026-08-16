@@ -38,6 +38,12 @@ class WALeRobotTransformsPretrain(WATransforms):
         emit_action_denorm_scale=False,
         max_prompt_len=64,
         subtask_prob=0,
+        state_history_tokens=1,
+        state_history_dropout_prob=0.0,
+        append_episode_progress_token=False,
+        append_state_velocity_token=False,
+        emit_action_dim_mask=False,
+        emit_action_time_mask=False,
     ):
         if norm_path is None:
             raise ValueError("norm_path list is none")
@@ -111,6 +117,16 @@ class WALeRobotTransformsPretrain(WATransforms):
         self.emit_action_denorm_scale = bool(emit_action_denorm_scale)
         self.max_prompt_len = int(max_prompt_len)
         self.subtask_prob = float(subtask_prob)
+        self.state_history_tokens = int(state_history_tokens)
+        if self.state_history_tokens < 1:
+            raise ValueError("state_history_tokens must be at least 1")
+        self.state_history_dropout_prob = float(state_history_dropout_prob)
+        if not 0.0 <= self.state_history_dropout_prob <= 1.0:
+            raise ValueError("state_history_dropout_prob must be in [0, 1]")
+        self.append_episode_progress_token = bool(append_episode_progress_token)
+        self.append_state_velocity_token = bool(append_state_velocity_token)
+        self.emit_action_dim_mask = bool(emit_action_dim_mask)
+        self.emit_action_time_mask = bool(emit_action_time_mask)
         self.image_augmentation = dict(image_augmentation or {})
         self._warned_unknown_robotype = False
     
@@ -365,17 +381,31 @@ class WALeRobotTransformsPretrain(WATransforms):
             action = action[None, :]
         if state.dim() == 1:
             state = state[None, :]
-        if state.dim() == 2 and state.shape[0] > 1:
-            state = state[:1]
+        if state.dim() != 2:
+            raise ValueError(f"Expected state with shape [history, dim], got {tuple(state.shape)}")
+        if state.shape[0] > self.state_history_tokens:
+            state = state[-self.state_history_tokens :]
+        elif state.shape[0] < self.state_history_tokens:
+            pad = state[:1].expand(self.state_history_tokens - state.shape[0], -1)
+            state = torch.cat([pad, state], dim=0)
+
+        action_valid = torch.ones(action.shape[0], dtype=torch.bool, device=action.device)
+        if self.emit_action_time_mask and "action_is_pad" in data_dict:
+            action_is_pad = torch.as_tensor(data_dict["action_is_pad"], device=action.device).flatten().bool()
+            action_valid = ~action_is_pad[: action.shape[0]]
 
         if action.shape[0] != self.num_frames:
             t = int(self.num_frames)
             cur_t = int(action.shape[0])
             if cur_t >= t:
                 action = action[:t]
+                action_valid = action_valid[:t]
             else:
                 pad = torch.zeros((t - cur_t, action.shape[1]), dtype=action.dtype, device=action.device)
                 action = torch.cat([action, pad], dim=0)
+                action_valid = torch.cat(
+                    [action_valid, torch.zeros(t - cur_t, dtype=torch.bool, device=action.device)]
+                )
                 
         base = self._get_delta_mask(embodiment_id)
         assert base is not None, f"embodiment_id {embodiment_id} not found in delta_mask_by_embodiment_id"
@@ -403,7 +433,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         idx = torch.nonzero(mask_t, as_tuple=False).flatten()
         delta = action.clone()
         if idx.numel() > 0:
-            delta[:, idx] = action[:, idx] - state[:, idx]
+            delta[:, idx] = action[:, idx] - state[-1:, idx]
 
         def _to_1d(x, device):
             return torch.as_tensor(x, dtype=torch.float32, device=device).flatten()
@@ -440,6 +470,28 @@ class WALeRobotTransformsPretrain(WATransforms):
             device=action.device,
         )
 
+        if self.is_train and self.state_history_dropout_prob > 0.0 and norm_state.shape[0] > 1:
+            drop = torch.rand(norm_state.shape[0] - 1, device=norm_state.device) < self.state_history_dropout_prob
+            norm_state[:-1] = torch.where(drop[:, None], norm_state[-1:], norm_state[:-1])
+
+        state_tokens = [norm_state]
+        if self.append_state_velocity_token:
+            state_tokens.append(norm_state[-1:] - norm_state[:1])
+        if self.append_episode_progress_token:
+            progress = torch.as_tensor(
+                data_dict.get("episode_progress", 0.0),
+                dtype=norm_state.dtype,
+                device=norm_state.device,
+            ).clamp(0.0, 1.0)
+            phase = torch.zeros((1, d), dtype=norm_state.dtype, device=norm_state.device)
+            phase[0, 0] = progress * 2.0 - 1.0
+            if d > 1:
+                phase[0, 1] = torch.sin(progress * (2.0 * torch.pi))
+            if d > 2:
+                phase[0, 2] = torch.cos(progress * (2.0 * torch.pi))
+            state_tokens.append(phase)
+        norm_state = torch.cat(state_tokens, dim=0)
+
         prompt_embeds = self._build_prompt_embeds(data_dict)
 
         out = {}
@@ -451,6 +503,12 @@ class WALeRobotTransformsPretrain(WATransforms):
         out["action"] = norm_delta
         out["state"] = norm_state
         out["embodiment_id"] = torch.tensor(int(embodiment_id), dtype=torch.long)
+        if self.emit_action_dim_mask:
+            action_dim_mask = torch.zeros(d, dtype=torch.bool, device=action.device)
+            action_dim_mask[:effective_dim] = True
+            out["action_dim_mask"] = action_dim_mask
+        if self.emit_action_time_mask:
+            out["action_time_mask"] = action_valid
         dim = out["action"].shape[-1]
         if self.emit_action_denorm_scale:
             scale = torch.ones(dim, dtype=torch.float32, device=action.device)

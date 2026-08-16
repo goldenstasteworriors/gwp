@@ -21,6 +21,18 @@ class CasualWATrainerMoT(Trainer):
         self.state_repeats = model_config.get("state_repeats", 1)
         self.action_dim = int(model_config.get("action_dim", 14))
         self.num_embodiments = int(model_config.get("num_embodiments", 1))
+        self.visual_loss_weight = float(model_config.get("visual_loss_weight", 1.0))
+        self.action_loss_weight = float(model_config.get("action_loss_weight", 1.0))
+        self.action_temporal_weight_mode = str(
+            model_config.get("action_temporal_weight_mode", "uniform")
+        )
+        if self.action_temporal_weight_mode not in {"uniform", "linear", "quadratic"}:
+            raise ValueError(
+                "action_temporal_weight_mode must be uniform, linear, or quadratic; "
+                f"got {self.action_temporal_weight_mode!r}"
+            )
+        self.action_smoothness_weight = float(model_config.get("action_smoothness_weight", 0.0))
+        self.action_terminal_weight = float(model_config.get("action_terminal_weight", 0.0))
 
         vae_pretrained = model_config.get("vae_pretrained", os.path.join(pretrained, "vae"))
         vae_dtype = model_config.get("vae_dtype", torch.float32)
@@ -109,8 +121,22 @@ class CasualWATrainerMoT(Trainer):
             num_latent_frames = visual_latents.shape[2]
             latent_height = visual_latents.shape[-2]
             latent_width = visual_latents.shape[-1]
-            ref_images = batch_dict["ref_images"][:, :1]
-            ref_latents = self.forward_vae(ref_images)
+            ref_images = batch_dict["ref_images"]
+            all_ref_latents = self.forward_vae(ref_images)
+            ref_masks = batch_dict.get("ref_masks")
+            if ref_masks is None:
+                num_clean_latents = 1
+            else:
+                ref_counts = ref_masks.reshape(bs, ref_masks.shape[2], -1)[:, :, 0].sum(dim=1).long()
+                if not torch.equal(ref_counts, ref_counts[:1].expand_as(ref_counts)):
+                    raise ValueError(
+                        "All samples in a batch must use the same number of visual history latents"
+                    )
+                num_clean_latents = int(ref_counts[0].item())
+            if not 1 <= num_clean_latents < num_latent_frames:
+                raise ValueError(
+                    f"Expected 1 <= clean visual latents < {num_latent_frames}, got {num_clean_latents}"
+                )
             first_frame_mask = torch.ones(
                 bs,
                 1,
@@ -120,19 +146,24 @@ class CasualWATrainerMoT(Trainer):
                 dtype=visual_latents.dtype,
                 device=visual_latents.device,
             )
-            first_frame_mask[:, :, 0] = 0
-            insert_noisy_latents = (1 - first_frame_mask) * ref_latents + first_frame_mask * noisy_latents
+            first_frame_mask[:, :, :num_clean_latents] = 0
+            insert_noisy_latents = (
+                (1 - first_frame_mask) * all_ref_latents
+                + first_frame_mask * noisy_latents
+            )
 
         insert_noisy_latents = insert_noisy_latents.to(self.dtype)
         num_state_tokens = state.shape[1]
         num_action_tokens = action.shape[1]
         noisy_action = noisy_action.to(self.dtype)
         state = state.to(self.dtype)
-        ref_latents = insert_noisy_latents[:, :, :1]
-        noisy_latents = insert_noisy_latents[:, :, 1:]
+        if not self.expand_timesteps:
+            num_clean_latents = 1
+        ref_latents = insert_noisy_latents[:, :, :num_clean_latents]
+        noisy_latents = insert_noisy_latents[:, :, num_clean_latents:]
         frame_per_tokens = first_frame_mask.shape[-1] * first_frame_mask.shape[-2] // 4
         num_latent_tokens = frame_per_tokens * first_frame_mask.shape[2]
-        num_clean_latent_tokens = frame_per_tokens
+        num_clean_latent_tokens = frame_per_tokens * num_clean_latents
         timestep = torch.zeros(
             bs,
             num_state_tokens + num_action_tokens + num_latent_tokens,
@@ -157,10 +188,60 @@ class CasualWATrainerMoT(Trainer):
 
         visual_loss = ((visual_pred.float() - visual_target.float()) * first_frame_mask).pow(2).mean()
 
-        action_loss = (action_pred.float() - action_target.float()).pow(2).mean()
+        action_error = (action_pred.float() - action_target.float()).pow(2)
+        action_dim_mask = batch_dict.get("action_dim_mask")
+        if action_dim_mask is None:
+            action_dim_mask = torch.ones_like(action_error[:, 0], dtype=torch.bool)
+        else:
+            action_dim_mask = action_dim_mask.to(action_error.device).bool()
+        action_time_mask = batch_dict.get("action_time_mask")
+        if action_time_mask is None:
+            action_time_mask = torch.ones_like(action_error[:, :, 0], dtype=torch.bool)
+        else:
+            action_time_mask = action_time_mask.to(action_error.device).bool()
+
+        action_steps = action_error.shape[1]
+        progress = torch.linspace(0.0, 1.0, action_steps, device=action_error.device)
+        if self.action_temporal_weight_mode == "linear":
+            temporal_weight = 0.5 + progress
+        elif self.action_temporal_weight_mode == "quadratic":
+            temporal_weight = 0.25 + progress.square()
+        else:
+            temporal_weight = torch.ones_like(progress)
+        temporal_weight = temporal_weight / temporal_weight.mean()
+        loss_weight = (
+            action_time_mask[:, :, None]
+            * action_dim_mask[:, None, :]
+            * temporal_weight[None, :, None]
+        ).to(action_error.dtype)
+        action_loss = (action_error * loss_weight).sum() / loss_weight.sum().clamp_min(1.0)
+
+        pred_clean_action = noisy_action.float() - action_sigma.float() * action_pred.float()
+        if self.action_smoothness_weight > 0.0 and action_steps > 1:
+            pred_velocity = pred_clean_action[:, 1:] - pred_clean_action[:, :-1]
+            target_velocity = action.float()[:, 1:] - action.float()[:, :-1]
+            velocity_error = (pred_velocity - target_velocity).pow(2)
+            velocity_mask = (
+                action_time_mask[:, 1:]
+                & action_time_mask[:, :-1]
+            )[:, :, None] & action_dim_mask[:, None, :]
+            velocity_mask = velocity_mask.to(velocity_error.dtype)
+            smoothness_loss = (velocity_error * velocity_mask).sum() / velocity_mask.sum().clamp_min(1.0)
+            action_loss = action_loss + self.action_smoothness_weight * smoothness_loss
+
+        if self.action_terminal_weight > 0.0:
+            last_valid = action_time_mask.long().sum(dim=1).sub(1).clamp_min(0)
+            batch_indices = torch.arange(bs, device=action_error.device)
+            terminal_error = (
+                pred_clean_action[batch_indices, last_valid]
+                - action.float()[batch_indices, last_valid]
+            ).pow(2)
+            terminal_mask = action_dim_mask.to(terminal_error.dtype)
+            terminal_loss = (terminal_error * terminal_mask).sum() / terminal_mask.sum().clamp_min(1.0)
+            action_loss = action_loss + self.action_terminal_weight * terminal_loss
         return {
-            "visual_loss": visual_loss,
-            "action_loss": action_loss,
+            "visual_loss": visual_loss * self.visual_loss_weight,
+            "action_loss": action_loss * self.action_loss_weight,
         }
 
     def forward_vae(self, images):
