@@ -64,6 +64,7 @@ class Trainer:
         checkpoint_total_limit: int = -1,
         checkpoint_keeps: list[int] | None = None,
         checkpoint_save_optimizer: bool = True,
+        checkpoint_weights_only: bool = False,
         checkpoint_safe_serialization: bool = False,
         checkpoint_strict: bool = True,
         activation_checkpointing: bool = False,
@@ -92,6 +93,7 @@ class Trainer:
             checkpoint_total_limit: Max number of checkpoints to retain; older are pruned.
             checkpoint_keeps: Specific epoch/step identifiers to keep when pruning.
             checkpoint_save_optimizer: Save optimizer states only for the latest checkpoint when False.
+            checkpoint_weights_only: Remove distributed optimizer/restart state after each save.
             checkpoint_safe_serialization: Use safetensors for model weights when True.
             checkpoint_strict: Strict key matching when loading model weights.
             activation_checkpointing: Enable activation checkpoint wrapping for selected classes.
@@ -163,6 +165,7 @@ class Trainer:
         self.checkpoint_total_limit = checkpoint_total_limit
         self.checkpoint_keeps = checkpoint_keeps
         self.checkpoint_save_optimizer = checkpoint_save_optimizer
+        self.checkpoint_weights_only = checkpoint_weights_only
         self.checkpoint_safe_serialization = checkpoint_safe_serialization
         self.checkpoint_strict = checkpoint_strict
         self.activation_checkpointing = activation_checkpointing
@@ -733,6 +736,30 @@ class Trainer:
                 self.accelerator.save_state(output_dir, exclude_frozen_parameters=True)
             else:
                 self.accelerator.save_state(output_dir)
+            self.accelerator.wait_for_everyone()
+            if self.checkpoint_weights_only and self.is_main_process:
+                self._remove_checkpoint_restart_state(output_dir)
+            self.accelerator.wait_for_everyone()
+
+    def _remove_checkpoint_restart_state(self, output_dir: str) -> None:
+        """Keep exported model weights while dropping large restart-only state."""
+        if self.distributed_type == DistributedType.DEEPSPEED:
+            restart_state = os.path.join(output_dir, 'pytorch_model')
+            if os.path.isdir(restart_state):
+                self.logger.info('Remove checkpoint restart state {}'.format(restart_state))
+                shutil.rmtree(restart_state)
+            return
+
+        for name in os.listdir(output_dir):
+            if name.startswith(('optimizer', 'scheduler', 'random_states')) or name in {
+                'scaler.pt',
+            }:
+                path = os.path.join(output_dir, name)
+                self.logger.info('Remove checkpoint restart state {}'.format(path))
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                elif os.path.isfile(path):
+                    os.remove(path)
 
     def save_model_hook(self, models: list[Module], weights: list[dict[str, Tensor]], output_dir: str) -> None:
         """Customize how model weights are saved by Accelerate.
