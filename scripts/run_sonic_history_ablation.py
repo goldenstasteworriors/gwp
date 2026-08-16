@@ -18,6 +18,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+TASK_PROMPT = "Pick up the pipette and keep holding it firmly."
 STEP_RE = re.compile(r"Step\[(?P<step>\d+)/\d+\].*?total_loss: (?P<loss>[-+.\deE]+)")
 CHECKPOINT_RE = re.compile(r"checkpoint_.*_step_(\d+)$")
 
@@ -163,13 +164,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=PROJECT_ROOT / "outputs" / "sonic_pipette_history_ablation_20260817",
+        default=PROJECT_ROOT / "outputs" / "sonic_pipette_pick_hold_history_ablation_20260817",
     )
     parser.add_argument(
         "--dataset",
         type=Path,
-        default=Path("/workspace/WM/datasets/8_14_shake_beaker_1_success_left13_all_pipette_hold_v2"),
+        default=Path("/workspace/WM/datasets/8_14_shake_beaker_1_success_left13_all_pipette_hold_v3"),
     )
+    parser.add_argument("--prompt", default=TASK_PROMPT)
     parser.add_argument("--max-steps", type=int, default=1500)
     parser.add_argument("--min-convergence-step", type=int, default=1000)
     parser.add_argument("--checkpoint-interval", type=int, default=250)
@@ -191,6 +193,48 @@ def load_state(path: Path) -> dict:
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
     return {"completed": {}, "failed": {}, "started_at": time.time()}
+
+
+def validate_prompt_assets(dataset: Path, prompt: str) -> None:
+    """Fail closed if metadata, task lookup, and cached embeddings disagree."""
+    if not prompt.strip():
+        raise ValueError("The task prompt must not be empty")
+
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    dataset_prompt = info.get("task_prompt")
+    if dataset_prompt != prompt:
+        raise ValueError(f"Dataset task_prompt mismatch: {dataset_prompt!r} != {prompt!r}")
+
+    import pyarrow.parquet as pq
+
+    task_table = pq.read_table(dataset / "meta" / "tasks.parquet")
+    task_column = next(
+        (name for name in ("task", "name", "__index_level_0__") if name in task_table.column_names),
+        None,
+    )
+    if task_column is None:
+        raise KeyError(f"No task text column in {dataset / 'meta' / 'tasks.parquet'}")
+    task_texts = {str(value) for value in task_table[task_column].to_pylist()}
+    if task_texts != {prompt}:
+        raise ValueError(f"Dataset task table mismatch: {sorted(task_texts)!r} != {[prompt]!r}")
+
+    provenance_path = dataset / "t5_embedding" / "prompt_provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    if provenance.get("prompt") != prompt:
+        raise ValueError(
+            f"T5 prompt provenance mismatch: {provenance.get('prompt')!r} != {prompt!r}"
+        )
+    episode_indices = provenance.get("episode_indices")
+    if not isinstance(episode_indices, list) or not episode_indices:
+        raise ValueError(f"No episode_indices recorded in {provenance_path}")
+    missing = [
+        index
+        for index in episode_indices
+        if not (dataset / "t5_embedding" / f"episode_{int(index):06d}.pt").is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(f"Missing prompt embeddings for episodes: {missing}")
 
 
 def read_losses(log_path: Path) -> list[tuple[int, float]]:
@@ -270,9 +314,18 @@ def job_environment(args: argparse.Namespace, experiment: Experiment, gpu_ids: s
 def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) -> RunningJob:
     output_dir = args.output_root / experiment.name
     output_dir.mkdir(parents=True, exist_ok=True)
+    experiment_path = output_dir / "experiment.json"
     write_json(
-        output_dir / "experiment.json",
-        {"name": experiment.name, "description": experiment.description, "env": experiment.env},
+        experiment_path,
+        {
+            "name": experiment.name,
+            "description": experiment.description,
+            "env": experiment.env,
+            "dataset": str(args.dataset),
+            "prompt": args.prompt,
+            "training_episodes": list(range(20)),
+            "evaluation_episodes": [20, 21, 22, 23],
+        },
     )
     train_log = (output_dir / "launcher.log").open("a", encoding="utf-8")
     train_process = subprocess.Popen(
@@ -309,9 +362,11 @@ def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) ->
             "--project",
             "gigaworld_lab",
             "--run-id",
-            f"sonic-history-{experiment.name}-20260817",
+            f"sonic-pipette-pick-hold-history-{experiment.name}-20260817",
             "--run-name",
-            f"sonic-history-{experiment.name}-20260817",
+            f"sonic-pipette-pick-hold-history-{experiment.name}-20260817",
+            "--config-json",
+            str(experiment_path),
         ],
         cwd=PROJECT_ROOT,
         env=wandb_env,
@@ -372,7 +427,7 @@ def export_inference_model(args: argparse.Namespace, job: RunningJob) -> Path:
         "base_model": str(PROJECT_ROOT / "weights" / "Wan2.2-TI2V-5B-Diffusers"),
         "norm_stats": "norm_stats.json",
         "prompt_embedding": "prompt_embedding.pt",
-        "prompt": "Pick up the pipette and hold it securely.",
+        "prompt": args.prompt,
         "evaluation_dataset": str(args.dataset),
         "evaluation_episodes": [20, 21, 22, 23],
         "training_episodes": list(range(20)),
@@ -459,6 +514,7 @@ def main() -> None:
     args = parse_args()
     args.output_root = args.output_root.expanduser().resolve()
     args.dataset = args.dataset.expanduser().resolve()
+    validate_prompt_assets(args.dataset, args.prompt)
     if "WANDB_API_KEY" not in os.environ:
         raise RuntimeError("WANDB_API_KEY must be present in the scheduler environment")
     args.output_root.mkdir(parents=True, exist_ok=True)
