@@ -258,8 +258,11 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             )
         if image is None and image_embeds is None:
             raise ValueError("Provide either `image` or `prompt_embeds`. Cannot leave both `image` and `image_embeds` undefined.")
-        if image is not None and not isinstance(image, torch.Tensor) and not isinstance(image, PIL.Image.Image):
-            raise ValueError(f"`image` has to be of type `torch.Tensor` or `PIL.Image.Image` but is {type(image)}")
+        if image is not None and not isinstance(image, (torch.Tensor, PIL.Image.Image, list, tuple)):
+            raise ValueError(
+                "`image` has to be a tensor, PIL image, or temporal list of images, "
+                f"but is {type(image)}"
+            )
         if height % 16 != 0 or width % 16 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 16 but are {height} and {width}.")
 
