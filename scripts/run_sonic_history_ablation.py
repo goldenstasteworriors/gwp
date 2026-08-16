@@ -195,6 +195,28 @@ def load_state(path: Path) -> dict:
     return {"completed": {}, "failed": {}, "started_at": time.time()}
 
 
+def _pid_matches_training_output(pid: int, output_dir: Path) -> bool:
+    """Avoid treating a recycled PID or an unrelated training process as ours."""
+    proc = Path("/proc") / str(pid)
+    try:
+        cmdline = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        environ = (proc / "environ").read_bytes().split(b"\0")
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return False
+    expected = f"GWP05_PROJECT_DIR={output_dir}".encode()
+    return "scripts/train.py" in cmdline and expected in environ
+
+
+def active_saved_jobs(state: dict, output_root: Path) -> list[dict]:
+    active = []
+    for record in state.get("running", []):
+        name = str(record.get("name", ""))
+        pid = int(record.get("pid", -1))
+        if name and pid > 0 and _pid_matches_training_output(pid, output_root / name):
+            active.append({**record, "pid": pid, "name": name})
+    return active
+
+
 def validate_prompt_assets(dataset: Path, prompt: str) -> None:
     """Fail closed if metadata, task lookup, and cached embeddings disagree."""
     if not prompt.strip():
@@ -482,6 +504,25 @@ def run_benchmark(args: argparse.Namespace, manifest: Path, device: str) -> Path
     return output
 
 
+def recover_exported_models(args: argparse.Namespace, state: dict) -> None:
+    """Resume benchmark/finalization without retraining an already exported model."""
+    for experiment in EXPERIMENTS:
+        export_dir = args.output_root / experiment.name / "inference_model"
+        manifest = export_dir / "manifest.json"
+        benchmark = export_dir / "benchmark.json"
+        if not manifest.is_file():
+            continue
+        if not benchmark.is_file():
+            benchmark = run_benchmark(args, manifest, "cuda:0")
+        state["completed"][experiment.name] = {
+            "manifest": str(manifest),
+            "benchmark": str(benchmark),
+            "completed_at": time.time(),
+            "recovered_from_export": True,
+        }
+        state["failed"].pop(experiment.name, None)
+
+
 def refresh_results(output_root: Path) -> None:
     rows = []
     for experiment in EXPERIMENTS:
@@ -524,6 +565,16 @@ def main() -> None:
     args.output_root.mkdir(parents=True, exist_ok=True)
     state_path = args.output_root / "scheduler_state.json"
     state = load_state(state_path)
+    active = active_saved_jobs(state, args.output_root)
+    if active:
+        details = ", ".join(f"{item['name']} (pid={item['pid']})" for item in active)
+        raise RuntimeError(
+            "Refusing to launch duplicate training while saved jobs are still active: " + details
+        )
+    state["running"] = []
+    recover_exported_models(args, state)
+    refresh_results(args.output_root)
+    write_json(state_path, state)
     write_json(
         args.output_root / "experiment_registry.json",
         [
