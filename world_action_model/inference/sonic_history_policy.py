@@ -9,6 +9,7 @@ from typing import Sequence
 import numpy as np
 import torch
 import torch.nn.functional as torch_F
+from accelerate import init_empty_weights
 from diffusers.models import AutoencoderKLWan
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from PIL import Image
@@ -64,6 +65,41 @@ def _center_crop_resize(image: Image.Image, width: int, height: int) -> Image.Im
     return vision_F.crop(image, top, left, height, width)
 
 
+def _load_transformer_checkpoint(path: Path, dtype: torch.dtype):
+    from safetensors.torch import load_file
+
+    state_dict = {}
+    weight_files = sorted(path.glob("*.safetensors")) + sorted(path.glob("*.bin"))
+    if not weight_files:
+        raise FileNotFoundError(f"No transformer weights found under {path}")
+    for weight_file in weight_files:
+        if weight_file.suffix == ".safetensors":
+            checkpoint = load_file(str(weight_file), device="cpu")
+        else:
+            checkpoint = torch.load(weight_file, map_location="cpu", weights_only=True)
+        if "model" in checkpoint and isinstance(checkpoint["model"], dict):
+            checkpoint = checkpoint["model"]
+        if "state_dict" in checkpoint and isinstance(checkpoint["state_dict"], dict):
+            checkpoint = checkpoint["state_dict"]
+        state_dict.update(checkpoint)
+
+    # Activation checkpoint wrappers are transparent during training, but
+    # DeepSpeed includes their private module segment in saved parameter keys.
+    state_dict = {
+        key.replace("._checkpoint_wrapped_module.", "."): value.to(dtype=dtype)
+        for key, value in state_dict.items()
+    }
+    with init_empty_weights():
+        transformer = CasualWorldActionTransformer_MoT.from_config(path)
+    missing, unexpected = transformer.load_state_dict(state_dict, strict=False, assign=True)
+    if missing or unexpected:
+        raise RuntimeError(
+            f"Checkpoint/model mismatch for {path}: missing={missing[:20]}, "
+            f"unexpected={unexpected[:20]}"
+        )
+    return transformer.eval()
+
+
 class SonicHistoryPolicy:
     """Inference-only wrapper for one exported SONIC history experiment."""
 
@@ -86,10 +122,7 @@ class SonicHistoryPolicy:
             subfolder="vae",
             torch_dtype=self.dtype,
         )
-        transformer = CasualWorldActionTransformer_MoT.from_pretrained(
-            checkpoint,
-            torch_dtype=self.dtype,
-        ).eval()
+        transformer = _load_transformer_checkpoint(checkpoint, self.dtype)
         scheduler = FlowMatchEulerDiscreteScheduler(
             shift=float(self.manifest.get("action_flow_shift", 5.0))
         )
