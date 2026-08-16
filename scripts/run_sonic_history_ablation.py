@@ -291,6 +291,37 @@ def latest_checkpoint(output_dir: Path) -> tuple[int, Path] | None:
     return max(candidates, default=None, key=lambda item: item[0])
 
 
+def checkpoint_is_complete(checkpoint_dir: Path) -> bool:
+    """Return true only after the trainer has finished all checkpoint writes.
+
+    The checkpoint directory is created before DeepSpeed optimizer shards and
+    inference weights are written.  Treating directory creation as completion
+    can terminate a converged job in the middle of its save and destroy the
+    only retained inference checkpoint.
+    """
+    required_files = (
+        checkpoint_dir / "transformer" / "config.json",
+        checkpoint_dir / "transformer" / "diffusion_pytorch_model.bin",
+        checkpoint_dir / "scheduler.bin",
+        checkpoint_dir / "custom_checkpoint_0.pkl",
+    )
+    if not all(path.is_file() and path.stat().st_size > 0 for path in required_files):
+        return False
+    return any(
+        path.is_file() and path.stat().st_size > 0
+        for path in checkpoint_dir.glob("random_states_*.pkl")
+    )
+
+
+def latest_complete_checkpoint(output_dir: Path) -> tuple[int, Path] | None:
+    candidates = []
+    for path in (output_dir / "models").glob("checkpoint_*_step_*"):
+        match = CHECKPOINT_RE.match(path.name)
+        if match and checkpoint_is_complete(path):
+            candidates.append((int(match.group(1)), path))
+    return max(candidates, default=None, key=lambda item: item[0])
+
+
 def stop_process_group(process: subprocess.Popen, timeout: float = 20.0) -> None:
     if process.poll() is not None:
         return
@@ -417,9 +448,9 @@ def finish_job_logging(job: RunningJob) -> None:
 
 
 def export_inference_model(args: argparse.Namespace, job: RunningJob) -> Path:
-    latest = latest_checkpoint(job.output_dir)
+    latest = latest_complete_checkpoint(job.output_dir)
     if latest is None:
-        raise RuntimeError(f"No checkpoint found for {job.experiment.name}")
+        raise RuntimeError(f"No complete checkpoint found for {job.experiment.name}")
     checkpoint_step, checkpoint_dir = latest
     transformer_source = checkpoint_dir / "transformer"
     if not transformer_source.is_dir():
@@ -523,6 +554,49 @@ def recover_exported_models(args: argparse.Namespace, state: dict) -> None:
         state["failed"].pop(experiment.name, None)
 
 
+def recover_complete_checkpoints(args: argparse.Namespace, state: dict) -> None:
+    """Export and benchmark a converged checkpoint left by an interrupted scheduler."""
+    for experiment in EXPERIMENTS:
+        if experiment.name in state["completed"]:
+            continue
+        output_dir = args.output_root / experiment.name
+        checkpoint = latest_complete_checkpoint(output_dir)
+        if checkpoint is None:
+            continue
+        checkpoint_step, _ = checkpoint
+        losses = read_losses(output_dir / "launcher.log")
+        converged = checkpoint_step >= args.min_convergence_step and curve_has_converged(
+            losses, args.min_convergence_step
+        )
+        reached_limit = checkpoint_step >= args.max_steps
+        if not (converged or reached_limit):
+            continue
+        reason = (
+            f"rolling_curve_converged_at_step_{losses[-1][0]}"
+            if converged
+            else "max_steps"
+        )
+        recovered_job = RunningJob(
+            experiment=experiment,
+            gpu_ids="0,1",
+            output_dir=output_dir,
+            train_process=None,
+            train_log=None,
+            wandb_process=None,
+            wandb_log=None,
+            convergence_reason=reason,
+        )
+        manifest = export_inference_model(args, recovered_job)
+        benchmark = run_benchmark(args, manifest, "cuda:0")
+        state["completed"][experiment.name] = {
+            "manifest": str(manifest),
+            "benchmark": str(benchmark),
+            "completed_at": time.time(),
+            "recovered_from_checkpoint": True,
+        }
+        state["failed"].pop(experiment.name, None)
+
+
 def refresh_results(output_root: Path) -> None:
     rows = []
     for experiment in EXPERIMENTS:
@@ -576,6 +650,7 @@ def main() -> None:
         )
     state["running"] = []
     recover_exported_models(args, state)
+    recover_complete_checkpoints(args, state)
     refresh_results(args.output_root)
     write_json(state_path, state)
     write_json(
@@ -607,7 +682,7 @@ def main() -> None:
                 if job.train_process.poll() is not None:
                     continue
                 losses = read_losses(job.output_dir / "launcher.log")
-                checkpoint = latest_checkpoint(job.output_dir)
+                checkpoint = latest_complete_checkpoint(job.output_dir)
                 if (
                     checkpoint is not None
                     and checkpoint[0] >= args.min_convergence_step
@@ -621,7 +696,10 @@ def main() -> None:
         for job in running:
             return_code = job.train_process.poll()
             finish_job_logging(job)
-            if return_code not in (0, -signal.SIGTERM) and latest_checkpoint(job.output_dir) is None:
+            if (
+                return_code not in (0, -signal.SIGTERM)
+                and latest_complete_checkpoint(job.output_dir) is None
+            ):
                 state["failed"][job.experiment.name] = {
                     "return_code": return_code,
                     "time": time.time(),
