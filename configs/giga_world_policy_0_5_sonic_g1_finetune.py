@@ -58,7 +58,12 @@ config = dict(
             "GWP_ACCELERATE_EXECUTABLE",
             os.path.join(sys.prefix, "bin", "accelerate"),
         ),
-        deepspeed_config=dict(deepspeed_config_file="accelerate_configs/zero2.json"),
+        deepspeed_config=dict(
+            deepspeed_config_file=_env(
+                "GWP_DEEPSPEED_CONFIG",
+                "accelerate_configs/zero2.json",
+            )
+        ),
         until_completion=False,
     ),
     dataloaders=dict(
