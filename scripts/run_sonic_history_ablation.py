@@ -497,6 +497,10 @@ def refresh_results(output_root: Path) -> None:
                 "post5_horizon_mse": post.get("horizon_mse"),
                 "post5_jitter_mse": result.get("post5_jitter_mse"),
                 "post5_stall_rate": post.get("stall"),
+                "post5_horizon_stall_rate": post.get("horizon_stall"),
+                "post5_velocity_mse": post.get("velocity_mse"),
+                "post5_acceleration_mse": post.get("acceleration_mse"),
+                "post5_excess_jitter_energy": post.get("excess_jitter_energy"),
                 "repeat_history_degradation": post.get("repeat_history_degradation"),
                 "reverse_history_degradation": post.get("reverse_history_degradation"),
             }

@@ -44,6 +44,41 @@ def _mean(values) -> float | None:
     return float(np.mean(values)) if values else None
 
 
+def _trajectory_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, float | None]:
+    """Measure within-chunk motion, including high-frequency shake at dataset FPS."""
+    predicted_motion = float(np.linalg.norm(predicted[-1] - predicted[0]))
+    target_motion = float(np.linalg.norm(target[-1] - target[0]))
+    result: dict[str, float | None] = {
+        "horizon_movement_ratio": predicted_motion / max(target_motion, 1e-8),
+        "horizon_stall": float(target_motion > 1e-4 and predicted_motion < 0.2 * target_motion),
+        "velocity_mse": None,
+        "acceleration_mse": None,
+        "predicted_jitter_energy": None,
+        "target_jitter_energy": None,
+        "excess_jitter_energy": None,
+    }
+    if predicted.shape[0] >= 2:
+        predicted_velocity = np.diff(predicted, axis=0)
+        target_velocity = np.diff(target, axis=0)
+        result["velocity_mse"] = float(np.mean((predicted_velocity - target_velocity) ** 2))
+    if predicted.shape[0] >= 3:
+        predicted_acceleration = np.diff(predicted, n=2, axis=0)
+        target_acceleration = np.diff(target, n=2, axis=0)
+        predicted_energy = float(np.mean(predicted_acceleration**2))
+        target_energy = float(np.mean(target_acceleration**2))
+        result.update(
+            {
+                "acceleration_mse": float(
+                    np.mean((predicted_acceleration - target_acceleration) ** 2)
+                ),
+                "predicted_jitter_energy": predicted_energy,
+                "target_jitter_energy": target_energy,
+                "excess_jitter_energy": max(0.0, predicted_energy - target_energy),
+            }
+        )
+    return result
+
+
 def _summary(records: list[dict], prefix: str) -> dict:
     keys = (
         "first_step_mse",
@@ -51,6 +86,13 @@ def _summary(records: list[dict], prefix: str) -> dict:
         "terminal_mse",
         "movement_ratio",
         "stall",
+        "horizon_movement_ratio",
+        "horizon_stall",
+        "velocity_mse",
+        "acceleration_mse",
+        "predicted_jitter_energy",
+        "target_jitter_energy",
+        "excess_jitter_energy",
         "latency_s",
         "repeat_first_step_mse",
         "reverse_first_step_mse",
@@ -148,6 +190,7 @@ def main() -> None:
             "repeat_first_step_mse": None,
             "reverse_first_step_mse": None,
         }
+        row.update(_trajectory_metrics(predicted, valid_target))
 
         if row["split"] == "post5" and (len(state_offsets) > 1 or visual_history_frames > 1):
             repeated_states = states[-1:].expand_as(states)
@@ -195,6 +238,12 @@ def main() -> None:
         "evaluation_dataset": str(dataset_root),
         "episodes": episodes,
         "sample_stride": args.sample_stride,
+        "metric_notes": {
+            "jitter_mse": "Prediction-transition error between sparsely sampled benchmark calls.",
+            "acceleration_mse": "Within-chunk 50 Hz second-difference error against ground truth.",
+            "excess_jitter_energy": "Positive excess predicted second-difference energy over ground truth.",
+            "horizon_stall": "Predicted end-to-end chunk motion is below 20% of nontrivial ground-truth motion.",
+        },
         "all": _summary(records, ""),
         "pre5": _summary(pre, ""),
         "post5": _summary(post, ""),
