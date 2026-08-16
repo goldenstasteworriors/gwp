@@ -97,6 +97,14 @@ config = dict(
                 "accelerate_configs/zero2.json",
             )
         ),
+        save_config_path=_env(
+            "GWP_ACCELERATE_CONFIG_PATH",
+            os.path.join(project_dir, "accelerate_config.json"),
+        ),
+        save_hostfile_path=_env(
+            "GWP_ACCELERATE_HOSTFILE_PATH",
+            os.path.join(project_dir, "accelerate_hostfile"),
+        ),
         until_completion=False,
     ),
     dataloaders=dict(
