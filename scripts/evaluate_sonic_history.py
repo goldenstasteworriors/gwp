@@ -95,6 +95,10 @@ def _summary(records: list[dict], prefix: str) -> dict:
         "predicted_jitter_energy",
         "target_jitter_energy",
         "excess_jitter_energy",
+        "hold_horizon_mse",
+        "hold_terminal_mse",
+        "hold_horizon_stall",
+        "horizon_mse_vs_hold_ratio",
         "latency_s",
         "repeat_first_step_mse",
         "reverse_first_step_mse",
@@ -193,6 +197,23 @@ def main() -> None:
             "reverse_first_step_mse": None,
         }
         row.update(_trajectory_metrics(predicted, valid_target))
+        hold_prediction = np.broadcast_to(current_state, valid_target.shape)
+        hold_metrics = _trajectory_metrics(hold_prediction, valid_target)
+        hold_horizon_mse = float(np.mean((hold_prediction - valid_target) ** 2))
+        row.update(
+            {
+                "hold_horizon_mse": hold_horizon_mse,
+                "hold_terminal_mse": float(
+                    np.mean((hold_prediction[-1] - valid_target[-1]) ** 2)
+                ),
+                "hold_horizon_stall": hold_metrics["horizon_stall"],
+                "horizon_mse_vs_hold_ratio": (
+                    None
+                    if hold_horizon_mse <= 1e-8
+                    else row["horizon_mse"] / hold_horizon_mse
+                ),
+            }
+        )
 
         if row["split"] == "post5" and (len(state_offsets) > 1 or visual_history_frames > 1):
             repeated_states = states[-1:].expand_as(states)
@@ -245,6 +266,8 @@ def main() -> None:
             "acceleration_mse": "Within-chunk 50 Hz second-difference error against ground truth.",
             "excess_jitter_energy": "Positive excess predicted second-difference energy over ground truth.",
             "horizon_stall": "Predicted end-to-end chunk motion is below 20% of nontrivial ground-truth motion.",
+            "hold_horizon_mse": "MSE of a reference policy that holds the current joint state for the full chunk.",
+            "horizon_mse_vs_hold_ratio": "Policy horizon MSE divided by hold-policy MSE; below one beats stopping.",
         },
         "all": _summary(records, ""),
         "pre5": _summary(pre, ""),
