@@ -325,7 +325,13 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         else:
             latents = latents.to(device=device, dtype=dtype)
 
-        image = image.unsqueeze(2)  # [batch_size, channels, 1, height, width]
+        if image.ndim == 4:
+            image = image.unsqueeze(2)  # [batch_size, channels, 1, height, width]
+        elif image.ndim != 5:
+            raise ValueError(
+                "Expected preprocessed reference image(s) with shape [B,C,H,W] "
+                f"or [B,C,T,H,W], got {tuple(image.shape)}"
+            )
 
         if self.config.expand_timesteps:
             video_condition = image
@@ -354,8 +360,22 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         latent_condition = (latent_condition - latents_mean) * latents_std
 
         if self.config.expand_timesteps:
-            first_frame_mask = torch.ones(1, 1, num_latent_frames, latent_height, latent_width, dtype=dtype, device=device)
-            first_frame_mask[:, :, 0] = 0
+            num_ref_latents = latent_condition.shape[2]
+            if num_ref_latents >= num_latent_frames:
+                raise ValueError(
+                    f"Reference history produces {num_ref_latents} latent frames, "
+                    f"but num_frames={num_frames} only allocates {num_latent_frames}."
+                )
+            first_frame_mask = torch.ones(
+                1,
+                1,
+                num_latent_frames,
+                latent_height,
+                latent_width,
+                dtype=dtype,
+                device=device,
+            )
+            first_frame_mask[:, :, :num_ref_latents] = 0
             return latents, latent_condition, first_frame_mask, action
 
         mask_lat_size = torch.ones(batch_size, 1, num_frames, latent_height, latent_width)
@@ -503,7 +523,19 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
         # 5. Prepare latent variables
         num_channels_latents = self.vae.config.z_dim
-        image = self.video_processor.preprocess(image, height=height, width=width).to(device, dtype=torch.float32)
+        if isinstance(image, (list, tuple)):
+            if not image:
+                raise ValueError("image history must contain at least one frame")
+            processed_frames = [
+                self.video_processor.preprocess(frame, height=height, width=width)
+                for frame in image
+            ]
+            if any(frame.shape[0] != 1 for frame in processed_frames):
+                raise ValueError("Each visual history item must represent exactly one frame")
+            image = torch.stack([frame[0] for frame in processed_frames], dim=1).unsqueeze(0)
+        else:
+            image = self.video_processor.preprocess(image, height=height, width=width)
+        image = image.to(device, dtype=torch.float32)
         if last_image is not None:
             last_image = self.video_processor.preprocess(last_image, height=height, width=width).to(device, dtype=torch.float32)
         state = state.unsqueeze(0).to(device=device, dtype=self.dtype)
@@ -542,11 +574,12 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             raise NotImplementedError("The action-only fast path expects expand_timesteps=True.")
         num_state_tokens = state.shape[1]
         num_action_tokens = action.shape[1]
-        ref_latents_for_action = condition[:, :, :1].to(transformer_dtype)
-        empty_noisy_latents_for_action = condition[:, :, 1:1].to(transformer_dtype)
+        num_clean_latents = condition.shape[2]
+        ref_latents_for_action = condition.to(transformer_dtype)
+        empty_noisy_latents_for_action = condition[:, :, num_clean_latents:num_clean_latents].to(transformer_dtype)
         frame_per_tokens = first_frame_mask.shape[-1] * first_frame_mask.shape[-2] // 4
         num_latent_tokens = frame_per_tokens * first_frame_mask.shape[2]
-        num_clean_latent_tokens = frame_per_tokens
+        num_clean_latent_tokens = frame_per_tokens * num_clean_latents
         action_timestep_template = torch.zeros(
             1,
             num_state_tokens + num_action_tokens + num_latent_tokens,
