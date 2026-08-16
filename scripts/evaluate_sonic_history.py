@@ -49,7 +49,9 @@ def _trajectory_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, 
     predicted_motion = float(np.linalg.norm(predicted[-1] - predicted[0]))
     target_motion = float(np.linalg.norm(target[-1] - target[0]))
     result: dict[str, float | None] = {
-        "horizon_movement_ratio": predicted_motion / max(target_motion, 1e-8),
+        "horizon_movement_ratio": (
+            None if target_motion <= 1e-4 else predicted_motion / target_motion
+        ),
         "horizon_stall": float(target_motion > 1e-4 and predicted_motion < 0.2 * target_motion),
         "velocity_mse": None,
         "acceleration_mse": None,
@@ -174,7 +176,7 @@ def main() -> None:
         current_state = states[-1, :physical_dim].numpy()
         gt_motion = float(np.linalg.norm(valid_target[0] - current_state))
         pred_motion = float(np.linalg.norm(predicted[0] - current_state))
-        movement_ratio = pred_motion / max(gt_motion, 1e-8)
+        movement_ratio = None if gt_motion <= 1e-4 else pred_motion / gt_motion
 
         row = {
             "episode": episode,
