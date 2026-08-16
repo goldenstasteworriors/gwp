@@ -322,6 +322,32 @@ def latest_complete_checkpoint(output_dir: Path) -> tuple[int, Path] | None:
     return max(candidates, default=None, key=lambda item: item[0])
 
 
+def next_attempt_number(output_root: Path, experiment_name: str) -> int:
+    archive_root = output_root / "_failed_attempts"
+    archived = list(archive_root.glob(f"{experiment_name}_attempt_*"))
+    return len(archived) + 1
+
+
+def archive_incomplete_attempt(output_root: Path, experiment_name: str) -> Path | None:
+    """Move an interrupted partial-checkpoint attempt aside before a clean retry."""
+    output_dir = output_root / experiment_name
+    if not output_dir.is_dir():
+        return None
+    if latest_checkpoint(output_dir) is None or latest_complete_checkpoint(output_dir) is not None:
+        return None
+    attempt = next_attempt_number(output_root, experiment_name)
+    archive_root = output_root / "_failed_attempts"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    target = archive_root / (
+        f"{experiment_name}_attempt_{attempt:02d}_incomplete_checkpoint_{timestamp}"
+    )
+    if target.exists():
+        raise FileExistsError(target)
+    shutil.move(str(output_dir), str(target))
+    return target
+
+
 def stop_process_group(process: subprocess.Popen, timeout: float = 20.0) -> None:
     if process.poll() is not None:
         return
@@ -366,6 +392,8 @@ def job_environment(args: argparse.Namespace, experiment: Experiment, gpu_ids: s
 
 def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) -> RunningJob:
     output_dir = args.output_root / experiment.name
+    archived_attempt = archive_incomplete_attempt(args.output_root, experiment.name)
+    attempt = next_attempt_number(args.output_root, experiment.name)
     output_dir.mkdir(parents=True, exist_ok=True)
     experiment_path = output_dir / "experiment.json"
     write_json(
@@ -378,6 +406,8 @@ def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) ->
             "prompt": args.prompt,
             "training_episodes": list(range(20)),
             "evaluation_episodes": [20, 21, 22, 23],
+            "attempt": attempt,
+            "archived_previous_attempt": str(archived_attempt) if archived_attempt else None,
         },
     )
     train_log = (output_dir / "launcher.log").open("a", encoding="utf-8")
@@ -402,6 +432,10 @@ def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) ->
     wandb_log = (output_dir / "wandb_sync.log").open("a", encoding="utf-8")
     wandb_env = dict(os.environ)
     wandb_env["WANDB_DIR"] = str(wandb_dir)
+    wandb_suffix = "" if attempt == 1 else f"-attempt{attempt}"
+    wandb_run_id = (
+        f"sonic-pipette-pick-hold-history-{experiment.name}-20260817{wandb_suffix}"
+    )
     wandb_process = subprocess.Popen(
         [
             str(PROJECT_ROOT / ".venv-ppu" / "bin" / "python"),
@@ -415,9 +449,9 @@ def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) ->
             "--project",
             "gigaworld_lab",
             "--run-id",
-            f"sonic-pipette-pick-hold-history-{experiment.name}-20260817",
+            wandb_run_id,
             "--run-name",
-            f"sonic-pipette-pick-hold-history-{experiment.name}-20260817",
+            wandb_run_id,
             "--config-json",
             str(experiment_path),
         ],
