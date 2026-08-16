@@ -12,6 +12,8 @@ class EmbodimentSpecificLinear(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, num_categories: int = 1, dtype: torch.dtype = torch.float32):
         super().__init__()
         self.num_categories = int(num_categories)
+        self.input_dim = int(input_dim)
+        self.output_dim = int(output_dim)
         self.weight = nn.Parameter(torch.empty(self.num_categories, input_dim, output_dim, dtype=dtype))
         self.bias = nn.Parameter(torch.empty(self.num_categories, output_dim, dtype=dtype))
 
@@ -49,7 +51,7 @@ class EmbodimentSpecificLinear(nn.Module):
     def extra_repr(self):
         return (
             f"num_categories={self.num_categories}, "
-            f"input_dim={self.weight.shape[1]}, output_dim={self.weight.shape[2]}"
+            f"input_dim={self.input_dim}, output_dim={self.output_dim}"
         )
 
 
