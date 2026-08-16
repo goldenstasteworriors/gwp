@@ -820,7 +820,8 @@ class CasualWorldActionTransformer_MoT(
         post_patch_num_frames = num_frames // p_t
         post_patch_height = height // p_h
         post_patch_width = width // p_w
-        num_ref_tokens = post_patch_width * post_patch_height
+        ref_patch_frames = ref_latents.shape[2] // p_t
+        num_ref_tokens = post_patch_width * post_patch_height * ref_patch_frames
         num_future_tokens = visual_hidden_states.shape[1] - num_ref_tokens
         grid_info = None
         if future_latents is not None:

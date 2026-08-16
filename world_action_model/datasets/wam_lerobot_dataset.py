@@ -53,6 +53,7 @@ class WAMLeRobotDataset(BaseDataset):
         self.meta_name = meta_name
         self.kwargs = kwargs
         self.dataset = None
+        self._episode_lengths = {}
 
     @classmethod
     def load(cls, data_or_config: str | dict) -> BaseDataset:
@@ -124,6 +125,11 @@ class WAMLeRobotDataset(BaseDataset):
                 delta_timestamps=delta_timestamps,
                 **fast_kwargs,
             )
+            self._episode_lengths = {
+                int(row["episode_index"]): int(row["length"])
+                for row in self.dataset.meta.episodes
+                if row.get("episode_index") is not None and row.get("length") is not None
+            }
             if self.data_size is not None:
                 assert self.data_size == len(self.dataset)
             else:
@@ -198,6 +204,11 @@ class WAMLeRobotDataset(BaseDataset):
         return None
 
     def _get_metadata_data_size(self):
+        # The metadata total is for the complete repository.  Let the filtered
+        # FastLeRobotDataset determine its own length when an episode subset is
+        # requested, otherwise sampling can run past the filtered index table.
+        if self.kwargs.get("episodes") is not None:
+            return None
         for name in ('info.json', 'info.yaml', 'info.yml'):
             path = os.path.join(self.data_path, 'meta', name)
             if os.path.isfile(path):
@@ -218,6 +229,7 @@ class WAMLeRobotDataset(BaseDataset):
         self._fixed_t5_embedding = None
         self._t5_cache.clear()
         self._t5_cache_order.clear()
+        self._episode_lengths.clear()
         super().close()
 
     def __len__(self) -> int:
@@ -234,6 +246,20 @@ class WAMLeRobotDataset(BaseDataset):
         if self.meta_name is not None:
             assert self.meta_name not in data_dict
             data_dict[self.meta_name] = self.dataset.meta
+        episode_index = data_dict.get("episode_index")
+        frame_index = data_dict.get("frame_index")
+        if hasattr(episode_index, "item"):
+            episode_index = episode_index.item()
+        if hasattr(frame_index, "item"):
+            frame_index = frame_index.item()
+        try:
+            episode_length = self._episode_lengths[int(episode_index)]
+            data_dict["episode_progress"] = torch.tensor(
+                float(frame_index) / max(episode_length - 1, 1),
+                dtype=torch.float32,
+            )
+        except (KeyError, TypeError, ValueError):
+            pass
         self._load_t5_embedding(data_dict)
         return data_dict
 
