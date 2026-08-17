@@ -706,6 +706,8 @@ def export_inference_model(args: argparse.Namespace, job: RunningJob) -> Path:
 
 def run_benchmark(args: argparse.Namespace, manifest: Path, device: str) -> Path:
     output = manifest.parent / "benchmark.json"
+    log_path = manifest.parent / "benchmark.log"
+    pending_log_path = manifest.parent / "benchmark.pending.log"
     command = [
         str(PROJECT_ROOT / ".venv-ppu" / "bin" / "python"),
         str(PROJECT_ROOT / "scripts" / "evaluate_sonic_history.py"),
@@ -720,8 +722,9 @@ def run_benchmark(args: argparse.Namespace, manifest: Path, device: str) -> Path
         "--max-samples-per-episode",
         str(args.benchmark_max_per_episode),
     ]
-    with (manifest.parent / "benchmark.log").open("a", encoding="utf-8") as stream:
+    with pending_log_path.open("w", encoding="utf-8") as stream:
         subprocess.run(command, cwd=PROJECT_ROOT, stdout=stream, stderr=subprocess.STDOUT, check=True)
+    pending_log_path.replace(log_path)
     return output
 
 
@@ -820,6 +823,55 @@ def refresh_results(output_root: Path) -> None:
         writer.writeheader()
         writer.writerows(rows)
     write_json(output_root / "results.json", rows)
+
+
+def benchmark_matches_config(args: argparse.Namespace, path: Path) -> bool:
+    """Check both requested sampling parameters and whole-episode tail coverage."""
+    if not path.is_file():
+        return False
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+        if int(result.get("sample_stride", -1)) != args.benchmark_stride:
+            return False
+        if int(result.get("max_samples_per_episode", -1)) != args.benchmark_max_per_episode:
+            return False
+        if args.benchmark_max_per_episode:
+            return True
+        coverage = result["episode_coverage"]
+        for episode in result["episodes"]:
+            row = coverage[str(episode)]
+            tail_gap = row["tail_gap_frames"]
+            if tail_gap is None or not 0 <= int(tail_gap) < args.benchmark_stride:
+                return False
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return True
+
+
+def ensure_benchmarks_match_config(
+    args: argparse.Namespace,
+    state: dict,
+    state_path: Path,
+) -> None:
+    """Re-evaluate old truncated benchmarks after all GPU training is finished."""
+    for experiment in EXPERIMENTS:
+        export_dir = args.output_root / experiment.name / "inference_model"
+        manifest = export_dir / "manifest.json"
+        benchmark = export_dir / "benchmark.json"
+        if not manifest.is_file():
+            raise FileNotFoundError(
+                f"Cannot finish benchmark audit without exported manifest: {manifest}"
+            )
+        if not benchmark_matches_config(args, benchmark):
+            benchmark = run_benchmark(args, manifest, "cuda:0")
+            state["completed"][experiment.name].update(
+                {
+                    "benchmark": str(benchmark),
+                    "rebenchmarked_at": time.time(),
+                }
+            )
+            write_json(state_path, {**state, "running": []})
+            refresh_results(args.output_root)
 
 
 def monitor_export_and_benchmark_jobs(
@@ -927,6 +979,7 @@ def main() -> None:
         ]
         monitor_export_and_benchmark_jobs(args, state, state_path, running)
 
+    ensure_benchmarks_match_config(args, state, state_path)
     write_json(state_path, {**state, "running": [], "finished_at": time.time()})
     print(f"Completed {len(EXPERIMENTS)} experiments under {args.output_root}")
 
