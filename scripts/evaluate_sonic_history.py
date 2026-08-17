@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--sample-stride", type=int, default=100)
+    parser.add_argument("--sample-stride", type=int, default=50)
     parser.add_argument("--max-samples-per-episode", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20260817)
     return parser.parse_args()
@@ -149,6 +149,8 @@ def main() -> None:
     policy = SonicHistoryPolicy(manifest_path, device=args.device)
 
     episode_counts = defaultdict(int)
+    episode_last_frames = defaultdict(lambda: -1)
+    sampled_frames = defaultdict(list)
     previous = {}
     jitter_rows = []
     records = []
@@ -156,11 +158,13 @@ def main() -> None:
         raw = dataset._get_data(index)
         episode = int(torch.as_tensor(raw["episode_index"]).item())
         frame = int(torch.as_tensor(raw["frame_index"]).item())
+        episode_last_frames[episode] = max(episode_last_frames[episode], frame)
         if frame % args.sample_stride != 0:
             continue
         if args.max_samples_per_episode and episode_counts[episode] >= args.max_samples_per_episode:
             continue
         episode_counts[episode] += 1
+        sampled_frames[episode].append(frame)
 
         images = torch.as_tensor(raw[image_key])[:visual_history_frames]
         states = torch.as_tensor(raw["observation.state"], dtype=torch.float32)
@@ -261,6 +265,24 @@ def main() -> None:
         "evaluation_dataset": str(dataset_root),
         "episodes": episodes,
         "sample_stride": args.sample_stride,
+        "max_samples_per_episode": args.max_samples_per_episode,
+        "episode_coverage": {
+            str(episode): {
+                "last_observed_frame": episode_last_frames[episode],
+                "last_observed_time_s": episode_last_frames[episode] / fps,
+                "last_sampled_frame": max(sampled_frames[episode], default=None),
+                "last_sampled_time_s": (
+                    max(sampled_frames[episode]) / fps if sampled_frames[episode] else None
+                ),
+                "tail_gap_frames": (
+                    episode_last_frames[episode] - max(sampled_frames[episode])
+                    if sampled_frames[episode]
+                    else None
+                ),
+                "samples": len(sampled_frames[episode]),
+            }
+            for episode in episodes
+        },
         "metric_notes": {
             "jitter_mse": "Prediction-transition error between sparsely sampled benchmark calls.",
             "acceleration_mse": "Within-chunk 50 Hz second-difference error against ground truth.",

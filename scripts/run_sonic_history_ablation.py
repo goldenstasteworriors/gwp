@@ -198,8 +198,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-convergence-step", type=int, default=1000)
     parser.add_argument("--checkpoint-interval", type=int, default=250)
     parser.add_argument("--poll-seconds", type=float, default=20.0)
-    parser.add_argument("--benchmark-stride", type=int, default=100)
-    parser.add_argument("--benchmark-max-per-episode", type=int, default=8)
+    parser.add_argument(
+        "--benchmark-stride",
+        type=int,
+        default=50,
+        help="Evaluate every N dataset frames; 50 frames is one second at the SONIC FPS.",
+    )
+    parser.add_argument(
+        "--benchmark-max-per-episode",
+        type=int,
+        default=0,
+        help="Maximum samples per held-out episode; zero covers the complete episode.",
+    )
     parser.add_argument("--max-retries", type=int, default=1)
     parser.add_argument(
         "--gpu-groups",
