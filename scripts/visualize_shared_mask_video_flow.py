@@ -148,7 +148,9 @@ def decode_future_masks(
     latent_mean: torch.Tensor,
     latent_std: torch.Tensor,
 ) -> np.ndarray:
-    normalized = torch.cat((initial_mask_latent, future_latent), dim=2)
+    normalized = torch.cat((initial_mask_latent, future_latent), dim=2).to(
+        device=vae.device, dtype=vae.dtype
+    )
     decoded = vae.decode(normalized / latent_std + latent_mean).sample
     if decoded.ndim != 5 or decoded.shape[1] != 3 or decoded.shape[2] != 5:
         raise ValueError(f"Unexpected decoded mask video shape: {tuple(decoded.shape)}")
