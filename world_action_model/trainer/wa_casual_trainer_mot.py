@@ -38,6 +38,11 @@ def is_action_head_parameter(name: str) -> bool:
     )
 
 
+def canonical_checkpoint_parameter_name(name: str) -> str:
+    """Remove activation-checkpoint wrapper components from exported keys."""
+    return name.replace("._checkpoint_wrapped_module", "")
+
+
 class CasualWATrainerMoT(Trainer):
     """WAM pretraining trainer for the Mixture-of-Transformers policy."""
 
@@ -305,11 +310,16 @@ class CasualWATrainerMoT(Trainer):
                 weights.append(self.accelerator.get_state_dict(models[0]))
             if len(weights) != 1:
                 raise RuntimeError(f"Expected one model state dict, got {len(weights)}")
-            action_head_state = {
-                name: tensor
-                for name, tensor in weights[0].items()
-                if is_action_head_parameter(name)
-            }
+            action_head_state = {}
+            for name, tensor in weights[0].items():
+                if not is_action_head_parameter(name):
+                    continue
+                canonical_name = canonical_checkpoint_parameter_name(name)
+                if canonical_name in action_head_state:
+                    raise RuntimeError(
+                        f"Duplicate canonical action-head key {canonical_name!r}"
+                    )
+                action_head_state[canonical_name] = tensor
             if not action_head_state:
                 raise RuntimeError("Action-head checkpoint filter matched no tensors")
             weights[0] = action_head_state
