@@ -194,6 +194,26 @@ def parse_args() -> argparse.Namespace:
         default=Path("/workspace/WM/datasets/8_14_shake_beaker_1_success_left13_all_pipette_hold_v3"),
     )
     parser.add_argument("--prompt", default=TASK_PROMPT)
+    parser.add_argument(
+        "--experiments",
+        default=",".join(experiment.name for experiment in EXPERIMENTS),
+        help="Comma-separated experiment names to run from the registered ablation set.",
+    )
+    parser.add_argument(
+        "--train-episodes",
+        default="0-19",
+        help="Comma-separated episode ids and inclusive ranges used for training.",
+    )
+    parser.add_argument(
+        "--evaluation-episodes",
+        default="20-23",
+        help="Comma-separated held-out episode ids and inclusive ranges used for evaluation.",
+    )
+    parser.add_argument(
+        "--wandb-run-prefix",
+        default="sonic-pipette-pick-hold-history-20260817",
+        help="Stable prefix for W&B run ids and names.",
+    )
     parser.add_argument("--max-steps", type=int, default=1500)
     parser.add_argument("--min-convergence-step", type=int, default=1000)
     parser.add_argument("--checkpoint-interval", type=int, default=250)
@@ -210,6 +230,11 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Maximum samples per held-out episode; zero covers the complete episode.",
     )
+    parser.add_argument(
+        "--benchmark-device",
+        default="cuda:0",
+        help="Device used for post-training export validation and held-out evaluation.",
+    )
     parser.add_argument("--max-retries", type=int, default=1)
     parser.add_argument(
         "--gpu-groups",
@@ -222,6 +247,32 @@ def parse_args() -> argparse.Namespace:
         help="Adopt matching live jobs recorded in scheduler_state.json after a scheduler restart.",
     )
     return parser.parse_args()
+
+
+def parse_episode_spec(raw: str) -> list[int]:
+    episodes = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, stop = (int(value) for value in part.split("-", 1))
+            if start < 0 or stop < start:
+                raise ValueError(f"Invalid episode range {part!r}")
+            episodes.extend(range(start, stop + 1))
+        else:
+            episode = int(part)
+            if episode < 0:
+                raise ValueError(f"Episode ids must be non-negative, got {episode}")
+            episodes.append(episode)
+    result = sorted(set(episodes))
+    if not result:
+        raise ValueError("At least one episode must be selected")
+    return result
+
+
+def format_episode_spec(episodes: list[int]) -> str:
+    return ",".join(str(episode) for episode in episodes)
 
 
 def parse_gpu_groups(raw: str) -> tuple[str, ...]:
@@ -503,7 +554,7 @@ def job_environment(
             "GWP_IMAGE_AUGMENTATION": "1",
             "GWP_BATCH_SIZE_PER_GPU": "1",
             "GWP_NUM_WORKERS": "8",
-            "GWP_TRAIN_EPISODES": "0-19",
+            "GWP_TRAIN_EPISODES": format_episode_spec(args.training_episodes),
             "GWP_MAX_STEPS": str(args.max_steps),
             "GWP_GRAD_ACCUM_STEPS": "4",
             "GWP_CHECKPOINT_INTERVAL": str(args.checkpoint_interval),
@@ -536,8 +587,8 @@ def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) ->
             "env": experiment.env,
             "dataset": str(args.dataset),
             "prompt": args.prompt,
-            "training_episodes": list(range(20)),
-            "evaluation_episodes": [20, 21, 22, 23],
+            "training_episodes": args.training_episodes,
+            "evaluation_episodes": args.evaluation_episodes,
             "attempt": attempt,
             "archived_previous_attempt": str(archived_attempt) if archived_attempt else None,
             "gpu_ids": gpu_ids,
@@ -574,9 +625,7 @@ def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) ->
     wandb_env = dict(os.environ)
     wandb_env["WANDB_DIR"] = str(wandb_dir)
     wandb_suffix = "" if attempt == 1 else f"-attempt{attempt}"
-    wandb_run_id = (
-        f"sonic-pipette-pick-hold-history-{experiment.name}-20260817{wandb_suffix}"
-    )
+    wandb_run_id = f"{args.wandb_run_prefix}-{experiment.name}{wandb_suffix}"
     wandb_process = subprocess.Popen(
         [
             str(PROJECT_ROOT / ".venv-ppu" / "bin" / "python"),
@@ -670,8 +719,8 @@ def export_inference_model(args: argparse.Namespace, job: RunningJob) -> Path:
         "prompt_embedding": "prompt_embedding.pt",
         "prompt": args.prompt,
         "evaluation_dataset": str(args.dataset),
-        "evaluation_episodes": [20, 21, 22, 23],
-        "training_episodes": list(range(20)),
+        "evaluation_episodes": args.evaluation_episodes,
+        "training_episodes": args.training_episodes,
         "image_key": "observation.images.ego_view",
         "image_frame_offsets": image_offsets,
         "state_history_offsets": state_offsets,
@@ -730,14 +779,14 @@ def run_benchmark(args: argparse.Namespace, manifest: Path, device: str) -> Path
 
 def recover_exported_models(args: argparse.Namespace, state: dict) -> None:
     """Resume benchmark/finalization without retraining an already exported model."""
-    for experiment in EXPERIMENTS:
+    for experiment in args.selected_experiments:
         export_dir = args.output_root / experiment.name / "inference_model"
         manifest = export_dir / "manifest.json"
         benchmark = export_dir / "benchmark.json"
         if not manifest.is_file():
             continue
         if not benchmark.is_file():
-            benchmark = run_benchmark(args, manifest, "cuda:0")
+            benchmark = run_benchmark(args, manifest, args.benchmark_device)
         state["completed"][experiment.name] = {
             "manifest": str(manifest),
             "benchmark": str(benchmark),
@@ -749,7 +798,7 @@ def recover_exported_models(args: argparse.Namespace, state: dict) -> None:
 
 def recover_complete_checkpoints(args: argparse.Namespace, state: dict) -> None:
     """Export and benchmark a converged checkpoint left by an interrupted scheduler."""
-    for experiment in EXPERIMENTS:
+    for experiment in args.selected_experiments:
         if experiment.name in state["completed"]:
             continue
         output_dir = args.output_root / experiment.name
@@ -780,7 +829,7 @@ def recover_complete_checkpoints(args: argparse.Namespace, state: dict) -> None:
             convergence_reason=reason,
         )
         manifest = export_inference_model(args, recovered_job)
-        benchmark = run_benchmark(args, manifest, "cuda:0")
+        benchmark = run_benchmark(args, manifest, args.benchmark_device)
         state["completed"][experiment.name] = {
             "manifest": str(manifest),
             "benchmark": str(benchmark),
@@ -790,9 +839,9 @@ def recover_complete_checkpoints(args: argparse.Namespace, state: dict) -> None:
         state["failed"].pop(experiment.name, None)
 
 
-def refresh_results(output_root: Path) -> None:
+def refresh_results(output_root: Path, experiments: tuple[Experiment, ...]) -> None:
     rows = []
-    for experiment in EXPERIMENTS:
+    for experiment in experiments:
         path = output_root / experiment.name / "inference_model" / "benchmark.json"
         if not path.exists():
             continue
@@ -854,7 +903,7 @@ def ensure_benchmarks_match_config(
     state_path: Path,
 ) -> None:
     """Re-evaluate old truncated benchmarks after all GPU training is finished."""
-    for experiment in EXPERIMENTS:
+    for experiment in args.selected_experiments:
         export_dir = args.output_root / experiment.name / "inference_model"
         manifest = export_dir / "manifest.json"
         benchmark = export_dir / "benchmark.json"
@@ -863,7 +912,7 @@ def ensure_benchmarks_match_config(
                 f"Cannot finish benchmark audit without exported manifest: {manifest}"
             )
         if not benchmark_matches_config(args, benchmark):
-            benchmark = run_benchmark(args, manifest, "cuda:0")
+            benchmark = run_benchmark(args, manifest, args.benchmark_device)
             state["completed"][experiment.name].update(
                 {
                     "benchmark": str(benchmark),
@@ -871,7 +920,7 @@ def ensure_benchmarks_match_config(
                 }
             )
             write_json(state_path, {**state, "running": []})
-            refresh_results(args.output_root)
+            refresh_results(args.output_root, args.selected_experiments)
 
 
 def monitor_export_and_benchmark_jobs(
@@ -926,7 +975,7 @@ def monitor_export_and_benchmark_jobs(
         manifests.append((job, manifest))
 
     for job, manifest in manifests:
-        benchmark = run_benchmark(args, manifest, "cuda:0")
+        benchmark = run_benchmark(args, manifest, args.benchmark_device)
         state["completed"][job.experiment.name] = {
             "manifest": str(manifest),
             "benchmark": str(benchmark),
@@ -934,13 +983,24 @@ def monitor_export_and_benchmark_jobs(
         }
         state["failed"].pop(job.experiment.name, None)
         write_json(state_path, {**state, "running": []})
-        refresh_results(args.output_root)
+        refresh_results(args.output_root, args.selected_experiments)
 
 
 def main() -> None:
     args = parse_args()
     args.output_root = args.output_root.expanduser().resolve()
     args.dataset = args.dataset.expanduser().resolve()
+    experiment_names = [name.strip() for name in args.experiments.split(",") if name.strip()]
+    if not experiment_names:
+        raise ValueError("At least one experiment must be selected")
+    if len(set(experiment_names)) != len(experiment_names):
+        raise ValueError(f"Duplicate experiment names: {experiment_names}")
+    args.selected_experiments = tuple(experiment_by_name(name) for name in experiment_names)
+    args.training_episodes = parse_episode_spec(args.train_episodes)
+    args.evaluation_episodes = parse_episode_spec(args.evaluation_episodes)
+    overlap = sorted(set(args.training_episodes).intersection(args.evaluation_episodes))
+    if overlap:
+        raise ValueError(f"Training and evaluation episode sets overlap: {overlap}")
     gpu_groups = parse_gpu_groups(args.gpu_groups)
     validate_prompt_assets(args.dataset, args.prompt)
     if "WANDB_API_KEY" not in os.environ:
@@ -956,13 +1016,13 @@ def main() -> None:
         )
     recover_exported_models(args, state)
     recover_complete_checkpoints(args, state)
-    refresh_results(args.output_root)
+    refresh_results(args.output_root, args.selected_experiments)
     write_json(state_path, state)
     write_json(
         args.output_root / "experiment_registry.json",
         [
             {"name": item.name, "description": item.description, "env": item.env}
-            for item in EXPERIMENTS
+            for item in args.selected_experiments
         ],
     )
 
@@ -970,7 +1030,9 @@ def main() -> None:
         adopted = [attach_saved_job(args, record) for record in active]
         monitor_export_and_benchmark_jobs(args, state, state_path, adopted)
 
-    pending = [item for item in EXPERIMENTS if item.name not in state["completed"]]
+    pending = [
+        item for item in args.selected_experiments if item.name not in state["completed"]
+    ]
     for group_start in range(0, len(pending), len(gpu_groups)):
         experiments = pending[group_start : group_start + len(gpu_groups)]
         running = [
@@ -981,7 +1043,9 @@ def main() -> None:
 
     ensure_benchmarks_match_config(args, state, state_path)
     write_json(state_path, {**state, "running": [], "finished_at": time.time()})
-    print(f"Completed {len(EXPERIMENTS)} experiments under {args.output_root}")
+    print(
+        f"Completed {len(args.selected_experiments)} experiments under {args.output_root}"
+    )
 
 
 if __name__ == "__main__":
