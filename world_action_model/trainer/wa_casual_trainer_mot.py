@@ -300,7 +300,7 @@ class CasualWATrainerMoT(Trainer):
 
     def save_model_hook(self, models, weights, output_dir):
         """Save only action-head tensors for action-head-only runs."""
-        if self.train_action_head_only:
+        if self.train_action_head_only and self.is_main_process:
             if len(weights) == 0:
                 weights.append(self.accelerator.get_state_dict(models[0]))
             if len(weights) != 1:
@@ -313,11 +313,10 @@ class CasualWATrainerMoT(Trainer):
             if not action_head_state:
                 raise RuntimeError("Action-head checkpoint filter matched no tensors")
             weights[0] = action_head_state
-            if self.is_main_process:
-                self.logger.info(
-                    "Save action-head-only checkpoint with %d tensors",
-                    len(action_head_state),
-                )
+            self.logger.info(
+                "Save action-head-only checkpoint with %d tensors",
+                len(action_head_state),
+            )
         return super().save_model_hook(models, weights, output_dir)
 
     def forward_vae(self, images):
