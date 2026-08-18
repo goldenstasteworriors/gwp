@@ -9,6 +9,35 @@ from giga_models import utils as gm_utils
 from world_action_model.models import CasualWorldActionTransformer_MoT
 from giga_train import ModuleDict, Trainer
 
+
+_ACTION_HEAD_PARAMETER_PREFIXES = (
+    "action_condition_embedder.",
+    "action_norm_out.",
+    "state_encoder.",
+    "action_encoder.",
+    "action_decoder.",
+)
+
+
+def is_action_head_parameter(name: str) -> bool:
+    """Return whether a MoT parameter belongs to the action-specific branch."""
+    prefixes_to_strip = ("module.", "_orig_mod.", "transformer.")
+    stripped = name
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes_to_strip:
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix) :]
+                changed = True
+                break
+    return (
+        stripped == "action_scale_shift_table"
+        or stripped.startswith(_ACTION_HEAD_PARAMETER_PREFIXES)
+        or (stripped.startswith("blocks.") and ".action_expert." in stripped)
+    )
+
+
 class CasualWATrainerMoT(Trainer):
     """WAM pretraining trainer for the Mixture-of-Transformers policy."""
 
@@ -16,6 +45,7 @@ class CasualWATrainerMoT(Trainer):
         pretrained = gm_utils.get_model_path(model_config.pretrained)
         self.visual_flow_shift = float(model_config.visual_flow_shift)
         self.action_flow_shift = float(model_config.action_flow_shift)
+        self.train_action_head_only = bool(model_config.get("train_action_head_only", False))
         self.expand_timesteps = model_config.get("expand_timesteps", False)
         self.action_repeats = model_config.get("action_repeats", 1)
         self.state_repeats = model_config.get("state_repeats", 1)
@@ -60,6 +90,26 @@ class CasualWATrainerMoT(Trainer):
             strict_load=model_config.get("strict_load", False),
         )
         transformer.to(self.device)
+        if self.train_action_head_only:
+            transformer.requires_grad_(False)
+            trainable_names = []
+            for name, parameter in transformer.named_parameters():
+                if is_action_head_parameter(name):
+                    parameter.requires_grad_(True)
+                    trainable_names.append(name)
+            if not trainable_names:
+                raise RuntimeError("No action-head parameters matched the MoT model")
+            self.visual_loss_weight = 0.0
+            trainable_count = sum(
+                parameter.numel()
+                for parameter in transformer.parameters()
+                if parameter.requires_grad
+            )
+            total_count = sum(parameter.numel() for parameter in transformer.parameters())
+            print(
+                "Action-head-only training enabled: "
+                f"{len(trainable_names)} tensors, {trainable_count:,}/{total_count:,} parameters trainable"
+            )
         if model_config.get("enable_gradient_checkpointing", True):
             transformer.enable_gradient_checkpointing()
 
@@ -184,9 +234,13 @@ class CasualWATrainerMoT(Trainer):
             action=noisy_action,
             state=state,
             embodiment_id=embodiment_id,
+            action_only=self.train_action_head_only,
         )
 
-        visual_loss = ((visual_pred.float() - visual_target.float()) * first_frame_mask).pow(2).mean()
+        if visual_pred is None:
+            visual_loss = action_pred.new_zeros(())
+        else:
+            visual_loss = ((visual_pred.float() - visual_target.float()) * first_frame_mask).pow(2).mean()
 
         action_error = (action_pred.float() - action_target.float()).pow(2)
         action_dim_mask = batch_dict.get("action_dim_mask")
@@ -243,6 +297,28 @@ class CasualWATrainerMoT(Trainer):
             "visual_loss": visual_loss * self.visual_loss_weight,
             "action_loss": action_loss * self.action_loss_weight,
         }
+
+    def save_model_hook(self, models, weights, output_dir):
+        """Save only action-head tensors for action-head-only runs."""
+        if self.train_action_head_only:
+            if len(weights) == 0:
+                weights.append(self.accelerator.get_state_dict(models[0]))
+            if len(weights) != 1:
+                raise RuntimeError(f"Expected one model state dict, got {len(weights)}")
+            action_head_state = {
+                name: tensor
+                for name, tensor in weights[0].items()
+                if is_action_head_parameter(name)
+            }
+            if not action_head_state:
+                raise RuntimeError("Action-head checkpoint filter matched no tensors")
+            weights[0] = action_head_state
+            if self.is_main_process:
+                self.logger.info(
+                    "Save action-head-only checkpoint with %d tensors",
+                    len(action_head_state),
+                )
+        return super().save_model_hook(models, weights, output_dir)
 
     def forward_vae(self, images):
         images = images.to(self.vae.dtype)

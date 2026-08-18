@@ -214,6 +214,9 @@ config = dict(
         action_terminal_weight=float(
             _env("GWP_ACTION_TERMINAL_WEIGHT", "0")
         ),
+        train_action_head_only=(
+            _env("GWP_TRAIN_ACTION_HEAD_ONLY", "0") == "1"
+        ),
         enable_gradient_checkpointing=_env("GWP_MODEL_GRADIENT_CHECKPOINTING", "0") == "1",
         skip_action_expert=False,
     ),
