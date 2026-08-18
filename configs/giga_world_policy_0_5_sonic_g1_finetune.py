@@ -217,6 +217,7 @@ config = dict(
         train_action_head_only=(
             _env("GWP_TRAIN_ACTION_HEAD_ONLY", "0") == "1"
         ),
+        checkpoint_export_mode=_env("GWP_CHECKPOINT_EXPORT_MODE", "auto"),
         enable_gradient_checkpointing=_env("GWP_MODEL_GRADIENT_CHECKPOINTING", "0") == "1",
         skip_action_expert=False,
     ),
@@ -233,9 +234,9 @@ config = dict(
         checkpoint_weights_only=_env("GWP_CHECKPOINT_WEIGHTS_ONLY", "0") == "1",
         checkpoint_safe_serialization=False,
         checkpoint_strict=False,
-        # tensorboardX on the PPU image wraps scalar metrics as ndarrays and
-        # raises during add_scalar; console logging remains enabled.
-        log_with=None,
+        # Keep logging disabled by default; W&B can be enabled per run without
+        # re-enabling the incompatible PPU TensorBoard path.
+        log_with=_env("GWP_LOG_WITH"),
         log_interval=int(_env("GWP_LOG_INTERVAL", "20")),
         with_ema=_env("GWP_WITH_EMA", "1") == "1",
         activation_checkpointing=_env("GWP_ACTIVATION_CHECKPOINTING", "0") == "1",

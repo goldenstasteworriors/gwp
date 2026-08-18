@@ -1,4 +1,5 @@
 import functools
+import json
 import os
 
 import torch
@@ -43,6 +44,23 @@ def canonical_checkpoint_parameter_name(name: str) -> str:
     return name.replace("._checkpoint_wrapped_module", "")
 
 
+def split_action_head_state_dict(state_dict):
+    """Split a state dict into canonical action-head and non-action tensors."""
+    action_head_state = {}
+    non_action_state = {}
+    for name, tensor in state_dict.items():
+        canonical_name = canonical_checkpoint_parameter_name(name)
+        destination = (
+            action_head_state
+            if is_action_head_parameter(canonical_name)
+            else non_action_state
+        )
+        if canonical_name in destination:
+            raise RuntimeError(f"Duplicate canonical checkpoint key {canonical_name!r}")
+        destination[canonical_name] = tensor
+    return action_head_state, non_action_state
+
+
 class CasualWATrainerMoT(Trainer):
     """WAM pretraining trainer for the Mixture-of-Transformers policy."""
 
@@ -51,6 +69,28 @@ class CasualWATrainerMoT(Trainer):
         self.visual_flow_shift = float(model_config.visual_flow_shift)
         self.action_flow_shift = float(model_config.action_flow_shift)
         self.train_action_head_only = bool(model_config.get("train_action_head_only", False))
+        checkpoint_export_mode = str(
+            model_config.get("checkpoint_export_mode", "auto")
+        )
+        if checkpoint_export_mode == "auto":
+            checkpoint_export_mode = (
+                "action_head_only" if self.train_action_head_only else "full"
+            )
+        valid_export_modes = {
+            "full",
+            "action_head_only",
+            "action_head_plus_latest_non_action",
+        }
+        if checkpoint_export_mode not in valid_export_modes:
+            raise ValueError(
+                f"checkpoint_export_mode must be one of {sorted(valid_export_modes)}, "
+                f"got {checkpoint_export_mode!r}"
+            )
+        if self.train_action_head_only and checkpoint_export_mode != "action_head_only":
+            raise ValueError(
+                "train_action_head_only requires checkpoint_export_mode=action_head_only"
+            )
+        self.checkpoint_export_mode = checkpoint_export_mode
         self.expand_timesteps = model_config.get("expand_timesteps", False)
         self.action_repeats = model_config.get("action_repeats", 1)
         self.state_repeats = model_config.get("state_repeats", 1)
@@ -304,30 +344,82 @@ class CasualWATrainerMoT(Trainer):
         }
 
     def save_model_hook(self, models, weights, output_dir):
-        """Save only action-head tensors for action-head-only runs."""
-        if self.train_action_head_only and self.is_main_process:
+        """Export full weights or compact action/non-action artifacts."""
+        compact_modes = {
+            "action_head_only",
+            "action_head_plus_latest_non_action",
+        }
+        if self.checkpoint_export_mode in compact_modes and self.is_main_process:
             if len(weights) == 0:
                 weights.append(self.accelerator.get_state_dict(models[0]))
             if len(weights) != 1:
                 raise RuntimeError(f"Expected one model state dict, got {len(weights)}")
-            action_head_state = {}
-            for name, tensor in weights[0].items():
-                if not is_action_head_parameter(name):
-                    continue
-                canonical_name = canonical_checkpoint_parameter_name(name)
-                if canonical_name in action_head_state:
-                    raise RuntimeError(
-                        f"Duplicate canonical action-head key {canonical_name!r}"
-                    )
-                action_head_state[canonical_name] = tensor
+            action_head_state, non_action_state = split_action_head_state_dict(
+                weights[0]
+            )
             if not action_head_state:
                 raise RuntimeError("Action-head checkpoint filter matched no tensors")
+            if self.checkpoint_export_mode == "action_head_plus_latest_non_action":
+                if not non_action_state:
+                    raise RuntimeError("Non-action checkpoint filter matched no tensors")
+                self._save_latest_non_action_checkpoint(
+                    models[0], non_action_state, output_dir
+                )
             weights[0] = action_head_state
             self.logger.info(
                 "Save action-head-only checkpoint with %d tensors",
                 len(action_head_state),
             )
         return super().save_model_hook(models, weights, output_dir)
+
+    def _save_latest_non_action_checkpoint(self, model, state_dict, output_dir):
+        """Atomically replace the one retained non-action checkpoint."""
+        latest_root = os.path.join(self.model_dir, "latest_non_action")
+        transformer_dir = os.path.join(latest_root, "transformer")
+        os.makedirs(transformer_dir, exist_ok=True)
+
+        unwrapped = self.accelerator.unwrap_model(
+            model, keep_torch_compile=False
+        )
+        transformer = (
+            unwrapped["transformer"]
+            if isinstance(unwrapped, ModuleDict)
+            else unwrapped
+        )
+        if hasattr(transformer, "save_config"):
+            transformer.save_config(transformer_dir)
+
+        transformer_state = {}
+        for name, tensor in state_dict.items():
+            if name.startswith("transformer."):
+                name = name[len("transformer.") :]
+            transformer_state[name] = tensor
+
+        weights_path = os.path.join(
+            transformer_dir, "diffusion_pytorch_model.bin"
+        )
+        partial_weights_path = weights_path + ".partial"
+        if os.path.exists(partial_weights_path):
+            os.remove(partial_weights_path)
+        torch.save(transformer_state, partial_weights_path)
+        os.replace(partial_weights_path, weights_path)
+
+        metadata = {
+            "source_checkpoint": os.path.basename(output_dir),
+            "step": self.cur_step,
+            "tensor_count": len(transformer_state),
+        }
+        metadata_path = os.path.join(latest_root, "metadata.json")
+        partial_metadata_path = metadata_path + ".partial"
+        with open(partial_metadata_path, "w", encoding="utf-8") as file:
+            json.dump(metadata, file, indent=2)
+            file.write("\n")
+        os.replace(partial_metadata_path, metadata_path)
+        self.logger.info(
+            "Save latest non-action checkpoint with %d tensors to %s",
+            len(transformer_state),
+            weights_path,
+        )
 
     def forward_vae(self, images):
         images = images.to(self.vae.dtype)
