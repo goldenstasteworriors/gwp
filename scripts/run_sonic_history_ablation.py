@@ -477,7 +477,6 @@ def checkpoint_is_complete(checkpoint_dir: Path) -> bool:
     required_files = (
         checkpoint_dir / "transformer" / "config.json",
         checkpoint_dir / "transformer" / "diffusion_pytorch_model.bin",
-        checkpoint_dir / "custom_checkpoint_0.pkl",
     )
     return all(path.is_file() and path.stat().st_size > 0 for path in required_files)
 

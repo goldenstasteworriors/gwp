@@ -732,13 +732,14 @@ class Trainer:
             # Release cached GPU memory before heavy save operations to reduce OOM risk.
             release_memory()
             self.accelerator.wait_for_everyone()
-            if self.distributed_type == DistributedType.DEEPSPEED:
+            if self.checkpoint_weights_only:
+                state_dict = self.accelerator.get_state_dict(self.models[0])
+                self.save_model_hook(self.models, [state_dict], output_dir)
+                self.accelerator.wait_for_everyone()
+            elif self.distributed_type == DistributedType.DEEPSPEED:
                 self.accelerator.save_state(output_dir, exclude_frozen_parameters=True)
             else:
                 self.accelerator.save_state(output_dir)
-            self.accelerator.wait_for_everyone()
-            if self.checkpoint_weights_only and self.is_main_process:
-                self._remove_checkpoint_restart_state(output_dir)
             self.accelerator.wait_for_everyone()
 
     def _remove_checkpoint_restart_state(self, output_dir: str) -> None:
