@@ -214,8 +214,13 @@ def parse_args() -> argparse.Namespace:
         default="sonic-pipette-pick-hold-history-20260817",
         help="Stable prefix for W&B run ids and names.",
     )
-    parser.add_argument("--max-steps", type=int, default=1500)
-    parser.add_argument("--min-convergence-step", type=int, default=1000)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=50000,
+        help="Target total steps, including steps represented by a warm-start checkpoint.",
+    )
+    parser.add_argument("--min-convergence-step", type=int, default=50000)
     parser.add_argument("--checkpoint-interval", type=int, default=250)
     parser.add_argument("--poll-seconds", type=float, default=20.0)
     parser.add_argument(
@@ -236,6 +241,12 @@ def parse_args() -> argparse.Namespace:
         help="Device used for post-training export validation and held-out evaluation.",
     )
     parser.add_argument("--max-retries", type=int, default=1)
+    parser.add_argument(
+        "--warm-start-root",
+        type=Path,
+        default=None,
+        help="Optional prior output root containing <experiment>/models checkpoints.",
+    )
     parser.add_argument(
         "--gpu-groups",
         default="0,1;2,3",
@@ -466,15 +477,9 @@ def checkpoint_is_complete(checkpoint_dir: Path) -> bool:
     required_files = (
         checkpoint_dir / "transformer" / "config.json",
         checkpoint_dir / "transformer" / "diffusion_pytorch_model.bin",
-        checkpoint_dir / "scheduler.bin",
         checkpoint_dir / "custom_checkpoint_0.pkl",
     )
-    if not all(path.is_file() and path.stat().st_size > 0 for path in required_files):
-        return False
-    return any(
-        path.is_file() and path.stat().st_size > 0
-        for path in checkpoint_dir.glob("random_states_*.pkl")
-    )
+    return all(path.is_file() and path.stat().st_size > 0 for path in required_files)
 
 
 def latest_complete_checkpoint(output_dir: Path) -> tuple[int, Path] | None:
@@ -537,6 +542,7 @@ def job_environment(
     gpu_ids: str,
     output_dir: Path,
     transformer_pretrained: Path | None = None,
+    run_max_steps: int | None = None,
 ) -> dict:
     env = dict(os.environ)
     env.update(
@@ -555,7 +561,7 @@ def job_environment(
             "GWP_BATCH_SIZE_PER_GPU": "1",
             "GWP_NUM_WORKERS": "8",
             "GWP_TRAIN_EPISODES": format_episode_spec(args.training_episodes),
-            "GWP_MAX_STEPS": str(args.max_steps),
+            "GWP_MAX_STEPS": str(run_max_steps or args.max_steps),
             "GWP_GRAD_ACCUM_STEPS": "4",
             "GWP_CHECKPOINT_INTERVAL": str(args.checkpoint_interval),
             "GWP_CHECKPOINT_TOTAL_LIMIT": "1",
@@ -575,10 +581,28 @@ def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) ->
     archived_attempt = archive_incomplete_attempt(args.output_root, experiment.name)
     attempt = next_attempt_number(args.output_root, experiment.name)
     output_dir.mkdir(parents=True, exist_ok=True)
+    previous_metadata = {}
+    experiment_path = output_dir / "experiment.json"
+    if experiment_path.is_file():
+        previous_metadata = json.loads(experiment_path.read_text(encoding="utf-8"))
     warm_start = latest_complete_checkpoint(output_dir)
+    warm_start_source = "current_output"
+    completed_before_run = int(previous_metadata.get("completed_before_run", 0))
+    if warm_start is not None:
+        completed_before_run += warm_start[0]
+    elif args.warm_start_root is not None:
+        warm_start = latest_complete_checkpoint(args.warm_start_root / experiment.name)
+        warm_start_source = "external_output"
+        if warm_start is not None:
+            completed_before_run = warm_start[0]
     warm_start_step = warm_start[0] if warm_start is not None else None
     warm_start_transformer = warm_start[1] / "transformer" if warm_start is not None else None
-    experiment_path = output_dir / "experiment.json"
+    run_max_steps = args.max_steps - completed_before_run
+    if run_max_steps <= 0:
+        raise ValueError(
+            f"{experiment.name} already represents {completed_before_run} steps, "
+            f"which meets target {args.max_steps}"
+        )
     write_json(
         experiment_path,
         {
@@ -594,6 +618,10 @@ def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) ->
             "gpu_ids": gpu_ids,
             "warm_start_checkpoint": str(warm_start[1]) if warm_start is not None else None,
             "warm_start_step": warm_start_step,
+            "warm_start_source": warm_start_source if warm_start is not None else None,
+            "completed_before_run": completed_before_run,
+            "run_max_steps": run_max_steps,
+            "target_total_steps": args.max_steps,
         },
     )
     train_log = (output_dir / "launcher.log").open("a", encoding="utf-8")
@@ -611,6 +639,7 @@ def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) ->
             gpu_ids,
             output_dir,
             transformer_pretrained=warm_start_transformer,
+            run_max_steps=run_max_steps,
         ),
         stdin=subprocess.DEVNULL,
         stdout=train_log,
@@ -990,6 +1019,8 @@ def main() -> None:
     args = parse_args()
     args.output_root = args.output_root.expanduser().resolve()
     args.dataset = args.dataset.expanduser().resolve()
+    if args.warm_start_root is not None:
+        args.warm_start_root = args.warm_start_root.expanduser().resolve()
     experiment_names = [name.strip() for name in args.experiments.split(",") if name.strip()]
     if not experiment_names:
         raise ValueError("At least one experiment must be selected")

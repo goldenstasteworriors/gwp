@@ -65,9 +65,20 @@ JOINT_NAMES_BY_SIDE = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, type=Path)
+    parser.add_argument(
+        "--input",
+        required=True,
+        type=Path,
+        nargs="+",
+        help="One or more SONIC dataset roots, concatenated in the given order.",
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--side", choices=("both", "left"), default="both")
+    parser.add_argument(
+        "--task-prompt",
+        default=None,
+        help="Replace every source task with this single training prompt.",
+    )
     parser.add_argument(
         "--min-source-episode-index",
         type=int,
@@ -102,21 +113,40 @@ def _source_episode_index(path: Path) -> int:
 
 def main() -> None:
     args = parse_args()
-    source_root = args.input.resolve()
+    source_roots = [path.resolve() for path in args.input]
     output_root = args.output.resolve()
     if output_root.exists():
         raise FileExistsError(f"Output already exists: {output_root}")
 
-    info = json.loads((source_root / "meta" / "info.json").read_text(encoding="utf-8"))
+    source_infos = [
+        json.loads((root / "meta" / "info.json").read_text(encoding="utf-8"))
+        for root in source_roots
+    ]
+    info = source_infos[0]
     joint_names = JOINT_NAMES_BY_SIDE[args.side]
     output_dim = len(joint_names)
     state_indices = _feature_indices(info, "observation.state", joint_names)
     action_indices = _feature_indices(info, "action.wbc", joint_names)
-    tasks = _read_jsonl(source_root / "meta" / "tasks.jsonl")
-    source_episodes = {
-        int(row["episode_index"]): row
-        for row in _read_jsonl(source_root / "meta" / "episodes.jsonl")
-    }
+    for root, candidate in zip(source_roots[1:], source_infos[1:]):
+        if candidate.get("fps") != info.get("fps"):
+            raise ValueError(f"FPS mismatch in {root}: {candidate.get('fps')} != {info.get('fps')}")
+        if _feature_indices(candidate, "observation.state", joint_names) != state_indices:
+            raise ValueError(f"observation.state schema mismatch in {root}")
+        if _feature_indices(candidate, "action.wbc", joint_names) != action_indices:
+            raise ValueError(f"action.wbc schema mismatch in {root}")
+
+    if args.task_prompt is not None:
+        task_rows = [{"task_index": 0, "task": args.task_prompt}]
+    else:
+        task_texts = []
+        for root in source_roots:
+            task_texts.extend(row["task"] for row in _read_jsonl(root / "meta" / "tasks.jsonl"))
+        unique_tasks = list(dict.fromkeys(task_texts))
+        task_rows = [
+            {"task_index": index, "task": task}
+            for index, task in enumerate(unique_tasks)
+        ]
+    task_indices = {row["task"]: row["task_index"] for row in task_rows}
 
     data_dir = output_root / "data" / "chunk-000"
     video_dir = output_root / "videos" / VIDEO_KEY / "chunk-000"
@@ -125,8 +155,8 @@ def main() -> None:
         directory.mkdir(parents=True, exist_ok=False)
 
     task_frame = pd.DataFrame(
-        {"task_index": [row["task_index"] for row in tasks]},
-        index=pd.Index([row["task"] for row in tasks]),
+        {"task_index": [row["task_index"] for row in task_rows]},
+        index=pd.Index([row["task"] for row in task_rows]),
     )
     task_frame.to_parquet(output_root / "meta" / "tasks.parquet")
 
@@ -136,19 +166,30 @@ def main() -> None:
     right_hand_max = np.full(6, -np.inf, dtype=np.float64) if args.side == "both" else None
     if args.min_source_episode_index < 0:
         raise ValueError("--min-source-episode-index must be non-negative")
-    all_sources = sorted((source_root / "data").glob("*/*.parquet"))
-    sources = [
-        path
-        for path in all_sources
-        if _source_episode_index(path) >= args.min_source_episode_index
-    ]
+    sources = []
+    source_episode_tables = {}
+    source_task_tables = {}
+    for source_root in source_roots:
+        source_episode_tables[source_root] = {
+            int(row["episode_index"]): row
+            for row in _read_jsonl(source_root / "meta" / "episodes.jsonl")
+        }
+        source_task_tables[source_root] = {
+            int(row["task_index"]): row["task"]
+            for row in _read_jsonl(source_root / "meta" / "tasks.jsonl")
+        }
+        sources.extend(
+            (source_root, path)
+            for path in sorted((source_root / "data").glob("*/*.parquet"))
+            if _source_episode_index(path) >= args.min_source_episode_index
+        )
     if not sources:
         raise FileNotFoundError(
             f"No parquet episodes at or above {args.min_source_episode_index} "
-            f"under {source_root / 'data'}"
+            f"under {[str(root / 'data') for root in source_roots]}"
         )
 
-    for output_index, source in enumerate(sources):
+    for output_index, (source_root, source) in enumerate(sources):
         frame = pd.read_parquet(source)
         episode_values = np.asarray(frame["episode_index"], dtype=np.int64)
         unique_episode = np.unique(episode_values)
@@ -177,6 +218,14 @@ def main() -> None:
         converted["index"] = np.arange(
             total_frames, total_frames + len(frame), dtype=np.int64
         )
+        if args.task_prompt is not None:
+            converted["task_index"] = 0
+            episode_tasks = [args.task_prompt]
+        else:
+            source_task_index = int(frame["task_index"].iloc[0])
+            task_text = source_task_tables[source_root][source_task_index]
+            converted["task_index"] = task_indices[task_text]
+            episode_tasks = [task_text]
         converted.insert(0, "action", list(action))
         converted.insert(0, "observation.state", list(state))
         converted.to_parquet(data_dir / f"file-{output_index:03d}.parquet", index=False)
@@ -193,7 +242,7 @@ def main() -> None:
         shutil.copy2(source_video, video_dir / f"file-{output_index:03d}.mp4")
 
         length = len(frame)
-        episode_info = source_episodes[source_episode_index]
+        episode_info = source_episode_tables[source_root][source_episode_index]
         if int(episode_info["length"]) != length:
             raise ValueError(
                 f"Episode {source_episode_index} length metadata does not match parquet"
@@ -201,8 +250,9 @@ def main() -> None:
         episode_rows.append(
             {
                 "episode_index": output_index,
+                "source_dataset": str(source_root),
                 "source_episode_index": source_episode_index,
-                "tasks": np.asarray(episode_info["tasks"], dtype=object),
+                "tasks": np.asarray(episode_tasks, dtype=object),
                 "length": length,
                 "data/chunk_index": 0,
                 "data/file_index": output_index,
@@ -225,10 +275,20 @@ def main() -> None:
     info["controlled_side"] = args.side
     info["source_episode_filter"] = {
         "min_episode_index_inclusive": args.min_source_episode_index,
-        "selected_source_episode_indices": [
-            _source_episode_index(path) for path in sources
+        "sources": [
+            {
+                "source_dataset": str(root),
+                "selected_source_episode_indices": [
+                    _source_episode_index(path)
+                    for candidate_root, path in sources
+                    if candidate_root == root
+                ],
+            }
+            for root in source_roots
         ],
     }
+    if args.task_prompt is not None:
+        info["task_prompt"] = args.task_prompt
     if args.side == "both":
         info["right_hand_supervision"] = {
             "semantics": "recorded_default_open_pose",

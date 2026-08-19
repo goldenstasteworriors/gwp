@@ -71,7 +71,35 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated booleans (true/false or 1/0). "
              "Use 'none' when every action dimension is already relative.",
     )
+    p.add_argument(
+        "--episodes",
+        default=None,
+        help="Optional comma-separated episode ids/ranges; excluded episodes do not affect stats.",
+    )
     return p.parse_args()
+
+
+def parse_episode_spec(raw: str | None) -> set[int] | None:
+    if raw is None:
+        return None
+    episodes: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, stop = (int(value) for value in part.split("-", 1))
+            if start < 0 or stop < start:
+                raise ValueError(f"Invalid episode range: {part}")
+            episodes.update(range(start, stop + 1))
+        else:
+            episode = int(part)
+            if episode < 0:
+                raise ValueError(f"Episode ids must be non-negative: {episode}")
+            episodes.add(episode)
+    if not episodes:
+        raise ValueError("--episodes must select at least one episode")
+    return episodes
 
 
 class OnlineMoments:
@@ -168,7 +196,10 @@ def feature_stats(m: OnlineMoments, q: QuantileStore) -> dict:
             "max": as_list(mx), "q01": as_list(q01), "q99": as_list(q99)}
 
 
-def load_episode_ranges(root: Path) -> list[tuple[int, int]]:
+def load_episode_ranges(
+    root: Path,
+    selected_episode_indices: set[int] | None = None,
+) -> list[tuple[int, int]]:
     paths = sorted((root / "meta" / "episodes").glob("*/*.parquet"))
     paths += sorted((root / "meta" / "episodes").glob("*.parquet"))
     if not paths:
@@ -179,20 +210,35 @@ def load_episode_ranges(root: Path) -> list[tuple[int, int]]:
             )
         ranges = []
         start = 0
-        for line in episodes_jsonl.read_text(encoding="utf-8").splitlines():
+        for episode_index, line in enumerate(
+            episodes_jsonl.read_text(encoding="utf-8").splitlines()
+        ):
             if not line.strip():
                 continue
             length = int(json.loads(line)["length"])
-            ranges.append((start, start + length))
+            if selected_episode_indices is None or episode_index in selected_episode_indices:
+                ranges.append((start, start + length))
             start += length
         return ranges
-    ranges: list[tuple[int, int]] = []
+    indexed_ranges: list[tuple[int, int, int]] = []
     for path in paths:
-        df = pd.read_parquet(path, columns=["dataset_from_index", "dataset_to_index"])
-        for a, b in df.itertuples(index=False):
-            ranges.append((int(a), int(b)))
-    ranges.sort()
-    return ranges
+        df = pd.read_parquet(
+            path,
+            columns=["episode_index", "dataset_from_index", "dataset_to_index"],
+        )
+        for episode_index, start, stop in df.itertuples(index=False):
+            indexed_ranges.append((int(episode_index), int(start), int(stop)))
+    indexed_ranges.sort()
+    available = {episode for episode, _, _ in indexed_ranges}
+    if selected_episode_indices is not None:
+        missing = sorted(selected_episode_indices - available)
+        if missing:
+            raise ValueError(f"Requested episodes missing from {root}: {missing}")
+    return [
+        (start, stop)
+        for episode, start, stop in indexed_ranges
+        if selected_episode_indices is None or episode in selected_episode_indices
+    ]
 
 
 def check_delta_alignment(root: Path, mask: np.ndarray, strict: bool) -> None:
@@ -333,9 +379,10 @@ def process_root(
     s_q: QuantileStore,
     a_q: QuantileStore,
     desc: str,
+    selected_episode_indices: set[int] | None,
 ) -> tuple[int, int, int]:
     """Stream one dataset root into the shared stat accumulators. Returns counts."""
-    ranges = load_episode_ranges(root)
+    ranges = load_episode_ranges(root, selected_episode_indices)
     n_states = 0
     n_actions = 0
     for _ep_start, _ep_end, state_ep, action_ep in tqdm(
@@ -373,6 +420,7 @@ def main() -> None:
     roots = [Path(r) for r in args.data_root]
     dim, horizon = args.model_dim, args.action_horizon
     dtype = np.float64 if args.float64 else np.float32
+    selected_episode_indices = parse_episode_spec(args.episodes)
 
     if args.delta_mask is None:
         mask_values = list(DEFAULT_DELTA_MASK)
@@ -407,6 +455,7 @@ def main() -> None:
             root, dim=dim, offsets=offsets, mask=mask, dtype=dtype,
             s_mom=s_mom, a_mom=a_mom, s_q=s_q, a_q=a_q,
             desc=f"[{args.task_name}] {root.name}",
+            selected_episode_indices=selected_episode_indices,
         )
         n_episodes += eps
         n_states += r_states
@@ -440,6 +489,11 @@ def main() -> None:
             "num_action_samples": n_actions,
             "quantile_sample_limit": int(args.quantile_sample_limit),
             "roots": roots_meta,
+            "selected_episode_indices": (
+                sorted(selected_episode_indices)
+                if selected_episode_indices is not None
+                else None
+            ),
         }
 
     out = Path(args.output)
