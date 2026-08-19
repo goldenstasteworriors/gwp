@@ -61,6 +61,31 @@ def split_action_head_state_dict(state_dict):
     return action_head_state, non_action_state
 
 
+def convert_checkpoint_state_dict_dtype(state_dict, export_dtype):
+    """Move compact checkpoint tensors to CPU and optionally cast floats."""
+    export_dtype = str(export_dtype).lower()
+    dtype_by_name = {
+        "bf16": torch.bfloat16,
+        "fp16": torch.float16,
+        "fp32": torch.float32,
+    }
+    if export_dtype == "preserve":
+        return state_dict
+    if export_dtype not in dtype_by_name:
+        raise ValueError(
+            "checkpoint_export_dtype must be preserve, bf16, fp16, or fp32; "
+            f"got {export_dtype!r}"
+        )
+    target_dtype = dtype_by_name[export_dtype]
+    return {
+        name: tensor.detach().to(
+            device="cpu",
+            dtype=target_dtype if tensor.is_floating_point() else tensor.dtype,
+        )
+        for name, tensor in state_dict.items()
+    }
+
+
 class CasualWATrainerMoT(Trainer):
     """WAM pretraining trainer for the Mixture-of-Transformers policy."""
 
@@ -91,6 +116,19 @@ class CasualWATrainerMoT(Trainer):
                 "train_action_head_only requires checkpoint_export_mode=action_head_only"
             )
         self.checkpoint_export_mode = checkpoint_export_mode
+        self.checkpoint_export_dtype = str(
+            model_config.get("checkpoint_export_dtype", "preserve")
+        ).lower()
+        if self.checkpoint_export_dtype not in {
+            "preserve",
+            "bf16",
+            "fp16",
+            "fp32",
+        }:
+            raise ValueError(
+                "checkpoint_export_dtype must be preserve, bf16, fp16, or fp32; "
+                f"got {self.checkpoint_export_dtype!r}"
+            )
         self.expand_timesteps = model_config.get("expand_timesteps", False)
         self.action_repeats = model_config.get("action_repeats", 1)
         self.state_repeats = model_config.get("state_repeats", 1)
@@ -359,16 +397,23 @@ class CasualWATrainerMoT(Trainer):
             )
             if not action_head_state:
                 raise RuntimeError("Action-head checkpoint filter matched no tensors")
+            action_head_state = convert_checkpoint_state_dict_dtype(
+                action_head_state, self.checkpoint_export_dtype
+            )
             if self.checkpoint_export_mode == "action_head_plus_latest_non_action":
                 if not non_action_state:
                     raise RuntimeError("Non-action checkpoint filter matched no tensors")
+                non_action_state = convert_checkpoint_state_dict_dtype(
+                    non_action_state, self.checkpoint_export_dtype
+                )
                 self._save_latest_non_action_checkpoint(
                     models[0], non_action_state, output_dir
                 )
             weights[0] = action_head_state
             self.logger.info(
-                "Save action-head-only checkpoint with %d tensors",
+                "Save action-head-only checkpoint with %d tensors (dtype=%s)",
                 len(action_head_state),
+                self.checkpoint_export_dtype,
             )
         return super().save_model_hook(models, weights, output_dir)
 

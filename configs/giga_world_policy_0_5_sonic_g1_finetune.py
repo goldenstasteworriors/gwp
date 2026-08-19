@@ -218,6 +218,9 @@ config = dict(
             _env("GWP_TRAIN_ACTION_HEAD_ONLY", "0") == "1"
         ),
         checkpoint_export_mode=_env("GWP_CHECKPOINT_EXPORT_MODE", "auto"),
+        checkpoint_export_dtype=_env(
+            "GWP_CHECKPOINT_EXPORT_DTYPE", "preserve"
+        ),
         enable_gradient_checkpointing=_env("GWP_MODEL_GRADIENT_CHECKPOINTING", "0") == "1",
         skip_action_expert=False,
     ),
