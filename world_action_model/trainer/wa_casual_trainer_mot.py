@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from diffusers.models import AutoencoderKLWan
 from diffusers.video_processor import VideoProcessor
 from einops import rearrange
@@ -19,6 +20,112 @@ _ACTION_HEAD_PARAMETER_PREFIXES = (
     "action_encoder.",
     "action_decoder.",
 )
+
+
+def _latent_jitter_score(jitter_score, latent_frames, device):
+    if jitter_score is None:
+        return None
+    score = torch.as_tensor(jitter_score, dtype=torch.float32, device=device)
+    score = score.reshape(score.shape[0], -1).clamp_min(0.0)
+    if score.shape[1] != latent_frames:
+        score = F.adaptive_max_pool1d(score[:, None, :], latent_frames)[:, 0]
+    return score
+
+
+def visual_flow_matching_loss(
+    prediction,
+    target,
+    future_mask,
+    *,
+    jitter_score=None,
+    stable_region_ratio=1.0,
+    jitter_weight_scale=0.0,
+    jitter_min_weight=0.1,
+):
+    """Flow-matching MSE with optional central crop and IMU temporal weights."""
+    ratio = float(stable_region_ratio)
+    if not 0.0 < ratio <= 1.0:
+        raise ValueError(f"stable_region_ratio must be in (0, 1], got {ratio}")
+    scale = float(jitter_weight_scale)
+    floor = float(jitter_min_weight)
+    if not 0.0 <= floor <= 1.0:
+        raise ValueError(f"jitter_min_weight must be in [0, 1], got {floor}")
+
+    error = prediction.float() - target.float()
+    if ratio == 1.0 and (scale <= 0.0 or jitter_score is None):
+        return (error * future_mask).pow(2).mean()
+
+    weight = future_mask.float()
+    if ratio < 1.0:
+        height, width = error.shape[-2:]
+        keep_h = max(1, int(round(height * ratio)))
+        keep_w = max(1, int(round(width * ratio)))
+        top = (height - keep_h) // 2
+        left = (width - keep_w) // 2
+        spatial = torch.zeros(
+            1, 1, 1, height, width, dtype=weight.dtype, device=weight.device
+        )
+        spatial[..., top : top + keep_h, left : left + keep_w] = 1.0
+        weight = weight * spatial
+
+    if scale > 0.0 and jitter_score is not None:
+        score = _latent_jitter_score(
+            jitter_score, error.shape[2], device=error.device
+        )
+        temporal = floor + (1.0 - floor) / (1.0 + (score / scale).square())
+        weight = weight * temporal[:, None, :, None, None]
+
+    expanded_weight = weight.expand_as(error)
+    return (error.square() * expanded_weight).sum() / expanded_weight.sum().clamp_min(1.0)
+
+
+def shift_tolerant_clean_latent_loss(
+    prediction,
+    target,
+    future_mask,
+    *,
+    radius,
+    jitter_score=None,
+    jitter_scale=0.0,
+):
+    """Match clean future latents up to a small camera-induced translation."""
+    radius = int(radius)
+    if radius < 1:
+        return prediction.new_zeros(())
+    prediction = prediction.float()
+    target = target.float()
+    channels = prediction.shape[1]
+    candidates = []
+    for shift_y in range(-radius, radius + 1):
+        for shift_x in range(-radius, radius + 1):
+            shifted = torch.roll(target, shifts=(shift_y, shift_x), dims=(-2, -1))
+            valid = future_mask.float().clone()
+            if shift_y > 0:
+                valid[..., :shift_y, :] = 0
+            elif shift_y < 0:
+                valid[..., shift_y:, :] = 0
+            if shift_x > 0:
+                valid[..., :, :shift_x] = 0
+            elif shift_x < 0:
+                valid[..., :, shift_x:] = 0
+            numerator = ((prediction - shifted).square() * valid).sum(
+                dim=(1, 3, 4)
+            )
+            denominator = valid.sum(dim=(1, 3, 4)).mul(channels).clamp_min(1.0)
+            candidates.append(numerator / denominator)
+    best_error = torch.stack(candidates, dim=0).amin(dim=0)
+    valid_frame = future_mask.flatten(3).amax(dim=-1)[:, 0].float()
+
+    score = _latent_jitter_score(
+        jitter_score, prediction.shape[2], device=prediction.device
+    )
+    if score is None or float(jitter_scale) <= 0.0:
+        gate = torch.ones_like(best_error)
+    else:
+        scale = float(jitter_scale)
+        gate = score.square() / (score.square() + scale * scale)
+    weight = valid_frame * gate
+    return (best_error * weight).sum() / weight.sum().clamp_min(1.0)
 
 
 def is_action_head_parameter(name: str) -> bool:
@@ -136,6 +243,25 @@ class CasualWATrainerMoT(Trainer):
         self.action_dim = int(model_config.get("action_dim", 14))
         self.num_embodiments = int(model_config.get("num_embodiments", 1))
         self.visual_loss_weight = float(model_config.get("visual_loss_weight", 1.0))
+        self.visual_stable_region_ratio = float(
+            model_config.get("visual_stable_region_ratio", 1.0)
+        )
+        self.visual_jitter_weight_scale = float(
+            model_config.get("visual_jitter_weight_scale", 0.0)
+        )
+        self.visual_jitter_min_weight = float(
+            model_config.get("visual_jitter_min_weight", 0.1)
+        )
+        self.visual_shift_tolerant_radius = int(
+            model_config.get("visual_shift_tolerant_radius", 0)
+        )
+        self.visual_shift_tolerant_weight = float(
+            model_config.get("visual_shift_tolerant_weight", 0.0)
+        )
+        if self.visual_shift_tolerant_radius < 0:
+            raise ValueError("visual_shift_tolerant_radius must be non-negative")
+        if self.visual_shift_tolerant_weight < 0.0:
+            raise ValueError("visual_shift_tolerant_weight must be non-negative")
         self.action_loss_weight = float(model_config.get("action_loss_weight", 1.0))
         self.action_temporal_weight_mode = str(
             model_config.get("action_temporal_weight_mode", "uniform")
@@ -229,6 +355,7 @@ class CasualWATrainerMoT(Trainer):
         visual_noise = torch.randn_like(visual_latents)
         visual_target = visual_noise - visual_latents
         noisy_latents = visual_noise * visual_sigma + visual_latents * (1 - visual_sigma)
+        flow_noisy_latents = noisy_latents
 
         action_noise = torch.randn_like(action)
         action_target = action_noise - action
@@ -327,7 +454,33 @@ class CasualWATrainerMoT(Trainer):
         if visual_pred is None:
             visual_loss = action_pred.new_zeros(())
         else:
-            visual_loss = ((visual_pred.float() - visual_target.float()) * first_frame_mask).pow(2).mean()
+            jitter_score = batch_dict.get("visual_jitter_score")
+            visual_loss = visual_flow_matching_loss(
+                visual_pred,
+                visual_target,
+                first_frame_mask,
+                jitter_score=jitter_score,
+                stable_region_ratio=self.visual_stable_region_ratio,
+                jitter_weight_scale=self.visual_jitter_weight_scale,
+                jitter_min_weight=self.visual_jitter_min_weight,
+            )
+            if self.visual_shift_tolerant_weight > 0.0:
+                pred_clean_latents = (
+                    flow_noisy_latents.float()
+                    - visual_sigma.float() * visual_pred.float()
+                )
+                consistency_loss = shift_tolerant_clean_latent_loss(
+                    pred_clean_latents,
+                    visual_latents,
+                    first_frame_mask,
+                    radius=self.visual_shift_tolerant_radius,
+                    jitter_score=jitter_score,
+                    jitter_scale=self.visual_jitter_weight_scale,
+                )
+                visual_loss = (
+                    visual_loss
+                    + self.visual_shift_tolerant_weight * consistency_loss
+                )
 
         action_error = (action_pred.float() - action_target.float()).pow(2)
         action_dim_mask = batch_dict.get("action_dim_mask")

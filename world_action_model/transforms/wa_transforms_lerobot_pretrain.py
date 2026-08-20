@@ -44,6 +44,8 @@ class WALeRobotTransformsPretrain(WATransforms):
         append_state_velocity_token=False,
         emit_action_dim_mask=False,
         emit_action_time_mask=False,
+        expected_state_dim=None,
+        jitter_score_key=None,
     ):
         if norm_path is None:
             raise ValueError("norm_path list is none")
@@ -127,6 +129,12 @@ class WALeRobotTransformsPretrain(WATransforms):
         self.append_state_velocity_token = bool(append_state_velocity_token)
         self.emit_action_dim_mask = bool(emit_action_dim_mask)
         self.emit_action_time_mask = bool(emit_action_time_mask)
+        self.expected_state_dim = (
+            None if expected_state_dim is None else int(expected_state_dim)
+        )
+        self.jitter_score_key = (
+            None if jitter_score_key is None else str(jitter_score_key)
+        )
         self.image_augmentation = dict(image_augmentation or {})
         self._warned_unknown_robotype = False
     
@@ -383,6 +391,11 @@ class WALeRobotTransformsPretrain(WATransforms):
             state = state[None, :]
         if state.dim() != 2:
             raise ValueError(f"Expected state with shape [history, dim], got {tuple(state.shape)}")
+        if self.expected_state_dim is not None and state.shape[-1] != self.expected_state_dim:
+            raise ValueError(
+                f"Expected {self.expected_state_dim}-D state, got {state.shape[-1]}. "
+                "The IMU ablation requires an IMU-augmented dataset."
+            )
         if state.shape[0] > self.state_history_tokens:
             state = state[-self.state_history_tokens :]
         elif state.shape[0] < self.state_history_tokens:
@@ -409,12 +422,12 @@ class WALeRobotTransformsPretrain(WATransforms):
                 
         base = self._get_delta_mask(embodiment_id)
         assert base is not None, f"embodiment_id {embodiment_id} not found in delta_mask_by_embodiment_id"
-        effective_dim = int(base.shape[-1])
-        state = state[:, :effective_dim]
-        action = action[:, :effective_dim]
-
         assert self.model_action_dim is not None, "model_action_dim must be provided"
         d = int(self.model_action_dim)
+        effective_action_dim = min(int(base.shape[-1]), int(action.shape[-1]), d)
+        effective_state_dim = min(int(state.shape[-1]), d)
+        state = state[:, :effective_state_dim]
+        action = action[:, :effective_action_dim]
         if state.shape[-1] > d:
             state = state[..., :d]
         if state.shape[-1] < d:
@@ -460,13 +473,13 @@ class WALeRobotTransformsPretrain(WATransforms):
         norm_state = _normalize_feature(
             state,
             norm_stats["observation.state"],
-            eff_dim=effective_dim,
+            eff_dim=effective_state_dim,
             device=state.device,
         )
         norm_delta = _normalize_feature(
             delta,
             norm_stats["action"],
-            eff_dim=effective_dim,
+            eff_dim=effective_action_dim,
             device=action.device,
         )
 
@@ -505,10 +518,18 @@ class WALeRobotTransformsPretrain(WATransforms):
         out["embodiment_id"] = torch.tensor(int(embodiment_id), dtype=torch.long)
         if self.emit_action_dim_mask:
             action_dim_mask = torch.zeros(d, dtype=torch.bool, device=action.device)
-            action_dim_mask[:effective_dim] = True
+            action_dim_mask[:effective_action_dim] = True
             out["action_dim_mask"] = action_dim_mask
         if self.emit_action_time_mask:
             out["action_time_mask"] = action_valid
+        if self.jitter_score_key is not None:
+            if self.jitter_score_key not in data_dict:
+                raise KeyError(
+                    f"Missing configured jitter score key {self.jitter_score_key!r}"
+                )
+            out["visual_jitter_score"] = torch.as_tensor(
+                data_dict[self.jitter_score_key], dtype=torch.float32
+            ).reshape(-1)
         dim = out["action"].shape[-1]
         if self.emit_action_denorm_scale:
             scale = torch.ones(dim, dtype=torch.float32, device=action.device)

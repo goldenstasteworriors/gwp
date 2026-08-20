@@ -76,10 +76,14 @@ state_history_offsets = _int_list("GWP_STATE_HISTORY_OFFSETS", "0")
 train_episodes = _episode_list("GWP_TRAIN_EPISODES")
 max_ref_frames = int(_env("GWP_MAX_REF_FRAMES", "1"))
 min_ref_latents = int(_env("GWP_MIN_REF_LATENTS", "1"))
+use_imu = _env("GWP_USE_IMU", "0") == "1"
+jitter_score_key = "observation.camera_jitter_score"
 
 delta_frames = {key: image_frame_offsets for key in view_keys}
 if len(state_history_offsets) > 1 or state_history_offsets != [0]:
     delta_frames["observation.state"] = state_history_offsets
+if use_imu:
+    delta_frames[jitter_score_key] = image_frame_offsets
 
 data_or_config = [
     dict(
@@ -176,6 +180,10 @@ config = dict(
                 emit_action_time_mask=(
                     _env("GWP_MASK_PADDED_ACTION_STEPS", "0") == "1"
                 ),
+                expected_state_dim=int(
+                    _env("GWP_EXPECTED_STATE_DIM", "23" if use_imu else str(physical_action_dim))
+                ),
+                jitter_score_key=jitter_score_key if use_imu else None,
                 # Apply one sampled transform to every frame in a temporal chunk.
                 # Hue and horizontal flips stay disabled because bottle color
                 # and left/right arm identity are task semantics.
@@ -230,6 +238,21 @@ config = dict(
         action_flow_shift=5.0,
         expand_timesteps=True,
         visual_loss_weight=float(_env("GWP_VISUAL_LOSS_WEIGHT", "1")),
+        visual_stable_region_ratio=float(
+            _env("GWP_VISUAL_STABLE_REGION_RATIO", "1")
+        ),
+        visual_jitter_weight_scale=float(
+            _env("GWP_VISUAL_JITTER_WEIGHT_SCALE", "0")
+        ),
+        visual_jitter_min_weight=float(
+            _env("GWP_VISUAL_JITTER_MIN_WEIGHT", "0.1")
+        ),
+        visual_shift_tolerant_radius=int(
+            _env("GWP_VISUAL_SHIFT_TOLERANT_RADIUS", "0")
+        ),
+        visual_shift_tolerant_weight=float(
+            _env("GWP_VISUAL_SHIFT_TOLERANT_WEIGHT", "0")
+        ),
         action_loss_weight=float(_env("GWP_ACTION_LOSS_WEIGHT", "1")),
         action_temporal_weight_mode=_env(
             "GWP_ACTION_TEMPORAL_WEIGHT_MODE", "uniform"
