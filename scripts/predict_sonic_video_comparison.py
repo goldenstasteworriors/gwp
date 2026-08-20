@@ -215,26 +215,43 @@ def predict_joint_chunk(
     prompt_embeds = policy.prompt_embedding.to(device=policy.device, dtype=policy.dtype)
     generator = torch.Generator(device=policy.device).manual_seed(int(seed))
 
-    latents, ref_latents, first_frame_mask, action = pipe.prepare_latents(
-        image_tensor,
-        batch_size=1,
-        num_channels_latents=pipe.vae.config.z_dim,
-        height=policy.height,
-        width=policy.width,
-        num_frames=policy.model_image_frames,
-        dtype=torch.float32,
-        device=torch.device(policy.device),
-        generator=generator,
-        action_chunk=policy.action_horizon,
-        action_dim=policy.model_action_dim,
-    )
+    video_condition = image_tensor.unsqueeze(2).to(dtype=pipe.vae.dtype)
+    ref_latents = pipe.vae.encode(video_condition).latent_dist.mode().to(dtype=torch.float32)
+    latents_mean = torch.tensor(pipe.vae.config.latents_mean).view(
+        1, pipe.vae.config.z_dim, 1, 1, 1
+    ).to(ref_latents.device, ref_latents.dtype)
+    latents_std = 1.0 / torch.tensor(pipe.vae.config.latents_std).view(
+        1, pipe.vae.config.z_dim, 1, 1, 1
+    ).to(ref_latents.device, ref_latents.dtype)
+    ref_latents = (ref_latents - latents_mean) * latents_std
     num_clean_latents = int(ref_latents.shape[2])
-    future_latents = latents[:, :, num_clean_latents:].to(dtype=policy.dtype)
+    total_latent_frames = (
+        (policy.model_image_frames - 1) // int(pipe.vae.config.scale_factor_temporal) + 1
+    )
+    num_future_latents = total_latent_frames - num_clean_latents
+    if num_future_latents < 1:
+        raise ValueError(
+            f"reference uses {num_clean_latents}/{total_latent_frames} visual latents"
+        )
+    future_latents = torch.randn(
+        (
+            1,
+            pipe.vae.config.z_dim,
+            num_future_latents,
+            ref_latents.shape[-2],
+            ref_latents.shape[-1],
+        ),
+        generator=generator,
+        device=policy.device,
+        dtype=torch.float32,
+    ).to(dtype=policy.dtype)
+    action = torch.randn(
+        (1, policy.action_horizon, policy.model_action_dim),
+        generator=generator,
+        device=policy.device,
+        dtype=torch.float32,
+    ).to(dtype=policy.dtype)
     ref_latents = ref_latents.to(dtype=policy.dtype)
-    action = action.to(dtype=policy.dtype)
-    first_frame_mask = first_frame_mask.to(dtype=policy.dtype)
-    if future_latents.shape[2] < 1:
-        raise ValueError("joint video prediction requires at least one future latent")
 
     visual_scheduler = FlowMatchEulerDiscreteScheduler(shift=2.0)
     action_scheduler = FlowMatchEulerDiscreteScheduler(shift=5.0)
@@ -246,7 +263,7 @@ def predict_joint_chunk(
     batch_size = 1
     num_state_tokens = int(state_tokens.shape[1])
     num_action_tokens = int(action.shape[1])
-    frame_per_tokens = int(first_frame_mask.shape[-1] * first_frame_mask.shape[-2] // 4)
+    frame_per_tokens = int(ref_latents.shape[-1] * ref_latents.shape[-2] // 4)
     num_clean_tokens = frame_per_tokens * num_clean_latents
     num_future_tokens = frame_per_tokens * int(future_latents.shape[2])
     embodiment_id = torch.zeros((batch_size,), device=policy.device, dtype=torch.long)
@@ -284,12 +301,8 @@ def predict_joint_chunk(
             f"decode_input={tuple(decoded_latents.shape)}",
             flush=True,
         )
-    latents_mean = torch.tensor(pipe.vae.config.latents_mean).view(
-        1, pipe.vae.config.z_dim, 1, 1, 1
-    ).to(decoded_latents.device, decoded_latents.dtype)
-    latents_std = 1.0 / torch.tensor(pipe.vae.config.latents_std).view(
-        1, pipe.vae.config.z_dim, 1, 1, 1
-    ).to(decoded_latents.device, decoded_latents.dtype)
+    latents_mean = latents_mean.to(decoded_latents.device, decoded_latents.dtype)
+    latents_std = latents_std.to(decoded_latents.device, decoded_latents.dtype)
     decoded_latents = decoded_latents / latents_std + latents_mean
     decoded = pipe.vae.decode(decoded_latents, return_dict=False)[0]
     generated = pipe.video_processor.postprocess_video(decoded, output_type="np")
