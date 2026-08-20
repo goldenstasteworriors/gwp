@@ -362,7 +362,7 @@ def annotate_comparison(
     cv2.putText(canvas, "Ground truth", (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
     cv2.putText(
         canvas,
-        "MoT prediction (GT reset every 0.48s)",
+        "MoT prediction (reset 0.48s)",
         (width + 12, 24),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
@@ -378,7 +378,7 @@ def annotate_comparison(
         cv2.rectangle(canvas, (1, 1), (width * 2 - 2, height + header - 2), (255, 40, 40), 5)
         cv2.putText(
             canvas,
-            f"nearest sample to strongest moment {segment.peak_seconds:.2f}s",
+            f"PEAK nearest {segment.peak_seconds:.2f}s",
             (width + 12, 46),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.46,
