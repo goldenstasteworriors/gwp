@@ -352,7 +352,7 @@ def write_comparison_video(
     chunk_latencies = []
 
     chunk_stride = IMAGE_FRAME_OFFSETS[-1]
-    for chunk_number, chunk_start in enumerate(range(start_frame, end_frame + 1, chunk_stride)):
+    for chunk_number, chunk_start in enumerate(range(start_frame, end_frame, chunk_stride)):
         valid_offsets = [offset for offset in IMAGE_FRAME_OFFSETS if chunk_start + offset <= end_frame]
         if not valid_offsets:
             continue
