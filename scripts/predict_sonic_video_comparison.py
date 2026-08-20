@@ -277,6 +277,13 @@ def predict_joint_chunk(
         action = action_scheduler.step(action_pred, action_t, action, return_dict=False)[0]
 
     decoded_latents = torch.cat([ref_latents, future_latents], dim=2).to(pipe.vae.dtype)
+    if not getattr(policy, "_joint_video_shape_logged", False):
+        print(
+            "joint video latent shapes: "
+            f"reference={tuple(ref_latents.shape)} future={tuple(future_latents.shape)} "
+            f"decode_input={tuple(decoded_latents.shape)}",
+            flush=True,
+        )
     latents_mean = torch.tensor(pipe.vae.config.latents_mean).view(
         1, pipe.vae.config.z_dim, 1, 1, 1
     ).to(decoded_latents.device, decoded_latents.dtype)
@@ -286,7 +293,11 @@ def predict_joint_chunk(
     decoded_latents = decoded_latents / latents_std + latents_mean
     decoded = pipe.vae.decode(decoded_latents, return_dict=False)[0]
     generated = pipe.video_processor.postprocess_video(decoded, output_type="np")
-    return _video_array(generated)
+    generated = _video_array(generated)
+    if not getattr(policy, "_joint_video_shape_logged", False):
+        print(f"joint video decoded shape: {tuple(generated.shape)}", flush=True)
+        policy._joint_video_shape_logged = True
+    return generated
 
 
 def annotate_comparison(
