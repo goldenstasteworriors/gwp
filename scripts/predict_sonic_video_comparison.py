@@ -261,12 +261,20 @@ def predict_joint_chunk(
         raise RuntimeError("visual/action schedulers produced different step counts")
 
     batch_size = 1
-    num_state_tokens = int(state_tokens.shape[1])
-    num_action_tokens = int(action.shape[1])
-    frame_per_tokens = int(ref_latents.shape[-1] * ref_latents.shape[-2] // 4)
-    num_clean_tokens = frame_per_tokens * num_clean_latents
-    num_future_tokens = frame_per_tokens * int(future_latents.shape[2])
     embodiment_id = torch.zeros((batch_size,), device=policy.device, dtype=torch.long)
+    _, _, num_state_tokens, num_action_tokens = pipe.transformer.encode_action_tokens(
+        state_tokens, action, embodiment_id=embodiment_id
+    )
+    _, _, num_clean_tokens, num_future_tokens, _ = pipe.transformer.encode_visual_tokens(
+        ref_latents, future_latents
+    )
+    if not getattr(policy, "_joint_video_shape_logged", False):
+        print(
+            "joint video token counts: "
+            f"state={num_state_tokens} ref={num_clean_tokens} "
+            f"action={num_action_tokens} future={num_future_tokens}",
+            flush=True,
+        )
 
     for visual_t, action_t in zip(visual_scheduler.timesteps, action_scheduler.timesteps):
         timestep = torch.zeros(
