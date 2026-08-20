@@ -29,6 +29,7 @@ class Experiment:
     name: str
     description: str
     env: dict[str, str] = field(default_factory=dict)
+    norm_stats_filename: str = "norm_stats.json"
 
 
 EXPERIMENTS = [
@@ -151,6 +152,7 @@ EXPERIMENTS = [
             "GWP_ACTION_HORIZON": "24",
             "GWP_IMAGE_FRAME_OFFSETS": "0,6,12,18,24",
         },
+        norm_stats_filename="norm_stats_h24.json",
     ),
 ]
 
@@ -469,6 +471,7 @@ def validate_action_representation(
     dataset: Path,
     action_delta_mask: list[bool],
     training_episodes: list[int],
+    experiments: tuple[Experiment, ...],
 ) -> None:
     info = json.loads((dataset / "meta" / "info.json").read_text(encoding="utf-8"))
     if info.get("action_semantics") != "absolute_joint_target":
@@ -492,21 +495,29 @@ def validate_action_representation(
             f"absolute: {expected}, got {action_delta_mask}"
         )
 
-    norm = json.loads((dataset / "norm_stats.json").read_text(encoding="utf-8"))
-    metadata = norm.get("metadata", {})
-    norm_mask = metadata.get("delta_mask")
     expected_padded = action_delta_mask + [False] * (32 - len(action_delta_mask))
-    if norm_mask != expected_padded:
-        raise ValueError(
-            "Normalization action representation does not match training: "
-            f"{norm_mask} != {expected_padded}"
-        )
-    norm_episodes = metadata.get("selected_episode_indices")
-    if norm_episodes != training_episodes:
-        raise ValueError(
-            "Normalization stats must use exactly the training episodes and exclude "
-            f"validation: {norm_episodes} != {training_episodes}"
-        )
+    for experiment in experiments:
+        norm_path = dataset / experiment.norm_stats_filename
+        norm = json.loads(norm_path.read_text(encoding="utf-8"))
+        metadata = norm.get("metadata", {})
+        norm_mask = metadata.get("delta_mask")
+        if norm_mask != expected_padded:
+            raise ValueError(
+                f"Normalization action representation in {norm_path} does not match "
+                f"training: {norm_mask} != {expected_padded}"
+            )
+        norm_episodes = metadata.get("selected_episode_indices")
+        if norm_episodes != training_episodes:
+            raise ValueError(
+                f"Normalization stats in {norm_path} must use exactly the training "
+                f"episodes and exclude validation: {norm_episodes} != {training_episodes}"
+            )
+        expected_horizon = int(experiment.env.get("GWP_ACTION_HORIZON", "48"))
+        if metadata.get("action_horizon") != expected_horizon:
+            raise ValueError(
+                f"Normalization horizon in {norm_path} does not match "
+                f"{experiment.name}: {metadata.get('action_horizon')} != {expected_horizon}"
+            )
 
 
 def read_losses(log_path: Path) -> list[tuple[int, float]]:
@@ -623,7 +634,7 @@ def job_environment(
         {
             "PYTHONUNBUFFERED": "1",
             "GWP_SONIC_DATA_PATH": str(args.dataset),
-            "GWP_NORM_STATS_PATH": str(args.dataset / "norm_stats.json"),
+            "GWP_NORM_STATS_PATH": str(args.dataset / experiment.norm_stats_filename),
             "GWP05_TRANSFORMER_PRETRAINED": str(
                 transformer_pretrained or PROJECT_ROOT / "weights" / "Giga-World-Policy-0.5"
             ),
@@ -685,6 +696,7 @@ def start_job(args: argparse.Namespace, experiment: Experiment, gpu_ids: str) ->
             "description": experiment.description,
             "env": experiment.env,
             "dataset": str(args.dataset),
+            "norm_stats": str(args.dataset / experiment.norm_stats_filename),
             "prompt": args.prompt,
             "training_episodes": args.training_episodes,
             "evaluation_episodes": args.evaluation_episodes,
@@ -792,7 +804,10 @@ def export_inference_model(args: argparse.Namespace, job: RunningJob) -> Path:
     if transformer_target.exists():
         shutil.rmtree(transformer_target)
     shutil.move(str(transformer_source), str(transformer_target))
-    shutil.copy2(args.dataset / "norm_stats.json", export_dir / "norm_stats.json")
+    shutil.copy2(
+        args.dataset / job.experiment.norm_stats_filename,
+        export_dir / "norm_stats.json",
+    )
     shutil.copy2(
         args.dataset / "t5_embedding" / "episode_000000.pt",
         export_dir / "prompt_embedding.pt",
@@ -1114,6 +1129,7 @@ def main() -> None:
         args.dataset,
         args.action_delta_mask,
         args.training_episodes,
+        args.selected_experiments,
     )
     if "WANDB_API_KEY" not in os.environ:
         raise RuntimeError("WANDB_API_KEY must be present in the scheduler environment")
@@ -1133,7 +1149,12 @@ def main() -> None:
     write_json(
         args.output_root / "experiment_registry.json",
         [
-            {"name": item.name, "description": item.description, "env": item.env}
+            {
+                "name": item.name,
+                "description": item.description,
+                "env": item.env,
+                "norm_stats_filename": item.norm_stats_filename,
+            }
             for item in args.selected_experiments
         ],
     )
