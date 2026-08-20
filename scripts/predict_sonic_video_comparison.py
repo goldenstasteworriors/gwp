@@ -45,6 +45,7 @@ from world_action_model.inference.sonic_history_policy import (  # noqa: E402
 
 
 MODEL_FPS = 50.0
+VAE_TEMPORAL_SCALE = 4
 IMAGE_FRAME_OFFSETS = (0, 6, 12, 18, 24)
 STATE_HISTORY_OFFSETS = (-50, -25, 0)
 DEFAULT_SEGMENTS = (
@@ -225,9 +226,7 @@ def predict_joint_chunk(
     ).to(ref_latents.device, ref_latents.dtype)
     ref_latents = (ref_latents - latents_mean) * latents_std
     num_clean_latents = int(ref_latents.shape[2])
-    total_latent_frames = (
-        (policy.model_image_frames - 1) // int(pipe.vae.config.scale_factor_temporal) + 1
-    )
+    total_latent_frames = (policy.model_image_frames - 1) // VAE_TEMPORAL_SCALE + 1
     num_future_latents = total_latent_frames - num_clean_latents
     if num_future_latents < 1:
         raise ValueError(
@@ -549,6 +548,7 @@ def main() -> None:
         "model_dtype": "bf16",
         "action_flow_shift": 5.0,
         "visual_flow_shift": 2.0,
+        "vae_temporal_scale": VAE_TEMPORAL_SCALE,
         "comparison_mode": "teacher_forced_reference_reset_each_24_frames",
     }
     manifest_path = output_dir / "video_prediction_manifest.json"
