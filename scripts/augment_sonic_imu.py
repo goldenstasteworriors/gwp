@@ -144,9 +144,7 @@ def add_imu_to_episode(processed: pd.DataFrame, raw: pd.DataFrame, radius: int):
 
     result = processed.copy()
     result["observation.state"] = list(np.concatenate([state, imu], axis=1))
-    result["observation.camera_jitter_score"] = list(
-        jitter.astype(np.float32)[:, None]
-    )
+    result["observation.camera_jitter_score"] = jitter.astype(np.float32)
     return result, jitter
 
 

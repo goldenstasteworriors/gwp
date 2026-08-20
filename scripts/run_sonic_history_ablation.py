@@ -154,6 +154,43 @@ EXPERIMENTS = [
         },
         norm_stats_filename="norm_stats_h24.json",
     ),
+    Experiment(
+        "j00_imu_input_baseline",
+        "Original m00 objective with the same 23-D joint plus IMU state used by jitter methods.",
+        {
+            "GWP_MASK_PADDED_ACTION_DIMS": "1",
+            "GWP_MASK_PADDED_ACTION_STEPS": "1",
+            "GWP_USE_IMU": "1",
+            "GWP_EXPECTED_STATE_DIM": "23",
+        },
+    ),
+    Experiment(
+        "j01_stable_region_imu_weight",
+        "Central stable-region visual loss with IMU-derived temporal downweighting.",
+        {
+            "GWP_MASK_PADDED_ACTION_DIMS": "1",
+            "GWP_MASK_PADDED_ACTION_STEPS": "1",
+            "GWP_USE_IMU": "1",
+            "GWP_EXPECTED_STATE_DIM": "23",
+            "GWP_VISUAL_STABLE_REGION_RATIO": "0.75",
+            "GWP_VISUAL_JITTER_WEIGHT_SCALE": "0.025",
+            "GWP_VISUAL_JITTER_MIN_WEIGHT": "0.1",
+        },
+    ),
+    Experiment(
+        "j02_shift_tolerant_consistency",
+        "IMU-weighted flow loss plus clean-latent consistency up to a one-token camera shift.",
+        {
+            "GWP_MASK_PADDED_ACTION_DIMS": "1",
+            "GWP_MASK_PADDED_ACTION_STEPS": "1",
+            "GWP_USE_IMU": "1",
+            "GWP_EXPECTED_STATE_DIM": "23",
+            "GWP_VISUAL_JITTER_WEIGHT_SCALE": "0.025",
+            "GWP_VISUAL_JITTER_MIN_WEIGHT": "0.1",
+            "GWP_VISUAL_SHIFT_TOLERANT_RADIUS": "1",
+            "GWP_VISUAL_SHIFT_TOLERANT_WEIGHT": "0.25",
+        },
+    ),
 ]
 
 
