@@ -32,7 +32,14 @@ class Experiment:
 
 
 EXPERIMENTS = [
-    Experiment("m00_baseline", "Correct prompt, original state/image context and unmasked action loss."),
+    Experiment(
+        "m00_baseline",
+        "No history, with loss restricted to physical action dimensions and valid timesteps.",
+        {
+            "GWP_MASK_PADDED_ACTION_DIMS": "1",
+            "GWP_MASK_PADDED_ACTION_STEPS": "1",
+        },
+    ),
     Experiment("m01_dim_mask", "Mask the 19 padded model action dimensions.", {"GWP_MASK_PADDED_ACTION_DIMS": "1"}),
     Experiment(
         "m02_dim_time_mask",
@@ -242,6 +249,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-retries", type=int, default=1)
     parser.add_argument(
+        "--action-delta-mask",
+        default="true,true,true,true,true,true,true,false,false,false,false,false,false",
+        help="Physical action representation: true=action-state delta, false=absolute target.",
+    )
+    parser.add_argument(
         "--warm-start-root",
         type=Path,
         default=None,
@@ -301,6 +313,25 @@ def parse_gpu_groups(raw: str) -> tuple[str, ...]:
     if not groups:
         raise ValueError("At least one GPU group is required")
     return tuple(groups)
+
+
+def parse_bool_spec(raw: str) -> list[bool]:
+    lookup = {"true": True, "1": True, "false": False, "0": False}
+    values = []
+    for item in raw.split(","):
+        item = item.strip().lower()
+        if not item:
+            continue
+        if item not in lookup:
+            raise ValueError(f"Invalid boolean value in action delta mask: {item!r}")
+        values.append(lookup[item])
+    if not values:
+        raise ValueError("Action delta mask must not be empty")
+    return values
+
+
+def format_bool_spec(values: list[bool]) -> str:
+    return ",".join("true" if value else "false" for value in values)
 
 
 def write_json(path: Path, value) -> None:
@@ -434,6 +465,50 @@ def validate_prompt_assets(dataset: Path, prompt: str) -> None:
         raise FileNotFoundError(f"Missing prompt embeddings for episodes: {missing}")
 
 
+def validate_action_representation(
+    dataset: Path,
+    action_delta_mask: list[bool],
+    training_episodes: list[int],
+) -> None:
+    info = json.loads((dataset / "meta" / "info.json").read_text(encoding="utf-8"))
+    if info.get("action_semantics") != "absolute_joint_target":
+        raise ValueError(
+            "The source dataset must retain raw absolute joint targets; got "
+            f"action_semantics={info.get('action_semantics')!r}"
+        )
+    if info.get("action_schema_id") != "sonic_g1_left_arm_inspire6_absolute_joint_v1":
+        raise ValueError(
+            f"Unexpected action schema: {info.get('action_schema_id')!r}"
+        )
+    if len(action_delta_mask) != 13:
+        raise ValueError(
+            "The left-arm/left-hand dataset requires a 13-D action delta mask, got "
+            f"{len(action_delta_mask)}"
+        )
+    expected = [True] * 7 + [False] * 6
+    if action_delta_mask != expected:
+        raise ValueError(
+            "Expected left arm joints to be relative and Inspire hand joints to be "
+            f"absolute: {expected}, got {action_delta_mask}"
+        )
+
+    norm = json.loads((dataset / "norm_stats.json").read_text(encoding="utf-8"))
+    metadata = norm.get("metadata", {})
+    norm_mask = metadata.get("delta_mask")
+    expected_padded = action_delta_mask + [False] * (32 - len(action_delta_mask))
+    if norm_mask != expected_padded:
+        raise ValueError(
+            "Normalization action representation does not match training: "
+            f"{norm_mask} != {expected_padded}"
+        )
+    norm_episodes = metadata.get("selected_episode_indices")
+    if norm_episodes != training_episodes:
+        raise ValueError(
+            "Normalization stats must use exactly the training episodes and exclude "
+            f"validation: {norm_episodes} != {training_episodes}"
+        )
+
+
 def read_losses(log_path: Path) -> list[tuple[int, float]]:
     if not log_path.exists():
         return []
@@ -556,6 +631,7 @@ def job_environment(
             "GWP05_PROJECT_DIR": str(output_dir),
             "GWP_GPU_IDS": gpu_ids,
             "GWP_PHYSICAL_ACTION_DIM": "13",
+            "GWP_ACTION_DELTA_MASK": format_bool_spec(args.action_delta_mask),
             "GWP_IMAGE_AUGMENTATION": "1",
             "GWP_BATCH_SIZE_PER_GPU": "1",
             "GWP_NUM_WORKERS": "8",
@@ -1026,6 +1102,7 @@ def main() -> None:
     if len(set(experiment_names)) != len(experiment_names):
         raise ValueError(f"Duplicate experiment names: {experiment_names}")
     args.selected_experiments = tuple(experiment_by_name(name) for name in experiment_names)
+    args.action_delta_mask = parse_bool_spec(args.action_delta_mask)
     args.training_episodes = parse_episode_spec(args.train_episodes)
     args.evaluation_episodes = parse_episode_spec(args.evaluation_episodes)
     overlap = sorted(set(args.training_episodes).intersection(args.evaluation_episodes))
@@ -1033,6 +1110,11 @@ def main() -> None:
         raise ValueError(f"Training and evaluation episode sets overlap: {overlap}")
     gpu_groups = parse_gpu_groups(args.gpu_groups)
     validate_prompt_assets(args.dataset, args.prompt)
+    validate_action_representation(
+        args.dataset,
+        args.action_delta_mask,
+        args.training_episodes,
+    )
     if "WANDB_API_KEY" not in os.environ:
         raise RuntimeError("WANDB_API_KEY must be present in the scheduler environment")
     args.output_root.mkdir(parents=True, exist_ok=True)
