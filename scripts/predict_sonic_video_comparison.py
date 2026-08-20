@@ -285,6 +285,17 @@ def predict_joint_chunk(
         action_start = num_state_tokens + num_clean_tokens
         timestep[:, action_start : action_start + num_action_tokens] = action_t.to(policy.dtype)
         timestep[:, action_start + num_action_tokens :] = visual_t.to(policy.dtype)
+        action_ts, visual_ts = pipe.transformer._split_timestep(
+            timestep,
+            num_state_tokens,
+            num_action_tokens,
+            num_clean_tokens,
+            num_future_tokens,
+        )
+        if action_ts.shape[1] != num_state_tokens + num_action_tokens:
+            raise RuntimeError(f"unexpected action timestep shape {tuple(action_ts.shape)}")
+        if visual_ts.shape[1] != num_clean_tokens + num_future_tokens:
+            raise RuntimeError(f"unexpected visual timestep shape {tuple(visual_ts.shape)}")
         visual_pred, action_pred = pipe.transformer(
             ref_latents=ref_latents,
             noisy_latents=future_latents,
