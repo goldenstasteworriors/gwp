@@ -851,7 +851,7 @@ def export_inference_model(args: argparse.Namespace, job: RunningJob) -> Path:
         "model_image_frames": len(image_offsets),
         "physical_action_dim": 13,
         "model_action_dim": 32,
-        "delta_mask": [False] * 13,
+        "delta_mask": list(args.action_delta_mask),
         "fps": 50,
         "image_size": [320, 384],
         "num_inference_steps": 10,
