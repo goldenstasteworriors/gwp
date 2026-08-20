@@ -79,6 +79,15 @@ def load_rollout(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return predicted, reference, frame_indices
 
 
+def load_arm_semantics(path: Path) -> str:
+    manifest_path = path.with_suffix(".manifest.json")
+    if not manifest_path.is_file():
+        return "unknown_action_representation"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    semantics = manifest.get("rollout_semantics", {}).get("left_arm_channels_0_7")
+    return str(semantics or "unknown_action_representation")
+
+
 def qpos_indices(model: mujoco.MjModel, names: tuple[str, ...]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     joint_ids = np.array(
         [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name) for name in names],
@@ -169,6 +178,7 @@ def main() -> None:
     rollout = args.rollout.expanduser().resolve()
     model_xml = args.model_xml.expanduser().resolve()
     predicted, reference, frame_indices = load_rollout(rollout)
+    arm_semantics = load_arm_semantics(rollout)
     if not model_xml.is_file():
         raise FileNotFoundError(model_xml)
 
@@ -191,6 +201,7 @@ def main() -> None:
     print(f"rollout: {rollout}")
     print(f"model: {model_xml}")
     print(f"frames: {len(predicted)}, duration: {duration:.2f}s at {args.speed:g}x")
+    print(f"left-arm action semantics: {arm_semantics}")
     print(f"right Inspire geoms hidden: {hidden_right_geoms}")
 
     if args.viewer:
@@ -261,8 +272,8 @@ def main() -> None:
                 "MODEL | recursive predicted state",
                 [
                     f"dataset frame={frame_indices[source_index]}  t={source_position / args.source_fps:.2f}s",
-                    f"arm delta integrated; hand absolute | clips arm={arm_clip} hand={hand_clip}",
-                    "reference joints used only at initialization",
+                    f"arm={arm_semantics}; hand=absolute",
+                    f"range clips: arm={arm_clip} hand={hand_clip}",
                 ],
             )
             if reference_renderer is None:
@@ -303,6 +314,7 @@ def main() -> None:
         "render_frames": render_frames,
         "duration_seconds": duration,
         "right_inspire_hidden": not args.show_right_hand,
+        "left_arm_action_semantics": arm_semantics,
         "arm_limit_clip_events": total_arm_clips,
         "hand_range_clip_events": total_hand_clips,
     }
