@@ -261,6 +261,12 @@ def predict_joint_chunk(
 
     batch_size = 1
     embodiment_id = torch.zeros((batch_size,), device=policy.device, dtype=torch.long)
+    if not getattr(policy, "_joint_video_shape_logged", False):
+        print(
+            "joint video input latent shapes: "
+            f"reference={tuple(ref_latents.shape)} future={tuple(future_latents.shape)}",
+            flush=True,
+        )
     for denoise_index, (visual_t, action_t) in enumerate(
         zip(visual_scheduler.timesteps, action_scheduler.timesteps)
     ):
@@ -313,6 +319,7 @@ def predict_joint_chunk(
             visual_grid_info=visual_grid,
             embodiment_id=embodiment_id,
         )
+        visual_pred = visual_pred[:, :, -future_latents.shape[2] :]
         future_latents = visual_scheduler.step(
             visual_pred, visual_t, future_latents, return_dict=False
         )[0]
