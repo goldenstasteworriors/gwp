@@ -188,7 +188,7 @@ EXPERIMENTS = [
             "GWP_VISUAL_JITTER_WEIGHT_SCALE": "0.025",
             "GWP_VISUAL_JITTER_MIN_WEIGHT": "0.1",
             "GWP_VISUAL_SHIFT_TOLERANT_RADIUS": "1",
-            "GWP_VISUAL_SHIFT_TOLERANT_WEIGHT": "0.25",
+            "GWP_VISUAL_SHIFT_TOLERANT_WEIGHT": "0.1",
         },
     ),
 ]

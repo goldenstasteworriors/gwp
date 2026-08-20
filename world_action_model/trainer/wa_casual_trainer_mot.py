@@ -75,8 +75,10 @@ def visual_flow_matching_loss(
         temporal = floor + (1.0 - floor) / (1.0 + (score / scale).square())
         weight = weight * temporal[:, None, :, None, None]
 
-    expanded_weight = weight.expand_as(error)
-    return (error.square() * expanded_weight).sum() / expanded_weight.sum().clamp_min(1.0)
+    # Keep GigaWorld's original all-element mean denominator.  Masking or
+    # downweighting therefore reduces the visual head's total contribution,
+    # instead of being cancelled by renormalizing over the remaining pixels.
+    return (error.square() * weight).mean()
 
 
 def shift_tolerant_clean_latent_loss(
