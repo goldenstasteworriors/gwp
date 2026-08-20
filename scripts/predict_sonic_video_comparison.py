@@ -355,7 +355,7 @@ def annotate_comparison(
     if ground_truth.shape != prediction.shape:
         raise ValueError(f"GT/prediction shape mismatch: {ground_truth.shape} != {prediction.shape}")
     height, width = ground_truth.shape[:2]
-    header = 52
+    header = 72
     canvas = np.zeros((height + header, width * 2, 3), dtype=np.uint8)
     canvas[header:, :width] = ground_truth
     canvas[header:, width:] = prediction
@@ -370,16 +370,16 @@ def annotate_comparison(
         2,
     )
     detail = (
-        f"ep {segment.episode}  t={time_seconds:.2f}s  "
-        f"{segment.dominant_hz:.2f}Hz  RMS={segment.angle_rms_degrees:.3f}deg"
+        f"ep {segment.episode} t={time_seconds:.2f}s "
+        f"{segment.dominant_hz:.2f}Hz RMS={segment.angle_rms_degrees:.3f}deg"
     )
-    cv2.putText(canvas, detail, (12, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (210, 210, 210), 1)
+    cv2.putText(canvas, detail, (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (210, 210, 210), 1)
     if is_peak_sample:
         cv2.rectangle(canvas, (1, 1), (width * 2 - 2, height + header - 2), (255, 40, 40), 5)
         cv2.putText(
             canvas,
             f"PEAK nearest {segment.peak_seconds:.2f}s",
-            (width + 12, 46),
+            (width + 12, 68),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.46,
             (255, 80, 80),
