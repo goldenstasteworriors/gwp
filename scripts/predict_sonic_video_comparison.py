@@ -261,21 +261,24 @@ def predict_joint_chunk(
 
     batch_size = 1
     embodiment_id = torch.zeros((batch_size,), device=policy.device, dtype=torch.long)
-    _, _, num_state_tokens, num_action_tokens = pipe.transformer.encode_action_tokens(
-        state_tokens, action, embodiment_id=embodiment_id
-    )
-    _, _, num_clean_tokens, num_future_tokens, _ = pipe.transformer.encode_visual_tokens(
-        ref_latents, future_latents
-    )
-    if not getattr(policy, "_joint_video_shape_logged", False):
-        print(
-            "joint video token counts: "
-            f"state={num_state_tokens} ref={num_clean_tokens} "
-            f"action={num_action_tokens} future={num_future_tokens}",
-            flush=True,
+    for denoise_index, (visual_t, action_t) in enumerate(
+        zip(visual_scheduler.timesteps, action_scheduler.timesteps)
+    ):
+        action_hidden, action_rope, num_state_tokens, num_action_tokens = (
+            pipe.transformer.encode_action_tokens(
+                state_tokens, action, embodiment_id=embodiment_id
+            )
         )
-
-    for visual_t, action_t in zip(visual_scheduler.timesteps, action_scheduler.timesteps):
+        visual_hidden, visual_rope, num_clean_tokens, num_future_tokens, visual_grid = (
+            pipe.transformer.encode_visual_tokens(ref_latents, future_latents)
+        )
+        if denoise_index == 0 and not getattr(policy, "_joint_video_shape_logged", False):
+            print(
+                "joint video token counts: "
+                f"state={num_state_tokens} ref={num_clean_tokens} "
+                f"action={num_action_tokens} future={num_future_tokens}",
+                flush=True,
+            )
         timestep = torch.zeros(
             (batch_size, num_state_tokens + num_clean_tokens + num_action_tokens + num_future_tokens),
             device=policy.device,
@@ -295,16 +298,20 @@ def predict_joint_chunk(
             raise RuntimeError(f"unexpected action timestep shape {tuple(action_ts.shape)}")
         if visual_ts.shape[1] != num_clean_tokens + num_future_tokens:
             raise RuntimeError(f"unexpected visual timestep shape {tuple(visual_ts.shape)}")
-        visual_pred, action_pred = pipe.transformer(
-            ref_latents=ref_latents,
-            noisy_latents=future_latents,
+        visual_pred, action_pred = pipe.transformer._forward_tokens(
+            action_hidden_states=action_hidden,
+            visual_hidden_states=visual_hidden,
+            action_rotary_emb=action_rope,
+            visual_rotary_emb=visual_rope,
             timestep=timestep,
             encoder_hidden_states=prompt_embeds,
+            num_state_tokens=num_state_tokens,
+            num_ref_tokens=num_clean_tokens,
             return_dict=False,
-            action=action,
-            state=state_tokens,
+            output_action=True,
+            output_visual=True,
+            visual_grid_info=visual_grid,
             embodiment_id=embodiment_id,
-            action_only=False,
         )
         future_latents = visual_scheduler.step(
             visual_pred, visual_t, future_latents, return_dict=False
