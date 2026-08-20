@@ -1,5 +1,7 @@
 import functools
+import json
 import os
+from pathlib import Path
 
 import torch
 from diffusers.models import AutoencoderKLWan
@@ -58,6 +60,9 @@ class CasualWATrainerMoT(Trainer):
             transformer_pretrained,
             skip_action_expert=model_config.get("skip_action_expert", False),
             strict_load=model_config.get("strict_load", False),
+            min_load_coverage=float(
+                model_config.get("pretrained_load_min_coverage", 0.98)
+            ),
         )
         transformer.to(self.device)
         if model_config.get("enable_gradient_checkpointing", True):
@@ -261,7 +266,176 @@ class CasualWATrainerMoT(Trainer):
             sigma = sigma.unsqueeze(-1)
         return timestep, sigma
 
-def load_pretrained_weights(model, pretrained_path, skip_action_expert=False, strict_load=False):
+_ACTION_IO_RESIZE_AXES = {
+    "state_encoder.in_proj.weight": 1,
+    "action_encoder.in_proj.weight": 1,
+    "action_decoder.out_proj.weight": 2,
+    "action_decoder.out_proj.bias": 1,
+}
+
+
+def _read_checkpoint_class(pretrained_path: str) -> str | None:
+    path = Path(pretrained_path)
+    config_path = path / "config.json" if path.is_dir() else path.parent / "config.json"
+    if not config_path.is_file():
+        return None
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    value = config.get("_class_name")
+    return str(value) if value is not None else None
+
+
+def _detect_checkpoint_architecture(
+    pretrained_path: str,
+    state_dict: dict[str, torch.Tensor],
+) -> tuple[str, str | None]:
+    checkpoint_class = _read_checkpoint_class(pretrained_path)
+    has_mot_blocks = any(
+        key.startswith("blocks.")
+        and (".visual_expert." in key or ".action_expert." in key)
+        for key in state_dict
+    )
+    has_dense_blocks = any(
+        key.startswith("blocks.")
+        and ".visual_expert." not in key
+        and ".action_expert." not in key
+        for key in state_dict
+    )
+    class_is_mot = checkpoint_class is not None and checkpoint_class.endswith("_MoT")
+    if class_is_mot or has_mot_blocks:
+        if has_dense_blocks:
+            raise ValueError("Checkpoint mixes dense and MoT block keys")
+        if not has_mot_blocks:
+            raise ValueError(
+                f"Checkpoint class {checkpoint_class!r} declares MoT but has no expert block keys"
+            )
+        return "mot", checkpoint_class
+    if has_dense_blocks:
+        return "dense", checkpoint_class
+    raise ValueError(
+        "Cannot determine checkpoint architecture: expected dense blocks.* keys or "
+        "MoT blocks.*.(visual_expert|action_expert).* keys"
+    )
+
+
+def _skip_mot_action_key(key: str) -> bool:
+    return (
+        key.startswith((
+            "state_encoder.",
+            "action_encoder.",
+            "action_decoder.",
+            "action_condition_embedder.",
+            "action_norm_out.",
+            "action_scale_shift_table",
+        ))
+        or (key.startswith("blocks.") and ".action_expert." in key)
+    )
+
+
+def _copy_action_io_resized(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+    *,
+    key: str,
+) -> None:
+    axis = _ACTION_IO_RESIZE_AXES[key]
+    if src.ndim != dst.ndim or any(
+        src.shape[index] != dst.shape[index]
+        for index in range(src.ndim)
+        if index != axis
+    ):
+        raise ValueError(
+            f"Unsupported action I/O resize for {key}: {tuple(src.shape)} -> {tuple(dst.shape)}"
+        )
+    copy_size = min(src.shape[axis], dst.shape[axis])
+    slices = [slice(None)] * src.ndim
+    slices[axis] = slice(0, copy_size)
+    dst.zero_()
+    dst[tuple(slices)].copy_(src[tuple(slices)])
+
+
+def _load_mot_pretrained_state_dict(
+    model,
+    state_dict: dict[str, torch.Tensor],
+    *,
+    skip_action_expert: bool,
+    strict_load: bool,
+    min_load_coverage: float,
+) -> dict:
+    own_state = model.state_dict()
+    loaded: list[str] = []
+    adapted: list[str] = []
+    skipped: list[str] = []
+    unexpected: list[str] = []
+
+    with torch.no_grad():
+        for key, src in state_dict.items():
+            if key not in own_state:
+                unexpected.append(key)
+                continue
+            if skip_action_expert and _skip_mot_action_key(key):
+                skipped.append(key)
+                continue
+            dst = own_state[key]
+            if src.shape == dst.shape:
+                dst.copy_(src)
+                loaded.append(key)
+                continue
+            if key in _ACTION_IO_RESIZE_AXES:
+                _copy_action_io_resized(dst, src, key=key)
+                loaded.append(key)
+                adapted.append(key)
+                continue
+            skipped.append(key)
+
+    eligible = [
+        key
+        for key in own_state
+        if not (skip_action_expert and _skip_mot_action_key(key))
+    ]
+    loaded_set = set(loaded)
+    missing = [key for key in eligible if key not in loaded_set]
+    coverage = len(loaded_set) / max(len(eligible), 1)
+    shape_mismatches = {
+        key: {
+            "checkpoint": list(state_dict[key].shape),
+            "model": list(own_state[key].shape),
+        }
+        for key in skipped
+        if key in state_dict and key in own_state
+    }
+    report = {
+        "architecture": "mot",
+        "loaded": len(loaded_set),
+        "eligible": len(eligible),
+        "coverage": coverage,
+        "adapted": adapted,
+        "missing": missing,
+        "unexpected": unexpected,
+        "skipped": skipped,
+        "shape_mismatches": shape_mismatches,
+    }
+    if coverage < min_load_coverage:
+        raise RuntimeError(
+            "MoT checkpoint coverage is below the required threshold: "
+            f"{len(loaded_set)}/{len(eligible)} ({coverage:.2%}) < {min_load_coverage:.2%}; "
+            f"missing={missing[:20]} skipped={skipped[:20]} unexpected={unexpected[:20]}"
+        )
+    if strict_load and (missing or skipped or unexpected):
+        raise RuntimeError(
+            "Strict MoT checkpoint load failed: "
+            f"missing={missing[:20]} skipped={skipped[:20]} unexpected={unexpected[:20]}"
+        )
+    model.load_state_dict(own_state, strict=True)
+    return report
+
+
+def load_pretrained_weights(
+    model,
+    pretrained_path,
+    skip_action_expert=False,
+    strict_load=False,
+    min_load_coverage=0.98,
+):
     from safetensors.torch import load_file
 
     pretrained_path = gm_utils.get_model_path(pretrained_path)
@@ -278,7 +452,7 @@ def load_pretrained_weights(model, pretrained_path, skip_action_expert=False, st
     for weight_file in weight_files:
         print(f"Loading weights from {weight_file}")
         if weight_file.endswith(".bin"):
-            checkpoint = torch.load(weight_file, map_location="cpu")
+            checkpoint = torch.load(weight_file, map_location="cpu", weights_only=True)
         else:
             checkpoint = load_file(weight_file)
         if isinstance(checkpoint, dict) and "model" in checkpoint:
@@ -287,7 +461,29 @@ def load_pretrained_weights(model, pretrained_path, skip_action_expert=False, st
             checkpoint = checkpoint["state_dict"]
         state_dicts.update(checkpoint)
 
-    if not strict_load and hasattr(model, "load_from_wan_pretrained_state_dict"):
+    architecture, checkpoint_class = _detect_checkpoint_architecture(
+        pretrained_path, state_dicts
+    )
+    if architecture == "mot":
+        report = _load_mot_pretrained_state_dict(
+            model,
+            state_dicts,
+            skip_action_expert=skip_action_expert,
+            strict_load=strict_load,
+            min_load_coverage=min_load_coverage,
+        )
+        report["checkpoint_class"] = checkpoint_class
+        model._pretrained_load_report = report
+        print(
+            "MoT checkpoint preload: "
+            f"loaded={report['loaded']}/{report['eligible']} "
+            f"coverage={report['coverage']:.2%} adapted={report['adapted']} "
+            f"missing={len(report['missing'])} skipped={len(report['skipped'])} "
+            f"unexpected={len(report['unexpected'])}"
+        )
+        return model
+
+    if hasattr(model, "load_from_wan_pretrained_state_dict"):
         loaded, skipped, unexpected, missing = model.load_from_wan_pretrained_state_dict(
             state_dicts,
             skip_action_expert=skip_action_expert,
@@ -298,12 +494,27 @@ def load_pretrained_weights(model, pretrained_path, skip_action_expert=False, st
             print(f"[WARNING] Skipped keys during MoT remap: {skipped[:20]}{'...' if len(skipped) > 20 else ''}")
         if missing:
             print(f"[WARNING] Missing keys after MoT remap: {missing[:20]}{'...' if len(missing) > 20 else ''}")
-        print(f"Loaded {len(loaded)} tensors from Wan2.2 into MoT.")
+        coverage = len(set(loaded)) / max(len(model.state_dict()), 1)
+        if coverage < min_load_coverage:
+            raise RuntimeError(
+                "Dense Wan checkpoint coverage is below the required threshold: "
+                f"{len(set(loaded))}/{len(model.state_dict())} ({coverage:.2%}) "
+                f"< {min_load_coverage:.2%}"
+            )
+        model._pretrained_load_report = {
+            "architecture": "dense",
+            "checkpoint_class": checkpoint_class,
+            "loaded": len(set(loaded)),
+            "eligible": len(model.state_dict()),
+            "coverage": coverage,
+            "adapted": [],
+            "missing": missing,
+            "unexpected": unexpected,
+            "skipped": skipped,
+        }
+        print(
+            f"Dense Wan checkpoint preload: loaded={len(set(loaded))}/"
+            f"{len(model.state_dict())} coverage={coverage:.2%}"
+        )
         return model
-
-    missing_keys, unexpected_keys = model.load_state_dict(state_dicts, strict=False)
-    if unexpected_keys:
-        print(f"[WARNING] Unexpected keys in state_dict: {unexpected_keys}")
-    if missing_keys:
-        print(f"[WARNING] Missing keys in state_dict: {missing_keys}")
-    return model
+    raise TypeError("Model does not implement dense Wan checkpoint remapping")

@@ -19,6 +19,20 @@ def _int_list(name: str, default: str) -> list[int]:
     return [int(item.strip()) for item in raw.split(",") if item.strip()]
 
 
+def _bool_list(name: str, default: str) -> list[bool]:
+    raw = _env(name, default)
+    values = []
+    lookup = {"true": True, "1": True, "false": False, "0": False}
+    for item in raw.split(","):
+        item = item.strip().lower()
+        if not item:
+            continue
+        if item not in lookup:
+            raise ValueError(f"Invalid boolean {item!r} in {name}")
+        values.append(lookup[item])
+    return values
+
+
 def _episode_list(name: str) -> list[int] | None:
     raw = _env(name)
     if raw is None:
@@ -46,6 +60,15 @@ wan_pretrained = _env("GWP_WAN_PRETRAINED", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 project_dir = _env("GWP05_PROJECT_DIR", "outputs/gwp0_5_sonic_g1_finetune")
 gpu_ids = [int(x) for x in _env("GWP_GPU_IDS", "0,1,2,3").split(",")]
 physical_action_dim = int(_env("GWP_PHYSICAL_ACTION_DIM", "30"))
+action_delta_mask = _bool_list(
+    "GWP_ACTION_DELTA_MASK",
+    ",".join(["false"] * physical_action_dim),
+)
+if len(action_delta_mask) != physical_action_dim:
+    raise ValueError(
+        "GWP_ACTION_DELTA_MASK length must match GWP_PHYSICAL_ACTION_DIM: "
+        f"{len(action_delta_mask)} != {physical_action_dim}"
+    )
 image_augmentation_enabled = _env("GWP_IMAGE_AUGMENTATION", "1") == "1"
 view_keys = ["observation.images.ego_view"]
 image_frame_offsets = _int_list("GWP_IMAGE_FRAME_OFFSETS", "0,12,24,36,48")
@@ -122,7 +145,7 @@ config = dict(
                 robotype_to_embodiment_id={"sonic_g1": 0},
                 robotype_default_embodiment_id=0,
                 model_action_dim=32,
-                delta_mask_by_embodiment_id={"0": [False] * physical_action_dim},
+                delta_mask_by_embodiment_id={"0": action_delta_mask},
                 norm_use_quantiles=True,
                 # This small dataset has near-constant 6D rotation components;
                 # clamp quantile normalization so rare floating-point tails do
@@ -177,6 +200,9 @@ config = dict(
         # 30-D action padded to 32-D, so load shared weights and slice-copy the
         # pretrained projector weights into expanded 32-D projectors.
         strict_load=False,
+        pretrained_load_min_coverage=float(
+            _env("GWP_PRETRAINED_LOAD_MIN_COVERAGE", "0.98")
+        ),
         transformer=dict(
             added_kv_proj_dim=None,
             attention_head_dim=128,
