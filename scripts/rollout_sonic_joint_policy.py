@@ -2,11 +2,12 @@
 """Run a reference-vision, predicted-state SONIC joint-policy rollout.
 
 Only the first joint state comes from the reference episode.  Every subsequent
-state is the first action of a newly inferred chunk.  The policy wrapper adds
-the predicted left-arm deltas to that recursively predicted state, while the
-six Inspire-hand channels remain absolute commands.  Reference frames are
-used as visual observations at every step; reference joint states are retained
-only for comparison and never fed back after initialization.
+state is the first action of a newly inferred chunk.  The action representation
+comes from the selected experiment: current models integrate left-arm deltas,
+while legacy shake-beaker models predict all 13 joint targets absolutely.
+Reference frames are used as visual observations at every step; reference
+joint states are retained only for comparison and never fed back after
+initialization.
 """
 
 from __future__ import annotations
@@ -43,15 +44,29 @@ EXPERIMENTS = {
         "image_frame_offsets": [0, 12, 24, 36, 48],
         "state_history_offsets": [0],
         "norm_stats": "norm_stats.json",
+        "delta_mask": [True] * 7 + [False] * 6,
+        "prompt": "grab graduated cylinder and pour water into beaker",
+        "left_arm_semantics": "relative_delta_integrated_from_predicted_state",
     },
     "m12_short_horizon": {
         "action_horizon": 24,
         "image_frame_offsets": [0, 6, 12, 18, 24],
         "state_history_offsets": [-50, -25, 0],
         "norm_stats": "norm_stats_h24.json",
+        "delta_mask": [True] * 7 + [False] * 6,
+        "prompt": "grab graduated cylinder and pour water into beaker",
+        "left_arm_semantics": "relative_delta_integrated_from_predicted_state",
+    },
+    "legacy_absolute_48": {
+        "action_horizon": 48,
+        "image_frame_offsets": [0, 12, 24, 36, 48],
+        "state_history_offsets": [0],
+        "norm_stats": "norm_stats.json",
+        "delta_mask": [False] * 13,
+        "prompt": "shake the beaker",
+        "left_arm_semantics": "absolute_joint_target",
     },
 }
-DELTA_MASK = [True] * 7 + [False] * 6
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,6 +88,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-steps", type=int, default=300)
     parser.add_argument("--num-inference-steps", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260820)
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help="Manifest metadata only; inference uses the selected prompt embedding file.",
+    )
     parser.add_argument(
         "--validate-only",
         action="store_true",
@@ -163,7 +183,7 @@ def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path
         "base_model": str(args.base_model.expanduser().resolve()),
         "norm_stats": str(norm_stats),
         "prompt_embedding": str(prompt_embedding),
-        "prompt": "grab graduated cylinder and pour water into beaker",
+        "prompt": args.prompt or spec["prompt"],
         "evaluation_dataset": str(dataset),
         "evaluation_episodes": [args.episode],
         "image_key": "observation.images.ego_view",
@@ -177,7 +197,7 @@ def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path
         "model_image_frames": len(spec["image_frame_offsets"]),
         "physical_action_dim": 13,
         "model_action_dim": 32,
-        "delta_mask": DELTA_MASK,
+        "delta_mask": spec["delta_mask"],
         "fps": 50,
         "image_size": [320, 384],
         "num_inference_steps": args.num_inference_steps,
@@ -186,7 +206,7 @@ def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path
         "rollout_semantics": {
             "reference_state_used_only_at_initialization": True,
             "reference_images_used_at_every_step": True,
-            "left_arm_channels_0_7": "relative_delta_integrated_from_predicted_state",
+            "left_arm_channels_0_7": spec["left_arm_semantics"],
             "left_inspire_channels_7_13": "absolute_command",
         },
     }
@@ -303,7 +323,7 @@ def main() -> None:
         "reference_fps": fps,
         "state_feedback": "predicted after initialization",
         "visual_input": "reference RGB at every replan",
-        "left_arm": "predicted relative delta recursively integrated",
+        "left_arm": spec["left_arm_semantics"],
         "left_inspire_hand": "predicted absolute command",
         "mean_latency_seconds": float(np.mean(latencies)),
         "arm_rmse_vs_reference": float(np.sqrt(np.mean(error[:, :7] ** 2))),
