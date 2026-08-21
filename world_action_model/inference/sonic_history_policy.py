@@ -65,6 +65,117 @@ def _center_crop_resize(image: Image.Image, width: int, height: int) -> Image.Im
     return vision_F.crop(image, top, left, height, width)
 
 
+def encode_sonic_state_tokens(
+    states,
+    *,
+    state_low: torch.Tensor,
+    state_high: torch.Tensor,
+    physical_action_dim: int,
+    model_action_dim: int,
+    required_state_history: int,
+    append_state_velocity_token: bool = False,
+    append_episode_progress_token: bool = False,
+    episode_progress: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply the deployment state normalization without loading a policy model."""
+    states = torch.as_tensor(states, dtype=torch.float32, device=state_low.device)
+    if states.ndim == 1:
+        states = states[None]
+    if states.ndim != 2:
+        raise ValueError(f"Expected state history [T,D], got {tuple(states.shape)}")
+    if physical_action_dim <= 0 or model_action_dim < physical_action_dim:
+        raise ValueError(
+            f"Invalid physical/model action dimensions: {physical_action_dim}/{model_action_dim}"
+        )
+    if required_state_history < 1:
+        raise ValueError("required_state_history must be at least one")
+    if state_low.numel() < physical_action_dim or state_high.numel() < physical_action_dim:
+        raise ValueError("State normalization statistics are shorter than physical_action_dim")
+
+    states = states[:, :physical_action_dim]
+    if states.shape[0] > required_state_history:
+        states = states[-required_state_history:]
+    elif states.shape[0] < required_state_history:
+        states = torch.cat(
+            [states[:1].expand(required_state_history - states.shape[0], -1), states],
+            dim=0,
+        )
+    current_state = states[-1].clone()
+    low = state_low.flatten()[:physical_action_dim]
+    high = state_high.flatten()[:physical_action_dim]
+    state_range = (high - low).clamp_min(1e-8)
+    norm_state = ((states - low) / state_range * 2.0 - 1.0).clamp(-1.0, 1.0)
+    norm_state = torch_F.pad(
+        norm_state,
+        (0, model_action_dim - physical_action_dim),
+        value=0.0,
+    )
+    tokens = [norm_state]
+    if append_state_velocity_token:
+        tokens.append(norm_state[-1:] - norm_state[:1])
+    if append_episode_progress_token:
+        progress = float(np.clip(episode_progress, 0.0, 1.0))
+        phase = torch.zeros(
+            (1, model_action_dim),
+            dtype=norm_state.dtype,
+            device=norm_state.device,
+        )
+        phase[0, 0] = progress * 2.0 - 1.0
+        if model_action_dim > 1:
+            phase[0, 1] = math.sin(progress * 2.0 * math.pi)
+        if model_action_dim > 2:
+            phase[0, 2] = math.cos(progress * 2.0 * math.pi)
+        tokens.append(phase)
+    return torch.cat(tokens, dim=0), current_state
+
+
+def decode_sonic_action(
+    normalized_action,
+    *,
+    action_low: torch.Tensor,
+    action_high: torch.Tensor,
+    delta_mask,
+    current_state,
+    physical_action_dim: int,
+) -> torch.Tensor:
+    """Apply the exact deployment action denormalization/integration path."""
+    predicted = torch.as_tensor(
+        normalized_action,
+        dtype=torch.float32,
+        device=action_low.device,
+    )
+    if predicted.ndim == 1:
+        predicted = predicted[None]
+    if predicted.ndim != 2 or predicted.shape[1] < physical_action_dim:
+        raise ValueError(
+            f"Expected normalized action [T,D>=physical_dim], got {tuple(predicted.shape)}"
+        )
+    if action_low.numel() < physical_action_dim or action_high.numel() < physical_action_dim:
+        raise ValueError("Action normalization statistics are shorter than physical_action_dim")
+    predicted = predicted[:, :physical_action_dim]
+    low = action_low.flatten()[:physical_action_dim]
+    high = action_high.flatten()[:physical_action_dim]
+    predicted = (predicted + 1.0) * 0.5 * (high - low) + low
+
+    delta_mask = torch.as_tensor(
+        delta_mask,
+        dtype=torch.bool,
+        device=predicted.device,
+    ).flatten()[:physical_action_dim]
+    if delta_mask.numel() != physical_action_dim:
+        raise ValueError("delta_mask length must equal physical_action_dim")
+    if delta_mask.any():
+        current_state = torch.as_tensor(
+            current_state,
+            dtype=torch.float32,
+            device=predicted.device,
+        ).flatten()[:physical_action_dim]
+        if current_state.numel() != physical_action_dim:
+            raise ValueError("current_state length must equal physical_action_dim")
+        predicted[:, delta_mask] += current_state[delta_mask]
+    return predicted
+
+
 def _load_transformer_checkpoint(path: Path, dtype: torch.dtype):
     from safetensors.torch import load_file
 
@@ -179,42 +290,17 @@ class SonicHistoryPolicy:
         self.prompt_embedding = load_fixed_prompt_embedding(str(prompt_embedding), self.device)
 
     def _state_tokens(self, states, episode_progress: float) -> tuple[torch.Tensor, torch.Tensor]:
-        states = torch.as_tensor(states, dtype=torch.float32, device=self.device)
-        if states.ndim == 1:
-            states = states[None]
-        states = states[:, : self.physical_action_dim]
-        if states.shape[0] > self.required_state_history:
-            states = states[-self.required_state_history :]
-        elif states.shape[0] < self.required_state_history:
-            states = torch.cat(
-                [states[:1].expand(self.required_state_history - states.shape[0], -1), states],
-                dim=0,
-            )
-        current_state = states[-1].clone()
-        state_range = (self.state_high - self.state_low).clamp_min(1e-8)
-        norm_state = ((states - self.state_low) / state_range * 2.0 - 1.0).clamp(-1.0, 1.0)
-        norm_state = torch_F.pad(
-            norm_state,
-            (0, self.model_action_dim - self.physical_action_dim),
-            value=0.0,
+        return encode_sonic_state_tokens(
+            states,
+            state_low=self.state_low,
+            state_high=self.state_high,
+            physical_action_dim=self.physical_action_dim,
+            model_action_dim=self.model_action_dim,
+            required_state_history=self.required_state_history,
+            append_state_velocity_token=self.append_state_velocity_token,
+            append_episode_progress_token=self.append_episode_progress_token,
+            episode_progress=episode_progress,
         )
-        tokens = [norm_state]
-        if self.append_state_velocity_token:
-            tokens.append(norm_state[-1:] - norm_state[:1])
-        if self.append_episode_progress_token:
-            progress = float(np.clip(episode_progress, 0.0, 1.0))
-            phase = torch.zeros(
-                (1, self.model_action_dim),
-                dtype=norm_state.dtype,
-                device=norm_state.device,
-            )
-            phase[0, 0] = progress * 2.0 - 1.0
-            if self.model_action_dim > 1:
-                phase[0, 1] = math.sin(progress * 2.0 * math.pi)
-            if self.model_action_dim > 2:
-                phase[0, 2] = math.cos(progress * 2.0 * math.pi)
-            tokens.append(phase)
-        return torch.cat(tokens, dim=0), current_state
 
     @torch.inference_mode()
     def predict(
@@ -249,8 +335,12 @@ class SonicHistoryPolicy:
             action_dim=self.model_action_dim,
             generator=generator,
         )[0, :, : self.physical_action_dim].float()
-        predicted = (predicted + 1.0) * 0.5 * (self.action_high - self.action_low) + self.action_low
-        if self.delta_mask.any():
-            delta_mask = torch.as_tensor(self.delta_mask, device=self.device)
-            predicted[:, delta_mask] += current_state[delta_mask]
+        predicted = decode_sonic_action(
+            predicted,
+            action_low=self.action_low,
+            action_high=self.action_high,
+            delta_mask=self.delta_mask,
+            current_state=current_state,
+            physical_action_dim=self.physical_action_dim,
+        )
         return predicted.cpu().numpy()
