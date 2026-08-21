@@ -79,13 +79,15 @@ def load_rollout(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return predicted, reference, frame_indices
 
 
-def load_arm_semantics(path: Path) -> str:
+def load_rollout_metadata(path: Path) -> tuple[str, str]:
     manifest_path = path.with_suffix(".manifest.json")
     if not manifest_path.is_file():
-        return "unknown_action_representation"
+        return "unknown_action_representation", "unknown"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    semantics = manifest.get("rollout_semantics", {}).get("left_arm_channels_0_7")
-    return str(semantics or "unknown_action_representation")
+    rollout_semantics = manifest.get("rollout_semantics", {})
+    semantics = rollout_semantics.get("left_arm_channels_0_7")
+    state_feedback = rollout_semantics.get("state_feedback", "unknown")
+    return str(semantics or "unknown_action_representation"), str(state_feedback)
 
 
 def qpos_indices(model: mujoco.MjModel, names: tuple[str, ...]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -178,7 +180,7 @@ def main() -> None:
     rollout = args.rollout.expanduser().resolve()
     model_xml = args.model_xml.expanduser().resolve()
     predicted, reference, frame_indices = load_rollout(rollout)
-    arm_semantics = load_arm_semantics(rollout)
+    arm_semantics, state_feedback = load_rollout_metadata(rollout)
     if not model_xml.is_file():
         raise FileNotFoundError(model_xml)
 
@@ -202,6 +204,7 @@ def main() -> None:
     print(f"model: {model_xml}")
     print(f"frames: {len(predicted)}, duration: {duration:.2f}s at {args.speed:g}x")
     print(f"left-arm action semantics: {arm_semantics}")
+    print(f"state feedback: {state_feedback}")
     print(f"right Inspire geoms hidden: {hidden_right_geoms}")
 
     if args.viewer:
@@ -267,9 +270,17 @@ def main() -> None:
             total_hand_clips += hand_clip
             predicted_renderer.update_scene(predicted_data, camera=camera)
             source_index = min(int(round(source_position)), len(predicted) - 1)
+            feedback_title = {
+                "predicted": "MODEL | recursive predicted state",
+                "ground_truth": "MODEL | ground-truth state feedback",
+            }.get(state_feedback, f"MODEL | state feedback: {state_feedback}")
+            feedback_description = {
+                "predicted": "reference state fed only at initialization",
+                "ground_truth": "reference state fed at every policy replan",
+            }.get(state_feedback, "state feedback mode unavailable")
             pred_frame = overlay(
                 predicted_renderer.render(),
-                "MODEL | recursive predicted state",
+                feedback_title,
                 [
                     f"dataset frame={frame_indices[source_index]}  t={source_position / args.source_fps:.2f}s",
                     f"arm={arm_semantics}; hand=absolute",
@@ -295,8 +306,8 @@ def main() -> None:
                 "REFERENCE | visualization only",
                 [
                     f"dataset frame={frame_indices[source_index]}  t={source_position / args.source_fps:.2f}s",
-                    "not fed to policy after the initial state",
-                    "reference RGB is fed to the policy each step",
+                    feedback_description,
+                    "reference RGB is fed at every policy replan",
                 ],
             )
             writer.append_data(np.concatenate([pred_frame, ref_frame], axis=1))
@@ -315,6 +326,7 @@ def main() -> None:
         "duration_seconds": duration,
         "right_inspire_hidden": not args.show_right_hand,
         "left_arm_action_semantics": arm_semantics,
+        "state_feedback": state_feedback,
         "arm_limit_clip_events": total_arm_clips,
         "hand_range_clip_events": total_hand_clips,
     }
