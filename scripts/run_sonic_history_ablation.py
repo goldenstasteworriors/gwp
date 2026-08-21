@@ -191,6 +191,18 @@ EXPERIMENTS = [
             "GWP_VISUAL_SHIFT_TOLERANT_WEIGHT": "0.1",
         },
     ),
+    Experiment(
+        "j03_imu_weight_only_full_frame",
+        "Full-frame visual supervision with only IMU-derived temporal downweighting.",
+        {
+            "GWP_MASK_PADDED_ACTION_DIMS": "1",
+            "GWP_MASK_PADDED_ACTION_STEPS": "1",
+            "GWP_USE_IMU": "1",
+            "GWP_EXPECTED_STATE_DIM": "23",
+            "GWP_VISUAL_JITTER_WEIGHT_SCALE": "0.025",
+            "GWP_VISUAL_JITTER_MIN_WEIGHT": "0.1",
+        },
+    ),
 ]
 
 
