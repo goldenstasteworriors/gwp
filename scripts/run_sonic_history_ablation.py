@@ -203,6 +203,16 @@ EXPERIMENTS = [
             "GWP_VISUAL_JITTER_MIN_WEIGHT": "0.1",
         },
     ),
+    Experiment(
+        "j04_sampled_video_jitter_action_consistency",
+        "Baseline objective plus action invariance to sampled per-frame camera translations.",
+        {
+            "GWP_MASK_PADDED_ACTION_DIMS": "1",
+            "GWP_MASK_PADDED_ACTION_STEPS": "1",
+            "GWP_ACTION_JITTER_CONSISTENCY_WEIGHT": "0.1",
+            "GWP_ACTION_JITTER_MAX_PIXELS": "8",
+        },
+    ),
 ]
 
 

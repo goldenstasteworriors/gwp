@@ -263,6 +263,12 @@ config = dict(
         action_terminal_weight=float(
             _env("GWP_ACTION_TERMINAL_WEIGHT", "0")
         ),
+        action_jitter_consistency_weight=float(
+            _env("GWP_ACTION_JITTER_CONSISTENCY_WEIGHT", "0")
+        ),
+        action_jitter_max_pixels=int(
+            _env("GWP_ACTION_JITTER_MAX_PIXELS", "0")
+        ),
         train_action_head_only=(
             _env("GWP_TRAIN_ACTION_HEAD_ONLY", "0") == "1"
         ),

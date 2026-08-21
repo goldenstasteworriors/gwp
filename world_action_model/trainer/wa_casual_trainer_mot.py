@@ -130,6 +130,61 @@ def shift_tolerant_clean_latent_loss(
     return (best_error * weight).sum() / weight.sum().clamp_min(1.0)
 
 
+def sampled_video_translation_jitter(images, max_pixels, offsets=None):
+    """Translate each video frame independently with replicated-border fill."""
+    if images.ndim != 5:
+        raise ValueError(
+            f"Expected video tensor with shape [batch, time, channels, height, width], "
+            f"got {tuple(images.shape)}"
+        )
+    max_pixels = int(max_pixels)
+    if max_pixels < 0:
+        raise ValueError(f"max_pixels must be non-negative, got {max_pixels}")
+
+    batch_size, num_frames, channels, height, width = images.shape
+    if offsets is None:
+        offsets = torch.randint(
+            -max_pixels,
+            max_pixels + 1,
+            (batch_size, num_frames, 2),
+            device=images.device,
+        )
+    else:
+        offsets = torch.as_tensor(offsets, device=images.device)
+        if tuple(offsets.shape) != (batch_size, num_frames, 2):
+            raise ValueError(
+                f"Expected offsets with shape {(batch_size, num_frames, 2)}, "
+                f"got {tuple(offsets.shape)}"
+            )
+        if offsets.is_floating_point():
+            if not torch.equal(offsets, offsets.round()):
+                raise ValueError("Translation offsets must be integer-valued")
+            offsets = offsets.round().long()
+        else:
+            offsets = offsets.long()
+        if torch.any(offsets.abs() > max_pixels):
+            raise ValueError(
+                f"Translation offsets exceed configured max_pixels={max_pixels}"
+            )
+
+    if max_pixels == 0:
+        return images, offsets
+
+    flat_images = images.reshape(batch_size * num_frames, channels, height, width)
+    padded = F.pad(
+        flat_images,
+        (max_pixels, max_pixels, max_pixels, max_pixels),
+        mode="replicate",
+    )
+    shifted_frames = []
+    for frame, (shift_y, shift_x) in zip(padded, offsets.reshape(-1, 2)):
+        top = max_pixels + int(shift_y.item())
+        left = max_pixels + int(shift_x.item())
+        shifted_frames.append(frame[:, top : top + height, left : left + width])
+    jittered = torch.stack(shifted_frames, dim=0).reshape_as(images)
+    return jittered, offsets
+
+
 def is_action_head_parameter(name: str) -> bool:
     """Return whether a MoT parameter belongs to the action-specific branch."""
     prefixes_to_strip = ("module.", "_orig_mod.", "transformer.")
@@ -275,6 +330,28 @@ class CasualWATrainerMoT(Trainer):
             )
         self.action_smoothness_weight = float(model_config.get("action_smoothness_weight", 0.0))
         self.action_terminal_weight = float(model_config.get("action_terminal_weight", 0.0))
+        self.action_jitter_consistency_weight = float(
+            model_config.get("action_jitter_consistency_weight", 0.0)
+        )
+        self.action_jitter_max_pixels = int(
+            model_config.get("action_jitter_max_pixels", 0)
+        )
+        if self.action_jitter_consistency_weight < 0.0:
+            raise ValueError("action_jitter_consistency_weight must be non-negative")
+        if self.action_jitter_max_pixels < 0:
+            raise ValueError("action_jitter_max_pixels must be non-negative")
+        if (
+            self.action_jitter_consistency_weight > 0.0
+            and self.action_jitter_max_pixels < 1
+        ):
+            raise ValueError(
+                "Positive action_jitter_consistency_weight requires "
+                "action_jitter_max_pixels >= 1"
+            )
+        if self.action_jitter_consistency_weight > 0.0 and not self.expand_timesteps:
+            raise ValueError(
+                "Action jitter consistency currently requires expand_timesteps=True"
+            )
 
         vae_pretrained = model_config.get("vae_pretrained", os.path.join(pretrained, "vae"))
         vae_dtype = model_config.get("vae_dtype", torch.float32)
@@ -453,6 +530,45 @@ class CasualWATrainerMoT(Trainer):
             action_only=self.train_action_head_only,
         )
 
+        jittered_action_pred = None
+        if self.action_jitter_consistency_weight > 0.0:
+            jittered_images, jitter_offsets = sampled_video_translation_jitter(
+                images,
+                self.action_jitter_max_pixels,
+            )
+            jittered_ref_images, _ = sampled_video_translation_jitter(
+                ref_images,
+                self.action_jitter_max_pixels,
+                offsets=jitter_offsets,
+            )
+            jittered_visual_latents = self.forward_vae(jittered_images)
+            jittered_noisy_latents = (
+                visual_noise * visual_sigma
+                + jittered_visual_latents * (1 - visual_sigma)
+            )
+            jittered_all_ref_latents = self.forward_vae(jittered_ref_images)
+            jittered_insert_noisy_latents = (
+                (1 - first_frame_mask) * jittered_all_ref_latents
+                + first_frame_mask * jittered_noisy_latents
+            ).to(self.dtype)
+            jittered_ref_latents = jittered_insert_noisy_latents[
+                :, :, :num_clean_latents
+            ]
+            jittered_future_latents = jittered_insert_noisy_latents[
+                :, :, num_clean_latents:
+            ]
+            _, jittered_action_pred = transformer(
+                ref_latents=jittered_ref_latents,
+                noisy_latents=jittered_future_latents,
+                timestep=timestep,
+                encoder_hidden_states=prompt_embeds,
+                return_dict=False,
+                action=noisy_action,
+                state=state,
+                embodiment_id=embodiment_id,
+                action_only=True,
+            )
+
         if visual_pred is None:
             visual_loss = action_pred.new_zeros(())
         else:
@@ -513,6 +629,20 @@ class CasualWATrainerMoT(Trainer):
         action_loss = (action_error * loss_weight).sum() / loss_weight.sum().clamp_min(1.0)
 
         pred_clean_action = noisy_action.float() - action_sigma.float() * action_pred.float()
+        if jittered_action_pred is None:
+            action_jitter_consistency_loss = action_loss.new_zeros(())
+        else:
+            jittered_clean_action = (
+                noisy_action.float()
+                - action_sigma.float() * jittered_action_pred.float()
+            )
+            consistency_error = (
+                jittered_clean_action - pred_clean_action.detach()
+            ).pow(2)
+            action_jitter_consistency_loss = (
+                (consistency_error * loss_weight).sum()
+                / loss_weight.sum().clamp_min(1.0)
+            )
         if self.action_smoothness_weight > 0.0 and action_steps > 1:
             pred_velocity = pred_clean_action[:, 1:] - pred_clean_action[:, :-1]
             target_velocity = action.float()[:, 1:] - action.float()[:, :-1]
@@ -538,6 +668,10 @@ class CasualWATrainerMoT(Trainer):
         return {
             "visual_loss": visual_loss * self.visual_loss_weight,
             "action_loss": action_loss * self.action_loss_weight,
+            "action_jitter_consistency_loss": (
+                action_jitter_consistency_loss
+                * self.action_jitter_consistency_weight
+            ),
         }
 
     def save_model_hook(self, models, weights, output_dir):
