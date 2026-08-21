@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Convert SONIC G1 recordings to absolute arm/hand joint targets.
+"""Convert SONIC G1 recordings to future observed arm/hand joint states.
 
 ``--side both`` emits left arm (7), right arm (7), left Inspire hand (6),
 right Inspire hand (6). ``--side left`` emits only left arm (7) and left
-Inspire hand (6). ``action.wbc`` is kept as an absolute target rather than
-converted to a delta.
+Inspire hand (6).  For a row at time ``t``, the emitted ``action`` is the
+measured ``observation.state`` at ``t + 1``.  The final row repeats its own
+measured state so targets never cross an episode boundary.  ``action.wbc`` is
+deliberately excluded from supervision.
 """
 
 from __future__ import annotations
@@ -19,8 +21,8 @@ import pandas as pd
 
 
 ACTION_SCHEMA_IDS = {
-    "both": "sonic_g1_dual_arm_inspire6_absolute_joint_v1",
-    "left": "sonic_g1_left_arm_inspire6_absolute_joint_v1",
+    "both": "sonic_g1_dual_arm_inspire6_future_observation_state_v2",
+    "left": "sonic_g1_left_arm_inspire6_future_observation_state_v2",
 }
 VIDEO_KEY = "observation.images.ego_view"
 LEFT_ARM_NAMES = (
@@ -126,14 +128,11 @@ def main() -> None:
     joint_names = JOINT_NAMES_BY_SIDE[args.side]
     output_dim = len(joint_names)
     state_indices = _feature_indices(info, "observation.state", joint_names)
-    action_indices = _feature_indices(info, "action.wbc", joint_names)
     for root, candidate in zip(source_roots[1:], source_infos[1:]):
         if candidate.get("fps") != info.get("fps"):
             raise ValueError(f"FPS mismatch in {root}: {candidate.get('fps')} != {info.get('fps')}")
         if _feature_indices(candidate, "observation.state", joint_names) != state_indices:
             raise ValueError(f"observation.state schema mismatch in {root}")
-        if _feature_indices(candidate, "action.wbc", joint_names) != action_indices:
-            raise ValueError(f"action.wbc schema mismatch in {root}")
 
     if args.task_prompt is not None:
         task_rows = [{"task_index": 0, "task": args.task_prompt}]
@@ -204,9 +203,15 @@ def main() -> None:
             )
 
         observed = np.stack(frame["observation.state"]).astype(np.float32)
-        commanded = np.stack(frame["action.wbc"]).astype(np.float32)
+        if len(observed) == 0:
+            raise ValueError(f"Episode {source_episode_index} in {source} has no frames")
+        future_observed = np.concatenate((observed[1:], observed[-1:]), axis=0)
         state = observed[:, state_indices]
-        action = commanded[:, action_indices]
+        action = future_observed[:, state_indices]
+        if not np.array_equal(action[:-1], state[1:]) or not np.array_equal(action[-1], state[-1]):
+            raise AssertionError(
+                f"Future observation-state supervision validation failed for {source}"
+            )
         if args.side == "both":
             right_hand_min = np.minimum(right_hand_min, action[:, -6:].min(axis=0))
             right_hand_max = np.maximum(right_hand_max, action[:, -6:].max(axis=0))
@@ -271,7 +276,13 @@ def main() -> None:
     info["robot_type"] = "sonic_g1"
     info["codebase_version"] = "v3.1"
     info["action_schema_id"] = ACTION_SCHEMA_IDS[args.side]
-    info["action_semantics"] = "absolute_joint_target"
+    info["action_semantics"] = "future_observed_absolute_joint_state"
+    info["action_source"] = {
+        "feature": "observation.state",
+        "lead_frames": 1,
+        "terminal_policy": "repeat_final_observation_state",
+        "forbidden_supervision_feature": "action.wbc",
+    }
     info["controlled_side"] = args.side
     info["source_episode_filter"] = {
         "min_episode_index_inclusive": args.min_source_episode_index,
@@ -291,7 +302,7 @@ def main() -> None:
         info["task_prompt"] = args.task_prompt
     if args.side == "both":
         info["right_hand_supervision"] = {
-            "semantics": "recorded_default_open_pose",
+            "semantics": "future_observed_default_open_pose",
             "names": list(RIGHT_HAND_NAMES),
             "min": right_hand_min.tolist(),
             "max": right_hand_max.tolist(),

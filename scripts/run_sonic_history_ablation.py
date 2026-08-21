@@ -523,14 +523,59 @@ def validate_action_representation(
     experiments: tuple[Experiment, ...],
 ) -> None:
     info = json.loads((dataset / "meta" / "info.json").read_text(encoding="utf-8"))
-    if info.get("action_semantics") != "absolute_joint_target":
+    if info.get("action_semantics") != "future_observed_absolute_joint_state":
         raise ValueError(
-            "The source dataset must retain raw absolute joint targets; got "
+            "The source dataset must supervise future measured joint states; got "
             f"action_semantics={info.get('action_semantics')!r}"
         )
-    if info.get("action_schema_id") != "sonic_g1_left_arm_inspire6_absolute_joint_v1":
+    if info.get("action_schema_id") != "sonic_g1_left_arm_inspire6_future_observation_state_v2":
         raise ValueError(
             f"Unexpected action schema: {info.get('action_schema_id')!r}"
+        )
+    expected_source = {
+        "feature": "observation.state",
+        "lead_frames": 1,
+        "terminal_policy": "repeat_final_observation_state",
+        "forbidden_supervision_feature": "action.wbc",
+    }
+    if info.get("action_source") != expected_source:
+        raise ValueError(
+            f"Unexpected action supervision source: {info.get('action_source')!r} "
+            f"!= {expected_source!r}"
+        )
+
+    import numpy as np
+    import pandas as pd
+
+    checked_episodes = []
+    for parquet_path in sorted((dataset / "data").glob("*/*.parquet")):
+        frame = pd.read_parquet(
+            parquet_path,
+            columns=["episode_index", "frame_index", "observation.state", "action"],
+        )
+        for episode_index, episode in frame.groupby("episode_index", sort=True):
+            episode = episode.sort_values("frame_index")
+            state = np.stack(episode["observation.state"]).astype(np.float32)
+            action = np.stack(episode["action"]).astype(np.float32)
+            if len(state) == 0:
+                raise ValueError(f"Episode {episode_index} has no frames")
+            if not np.array_equal(action[:-1], state[1:]):
+                error = float(np.max(np.abs(action[:-1] - state[1:])))
+                raise ValueError(
+                    f"Episode {episode_index} action is not next-frame observation.state; "
+                    f"max_abs_error={error}"
+                )
+            if not np.array_equal(action[-1], state[-1]):
+                error = float(np.max(np.abs(action[-1] - state[-1])))
+                raise ValueError(
+                    f"Episode {episode_index} terminal action does not repeat final state; "
+                    f"max_abs_error={error}"
+                )
+            checked_episodes.append(int(episode_index))
+    if sorted(checked_episodes) != list(range(int(info.get("total_episodes", -1)))):
+        raise ValueError(
+            "Future-state supervision check did not cover every dataset episode: "
+            f"checked={sorted(checked_episodes)}, total={info.get('total_episodes')}"
         )
     if len(action_delta_mask) != 13:
         raise ValueError(
