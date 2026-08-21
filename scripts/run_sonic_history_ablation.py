@@ -559,14 +559,20 @@ def validate_action_representation(
             action = np.stack(episode["action"]).astype(np.float32)
             if len(state) == 0:
                 raise ValueError(f"Episode {episode_index} has no frames")
-            if not np.array_equal(action[:-1], state[1:]):
-                error = float(np.max(np.abs(action[:-1] - state[1:])))
+            if state.shape[1] < action.shape[1]:
+                raise ValueError(
+                    f"Episode {episode_index} state has fewer dimensions than action: "
+                    f"{state.shape[1]} < {action.shape[1]}"
+                )
+            supervised_state = state[:, : action.shape[1]]
+            if not np.array_equal(action[:-1], supervised_state[1:]):
+                error = float(np.max(np.abs(action[:-1] - supervised_state[1:])))
                 raise ValueError(
                     f"Episode {episode_index} action is not next-frame observation.state; "
                     f"max_abs_error={error}"
                 )
-            if not np.array_equal(action[-1], state[-1]):
-                error = float(np.max(np.abs(action[-1] - state[-1])))
+            if not np.array_equal(action[-1], supervised_state[-1]):
+                error = float(np.max(np.abs(action[-1] - supervised_state[-1])))
                 raise ValueError(
                     f"Episode {episode_index} terminal action does not repeat final state; "
                     f"max_abs_error={error}"
