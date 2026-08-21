@@ -28,7 +28,7 @@ os.environ.setdefault("GIGA_MODELS_LIGHT_IMPORT", "1")
 import world_action_model.datasets  # noqa: F401,E402 - register dataset classes
 import world_action_model.transforms  # noqa: F401,E402 - register transforms
 from giga_datasets import load_dataset  # noqa: E402
-from giga_train import build_transform  # noqa: E402
+from giga_train import build_transform, load_config  # noqa: E402
 from world_action_model.inference.sonic_history_policy import (  # noqa: E402
     decode_sonic_action,
     encode_sonic_state_tokens,
@@ -90,7 +90,7 @@ def main() -> None:
     training_config_path = args.training_config.expanduser().resolve()
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    config = json.loads(training_config_path.read_text(encoding="utf-8"))
+    config = load_config(str(training_config_path))
     train_config = config["dataloaders"]["train"]
     data_configs = train_config["data_or_config"]
     if not isinstance(data_configs, list) or len(data_configs) != 1:
