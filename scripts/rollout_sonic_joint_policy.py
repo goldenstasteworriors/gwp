@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Run a reference-vision, predicted-state SONIC joint-policy rollout.
+"""Run a reference-vision SONIC joint-policy rollout with chunked execution.
 
-Only the first joint state comes from the reference episode.  Every subsequent
-state is the first action of a newly inferred chunk.  The action representation
-comes from the selected experiment: current models integrate left-arm deltas,
-while legacy shake-beaker models predict all 13 joint targets absolutely.
-Reference frames are used as visual observations at every step; reference
-joint states are retained only for comparison and never fed back after
-initialization.
+Each replan predicts a complete action chunk and executes a fixed prefix before
+the next replan.  ``predicted`` feedback uses the reference joint state only at
+initialization and recursively feeds executed action targets back as state.
+``ground_truth`` feedback instead uses the reference state at every replan.
+Both modes use the corresponding reference RGB frame at every replan.
 """
 
 from __future__ import annotations
@@ -86,6 +84,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--num-steps", type=int, default=300)
+    parser.add_argument(
+        "--execution-steps",
+        type=int,
+        default=8,
+        help="Number of 50 Hz action targets executed from each predicted chunk.",
+    )
+    parser.add_argument(
+        "--state-feedback",
+        choices=("predicted", "ground_truth"),
+        default="predicted",
+        help="State source at replans after initialization.",
+    )
     parser.add_argument("--num-inference-steps", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260820)
     parser.add_argument(
@@ -201,12 +211,19 @@ def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path
         "fps": 50,
         "image_size": [320, 384],
         "num_inference_steps": args.num_inference_steps,
+        "execution_steps": args.execution_steps,
+        "replan_interval_seconds": args.execution_steps / 50.0,
+        "state_feedback": args.state_feedback,
         "model_dtype": "bf16",
         "action_flow_shift": 5.0,
         "rollout_semantics": {
-            "reference_state_used_only_at_initialization": True,
-            "reference_images_used_at_every_step": True,
-            "left_arm_channels_0_7": spec["left_arm_semantics"],
+            "reference_state_used_only_at_initialization": args.state_feedback == "predicted",
+            "reference_state_used_at_every_replan": args.state_feedback == "ground_truth",
+            "reference_images_used_at_every_replan": True,
+            "full_action_chunk_predicted_at_every_replan": True,
+            "executed_prefix_steps_per_chunk": args.execution_steps,
+            "left_arm_channels_0_7": "relative_delta_integrated_to_absolute_joint_target",
+            "left_arm_integration_state": args.state_feedback,
             "left_inspire_channels_7_13": "absolute_command",
         },
     }
@@ -222,12 +239,23 @@ def recursive_history(
     return np.stack([predicted_states[index] for index in indices]).astype(np.float32)
 
 
+def reference_history(states: np.ndarray, offsets: list[int], frame_index: int) -> np.ndarray:
+    indices = [max(0, min(len(states) - 1, frame_index + offset)) for offset in offsets]
+    return np.stack([states[index] for index in indices]).astype(np.float32)
+
+
 def main() -> None:
     args = parse_args()
     if args.episode < 0 or args.start_frame < 0 or args.num_steps <= 0:
         raise SystemExit("episode/start-frame must be non-negative and num-steps must be positive")
-    if args.num_inference_steps <= 0:
-        raise SystemExit("num-inference-steps must be positive")
+    if args.num_inference_steps <= 0 or args.execution_steps <= 0:
+        raise SystemExit("num-inference-steps and execution-steps must be positive")
+    spec = EXPERIMENTS[args.experiment]
+    if args.execution_steps > spec["action_horizon"]:
+        raise SystemExit(
+            f"execution-steps {args.execution_steps} exceeds action horizon "
+            f"{spec['action_horizon']}"
+        )
 
     dataset = args.dataset.expanduser().resolve()
     output = args.output.expanduser().resolve()
@@ -245,8 +273,9 @@ def main() -> None:
     print(f"reference parquet: {parquet}", flush=True)
     print(f"reference video: {video}", flush=True)
     print(
-        f"closed-loop range: [{args.start_frame}, {stop_frame}] "
-        f"({stop_frame - args.start_frame} replans)",
+        f"rollout range: [{args.start_frame}, {stop_frame}] "
+        f"({stop_frame - args.start_frame} control steps, "
+        f"execution_steps={args.execution_steps}, state_feedback={args.state_feedback})",
         flush=True,
     )
     if args.validate_only:
@@ -255,17 +284,30 @@ def main() -> None:
 
     rgb_frames = load_rgb_frames(video, args.start_frame, stop_frame)
     policy = SonicHistoryPolicy(manifest_path, device=args.device)
-    spec = EXPERIMENTS[args.experiment]
     predicted_states = [reference_states[args.start_frame].copy()]
     arm_deltas: list[np.ndarray] = []
     hand_commands: list[np.ndarray] = []
     latencies: list[float] = []
+    action_chunks: list[np.ndarray] = []
+    input_state_histories: list[np.ndarray] = []
+    replan_frame_indices: list[int] = []
+    executed_action_counts: list[int] = []
+    executed_chunk_indices: list[int] = []
+    executed_chunk_offsets: list[int] = []
     wall_start = time.time()
-    total = stop_frame - args.start_frame
-    for local_step, frame_index in enumerate(range(args.start_frame, stop_frame)):
-        state_history = recursive_history(
-            predicted_states, spec["state_history_offsets"], local_step
-        )
+    total_steps = stop_frame - args.start_frame
+    replan_frames = list(range(args.start_frame, stop_frame, args.execution_steps))
+    total_replans = len(replan_frames)
+    for replan_index, frame_index in enumerate(replan_frames):
+        local_step = frame_index - args.start_frame
+        if args.state_feedback == "predicted":
+            state_history = recursive_history(
+                predicted_states, spec["state_history_offsets"], local_step
+            )
+        else:
+            state_history = reference_history(
+                reference_states, spec["state_history_offsets"], frame_index
+            )
         progress = float(frame_index / max(len(reference_states) - 1, 1))
         started = time.perf_counter()
         action_chunk = policy.predict(
@@ -275,22 +317,35 @@ def main() -> None:
             seed=args.seed + frame_index,
         )
         latencies.append(time.perf_counter() - started)
-        next_state = np.asarray(action_chunk[0], dtype=np.float32)
-        if next_state.shape != (13,) or not np.isfinite(next_state).all():
-            raise ValueError(f"invalid predicted state at frame {frame_index}: {next_state}")
-        current_state = predicted_states[-1]
-        arm_deltas.append(next_state[:7] - current_state[:7])
-        hand_commands.append(next_state[7:13].copy())
-        predicted_states.append(next_state)
-        completed = local_step + 1
-        if completed == 1 or completed % 10 == 0 or completed == total:
-            elapsed = time.time() - wall_start
-            eta = elapsed / completed * (total - completed)
-            print(
-                f"[{completed}/{total}] frame={frame_index} "
-                f"latency={latencies[-1]:.3f}s eta={eta:.1f}s",
-                flush=True,
+        action_chunk = np.asarray(action_chunk, dtype=np.float32)
+        expected_shape = (spec["action_horizon"], 13)
+        if action_chunk.shape != expected_shape or not np.isfinite(action_chunk).all():
+            raise ValueError(
+                f"invalid action chunk at frame {frame_index}: "
+                f"{action_chunk.shape}, expected {expected_shape}"
             )
+        execute_count = min(args.execution_steps, stop_frame - frame_index)
+        action_chunks.append(action_chunk.copy())
+        input_state_histories.append(state_history.copy())
+        replan_frame_indices.append(frame_index)
+        executed_action_counts.append(execute_count)
+        for chunk_offset, next_state in enumerate(action_chunk[:execute_count]):
+            current_state = predicted_states[-1]
+            arm_deltas.append(next_state[:7] - current_state[:7])
+            hand_commands.append(next_state[7:13].copy())
+            predicted_states.append(next_state.copy())
+            executed_chunk_indices.append(replan_index)
+            executed_chunk_offsets.append(chunk_offset)
+
+        completed_replans = replan_index + 1
+        elapsed = time.time() - wall_start
+        eta = elapsed / completed_replans * (total_replans - completed_replans)
+        print(
+            f"[{completed_replans}/{total_replans}] frame={frame_index} "
+            f"executed={execute_count}/{len(action_chunk)} "
+            f"latency={latencies[-1]:.3f}s eta={eta:.1f}s",
+            flush=True,
+        )
 
     predicted = np.stack(predicted_states).astype(np.float32)
     arm_delta = np.stack(arm_deltas).astype(np.float32)
@@ -308,6 +363,12 @@ def main() -> None:
         timestamps=timestamps[frame_indices],
         latency_seconds=np.asarray(latencies, dtype=np.float64),
         initial_reference_state=reference_states[args.start_frame],
+        action_chunks=np.stack(action_chunks).astype(np.float32),
+        input_state_history=np.stack(input_state_histories).astype(np.float32),
+        replan_frame_indices=np.asarray(replan_frame_indices, dtype=np.int64),
+        executed_action_counts=np.asarray(executed_action_counts, dtype=np.int64),
+        executed_chunk_indices=np.asarray(executed_chunk_indices, dtype=np.int64),
+        executed_chunk_offsets=np.asarray(executed_chunk_offsets, dtype=np.int64),
     )
     error = predicted - aligned_reference
     summary = {
@@ -319,11 +380,14 @@ def main() -> None:
         "episode": args.episode,
         "start_frame": args.start_frame,
         "end_frame_inclusive": stop_frame,
-        "steps": total,
+        "steps": total_steps,
+        "replans": total_replans,
+        "execution_steps": args.execution_steps,
+        "replan_interval_seconds": args.execution_steps / 50.0,
         "reference_fps": fps,
-        "state_feedback": "predicted after initialization",
-        "visual_input": "reference RGB at every replan",
-        "left_arm": spec["left_arm_semantics"],
+        "state_feedback": args.state_feedback,
+        "visual_input": "reference RGB at each chunk replan",
+        "left_arm": "relative delta integrated to absolute target by policy wrapper",
         "left_inspire_hand": "predicted absolute command",
         "mean_latency_seconds": float(np.mean(latencies)),
         "arm_rmse_vs_reference": float(np.sqrt(np.mean(error[:, :7] ** 2))),
