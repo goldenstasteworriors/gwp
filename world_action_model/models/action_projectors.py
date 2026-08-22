@@ -3,7 +3,6 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class EmbodimentSpecificLinear(nn.Module):
@@ -42,9 +41,11 @@ class EmbodimentSpecificLinear(nn.Module):
 
     def forward(self, x: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         embodiment_id = self._normalize_embodiment_id(embodiment_id, batch_size=x.shape[0])
-        one_hot = F.one_hot(embodiment_id, num_classes=self.num_categories).to(dtype=self.weight.dtype)
-        selected_weight = torch.einsum("bc,cij->bij", one_hot, self.weight)
-        selected_bias = torch.einsum("bc,cj->bj", one_hot, self.bias)
+        # Integer selection is exactly equivalent to multiplying by a one-hot
+        # vector, while avoiding an accelerator-specific einsum kernel for this
+        # simple lookup.
+        selected_weight = self.weight[embodiment_id]
+        selected_bias = self.bias[embodiment_id]
         out = torch.bmm(x.to(dtype=selected_weight.dtype), selected_weight) + selected_bias.unsqueeze(1)
         return out.to(dtype=x.dtype)
 
