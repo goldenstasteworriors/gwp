@@ -36,12 +36,26 @@ class _PaddedLinear(torch.nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         rows = int(np.prod(inputs.shape[:-1]))
-        if rows >= self.minimum_rows:
+        in_features = self.linear.in_features
+        out_features = self.linear.out_features
+        if rows >= self.minimum_rows and in_features >= 128 and out_features >= 128:
             return self.linear(inputs)
         flat = inputs.reshape(rows, inputs.shape[-1])
-        padded = torch_F.pad(flat, (0, 0, 0, self.minimum_rows - rows))
-        output = self.linear(padded)[:rows]
-        return output.reshape(*inputs.shape[:-1], output.shape[-1])
+        padded_in = max(in_features, 128)
+        padded_out = max(out_features, 128)
+        padded = torch_F.pad(
+            flat,
+            (0, padded_in - in_features, 0, max(self.minimum_rows - rows, 0)),
+        )
+        weight = torch_F.pad(
+            self.linear.weight,
+            (0, padded_in - in_features, 0, padded_out - out_features),
+        )
+        bias = self.linear.bias
+        if bias is not None:
+            bias = torch_F.pad(bias, (0, padded_out - out_features))
+        output = torch_F.linear(padded, weight, bias)[:rows, :out_features]
+        return output.reshape(*inputs.shape[:-1], out_features)
 
 
 def _wrap_small_linear_calls(module: torch.nn.Module) -> None:

@@ -49,9 +49,19 @@ class EmbodimentSpecificLinear(nn.Module):
             selected_bias = self.bias[embodiment_id[0]]
             projected = x.to(dtype=selected_weight.dtype)
             token_count = projected.shape[1]
-            if token_count < 128:
-                projected = F.pad(projected, (0, 0, 0, 128 - token_count))
-            out = F.linear(projected, selected_weight.t(), selected_bias)[:, :token_count]
+            padded_input_dim = max(self.input_dim, 128)
+            padded_output_dim = max(self.output_dim, 128)
+            projected = F.pad(
+                projected,
+                (0, padded_input_dim - self.input_dim, 0, max(128 - token_count, 0)),
+            )
+            linear_weight = F.pad(
+                selected_weight.t(),
+                (0, padded_input_dim - self.input_dim, 0, padded_output_dim - self.output_dim),
+            )
+            linear_bias = F.pad(selected_bias, (0, padded_output_dim - self.output_dim))
+            out = F.linear(projected, linear_weight, linear_bias)
+            out = out[:, :token_count, : self.output_dim]
         else:
             one_hot = F.one_hot(embodiment_id, num_classes=self.num_categories).to(dtype=self.weight.dtype)
             selected_weight = torch.einsum("bc,cij->bij", one_hot, self.weight)
