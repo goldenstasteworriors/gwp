@@ -545,7 +545,9 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         image = image.to(device, dtype=torch.float32)
         if last_image is not None:
             last_image = self.video_processor.preprocess(last_image, height=height, width=width).to(device, dtype=torch.float32)
-        state = state.unsqueeze(0).to(device=device, dtype=self.dtype)
+        # State/action tokens are consumed by the transformer.  Do not inherit
+        # the pipeline dtype from a separately configured FP32 VAE.
+        state = state.unsqueeze(0).to(device=device, dtype=transformer_dtype)
         latents_outputs = self.prepare_latents(
             image,
             batch_size * num_videos_per_prompt,
