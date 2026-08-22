@@ -6,22 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _linear_forward(linear: nn.Linear, x: torch.Tensor) -> torch.Tensor:
-    """Run a batch-one linear layer without a small GEMM on PPU deployment."""
-
-    if x.shape[0] != 1:
-        return linear(x)
-    weight = linear.weight
-    projected = x.to(dtype=weight.dtype)
-    expanded_weight = weight.t().view(
-        1, 1, linear.in_features, linear.out_features
-    )
-    out = (projected.unsqueeze(-1) * expanded_weight).sum(dim=-2)
-    if linear.bias is not None:
-        out = out + linear.bias.view(1, 1, linear.out_features)
-    return out.to(dtype=x.dtype)
-
-
 class EmbodimentSpecificLinear(nn.Module):
     """Linear layer with per-embodiment weights and biases."""
 
@@ -59,13 +43,15 @@ class EmbodimentSpecificLinear(nn.Module):
     def forward(self, x: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         embodiment_id = self._normalize_embodiment_id(embodiment_id, batch_size=x.shape[0])
         if x.shape[0] == 1:
-            # Avoid unsupported small einsum/BMM kernels on the batch-one PPU
-            # deployment path.  Training batches keep the original path below.
+            # PPU deployment requires at least 128 matrix rows.  Zero-padding
+            # rows cannot affect the real token outputs, which are sliced back.
             selected_weight = self.weight[embodiment_id[0]]
             selected_bias = self.bias[embodiment_id[0]]
             projected = x.to(dtype=selected_weight.dtype)
-            out = (projected.unsqueeze(-1) * selected_weight.view(1, 1, self.input_dim, self.output_dim)).sum(dim=-2)
-            out = out + selected_bias.view(1, 1, self.output_dim)
+            token_count = projected.shape[1]
+            if token_count < 128:
+                projected = F.pad(projected, (0, 0, 0, 128 - token_count))
+            out = F.linear(projected, selected_weight.t(), selected_bias)[:, :token_count]
         else:
             one_hot = F.one_hot(embodiment_id, num_classes=self.num_categories).to(dtype=self.weight.dtype)
             selected_weight = torch.einsum("bc,cij->bij", one_hot, self.weight)
@@ -94,9 +80,9 @@ class EmbodimentSpecificActionEncoder(nn.Module):
     def forward(self, action: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = self.in_proj(action, embodiment_id=embodiment_id)
         x = self.act1(x)
-        x = _linear_forward(self.mid_proj, x)
+        x = self.mid_proj(x)
         x = self.act2(x)
-        return _linear_forward(self.out_proj, x)
+        return self.out_proj(x)
 
 
 class EmbodimentSpecificActionDecoder(nn.Module):
@@ -111,8 +97,8 @@ class EmbodimentSpecificActionDecoder(nn.Module):
         self.out_proj = EmbodimentSpecificLinear(128, action_dim, num_categories=num_embodiments, dtype=dtype)
 
     def forward(self, action_states: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x = _linear_forward(self.in_proj, action_states)
+        x = self.in_proj(action_states)
         x = self.act1(x)
-        x = _linear_forward(self.mid_proj, x)
+        x = self.mid_proj(x)
         x = self.act2(x)
         return self.out_proj(x, embodiment_id=embodiment_id)

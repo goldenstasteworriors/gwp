@@ -26,6 +26,32 @@ from world_action_model.models import CasualWorldActionTransformer_MoT
 from world_action_model.rtc import RTCConfig
 
 
+class _PaddedLinear(torch.nn.Module):
+    """Preserve Linear results while padding PPU-incompatible small row counts."""
+
+    def __init__(self, linear: torch.nn.Linear, minimum_rows: int = 128) -> None:
+        super().__init__()
+        self.linear = linear
+        self.minimum_rows = int(minimum_rows)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        rows = int(np.prod(inputs.shape[:-1]))
+        if rows >= self.minimum_rows:
+            return self.linear(inputs)
+        flat = inputs.reshape(rows, inputs.shape[-1])
+        padded = torch_F.pad(flat, (0, 0, 0, self.minimum_rows - rows))
+        output = self.linear(padded)[:rows]
+        return output.reshape(*inputs.shape[:-1], output.shape[-1])
+
+
+def _wrap_small_linear_calls(module: torch.nn.Module) -> None:
+    for name, child in list(module.named_children()):
+        if isinstance(child, torch.nn.Linear):
+            setattr(module, name, _PaddedLinear(child))
+        else:
+            _wrap_small_linear_calls(child)
+
+
 def _resolve_path(value: str, manifest_dir: Path) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
@@ -290,6 +316,8 @@ class SonicHistoryPolicy:
         if self.manifest.get("cast_time_embedding_to_model_dtype", False):
             self.pipe.transformer.condition_embedder.time_embedder.to(dtype=self.dtype)
             self.pipe.transformer.action_condition_embedder.time_embedder.to(dtype=self.dtype)
+        if self.manifest.get("ppu_pad_small_linears", False):
+            _wrap_small_linear_calls(self.pipe.transformer)
         # Freeze only after materializing the empty-initialized model on the
         # accelerator.  Some CUDA-compatible runtimes cannot transfer a
         # meta-loaded module whose parameter flags were changed beforehand.
