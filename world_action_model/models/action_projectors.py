@@ -42,10 +42,19 @@ class EmbodimentSpecificLinear(nn.Module):
 
     def forward(self, x: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         embodiment_id = self._normalize_embodiment_id(embodiment_id, batch_size=x.shape[0])
-        one_hot = F.one_hot(embodiment_id, num_classes=self.num_categories).to(dtype=self.weight.dtype)
-        selected_weight = torch.einsum("bc,cij->bij", one_hot, self.weight)
-        selected_bias = torch.einsum("bc,cj->bj", one_hot, self.bias)
-        out = torch.bmm(x.to(dtype=selected_weight.dtype), selected_weight) + selected_bias.unsqueeze(1)
+        if x.shape[0] == 1:
+            # Avoid unsupported small einsum/BMM kernels on the batch-one PPU
+            # deployment path.  Training batches keep the original path below.
+            selected_weight = self.weight[embodiment_id[0]]
+            selected_bias = self.bias[embodiment_id[0]]
+            projected = x.to(dtype=selected_weight.dtype)
+            out = (projected.unsqueeze(-1) * selected_weight.view(1, 1, self.input_dim, self.output_dim)).sum(dim=-2)
+            out = out + selected_bias.view(1, 1, self.output_dim)
+        else:
+            one_hot = F.one_hot(embodiment_id, num_classes=self.num_categories).to(dtype=self.weight.dtype)
+            selected_weight = torch.einsum("bc,cij->bij", one_hot, self.weight)
+            selected_bias = torch.einsum("bc,cj->bj", one_hot, self.bias)
+            out = torch.bmm(x.to(dtype=selected_weight.dtype), selected_weight) + selected_bias.unsqueeze(1)
         return out.to(dtype=x.dtype)
 
     def extra_repr(self):
