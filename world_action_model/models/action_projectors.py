@@ -48,9 +48,10 @@ class EmbodimentSpecificLinear(nn.Module):
         selected_bias = self.bias[embodiment_id]
         projected = x.to(dtype=selected_weight.dtype)
         if x.shape[0] == 1:
-            # The deployment path is batch one.  A plain matrix multiply is
-            # better supported than BMM by CUDA-compatible PPU runtimes.
-            out = torch.matmul(projected[0], selected_weight[0]).unsqueeze(0)
+            # The deployment path is batch one.  Some CUDA-compatible PPU
+            # runtimes abort while compiling small GEMM/BMM shapes, whereas
+            # the equivalent elementwise reduction is fully supported.
+            out = (projected.unsqueeze(-1) * selected_weight.unsqueeze(1)).sum(dim=-2)
         else:
             out = torch.bmm(projected, selected_weight)
         out = out + selected_bias.unsqueeze(1)
