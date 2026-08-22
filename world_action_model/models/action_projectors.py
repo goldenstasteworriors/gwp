@@ -6,6 +6,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _linear_forward(linear: nn.Linear, x: torch.Tensor) -> torch.Tensor:
+    """Run a batch-one linear layer without a small GEMM on PPU deployment."""
+
+    if x.shape[0] != 1:
+        return linear(x)
+    weight = linear.weight
+    projected = x.to(dtype=weight.dtype)
+    expanded_weight = weight.t().view(
+        1, 1, linear.in_features, linear.out_features
+    )
+    out = (projected.unsqueeze(-1) * expanded_weight).sum(dim=-2)
+    if linear.bias is not None:
+        out = out + linear.bias.view(1, 1, linear.out_features)
+    return out.to(dtype=x.dtype)
+
+
 class EmbodimentSpecificLinear(nn.Module):
     """Linear layer with per-embodiment weights and biases."""
 
@@ -78,9 +94,9 @@ class EmbodimentSpecificActionEncoder(nn.Module):
     def forward(self, action: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = self.in_proj(action, embodiment_id=embodiment_id)
         x = self.act1(x)
-        x = self.mid_proj(x)
+        x = _linear_forward(self.mid_proj, x)
         x = self.act2(x)
-        return self.out_proj(x)
+        return _linear_forward(self.out_proj, x)
 
 
 class EmbodimentSpecificActionDecoder(nn.Module):
@@ -95,8 +111,8 @@ class EmbodimentSpecificActionDecoder(nn.Module):
         self.out_proj = EmbodimentSpecificLinear(128, action_dim, num_categories=num_embodiments, dtype=dtype)
 
     def forward(self, action_states: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x = self.in_proj(action_states)
+        x = _linear_forward(self.in_proj, action_states)
         x = self.act1(x)
-        x = self.mid_proj(x)
+        x = _linear_forward(self.mid_proj, x)
         x = self.act2(x)
         return self.out_proj(x, embodiment_id=embodiment_id)
