@@ -1498,12 +1498,18 @@ class CasualWorldActionTransformer_MoT(
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        allow_action_input_grad: bool = False,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
         if torch.is_grad_enabled():
-            raise RuntimeError(
-                "GWP0.5 action-only inference requires torch.no_grad()/inference_mode() "
-                "so the prefix KV cache can be used."
-            )
+            if not allow_action_input_grad:
+                raise RuntimeError(
+                    "GWP0.5 action-only inference requires torch.no_grad()/inference_mode() "
+                    "unless RTC explicitly enables action-input gradients."
+                )
+            if getattr(self, "_action_only_prefix_cache", None) is None:
+                raise RuntimeError(
+                    "RTC action-input gradients require a prefix KV cache primed under torch.no_grad()."
+                )
         if ref_latents is None:
             raise ValueError("GWP0.5 action-only inference requires ref_latents to build the prefix KV cache.")
         if not getattr(self, "_enable_action_only_prefix_cache", False):

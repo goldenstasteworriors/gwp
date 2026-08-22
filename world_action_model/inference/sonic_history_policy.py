@@ -23,6 +23,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from scripts.inference_openloop import WAPipeline, load_fixed_prompt_embedding, resolve_torch_dtype
 from world_action_model.models import CasualWorldActionTransformer_MoT
+from world_action_model.rtc import RTCConfig
 
 
 def _resolve_path(value: str, manifest_dir: Path) -> Path:
@@ -176,6 +177,43 @@ def decode_sonic_action(
     return predicted
 
 
+def encode_sonic_action_chunk(
+    absolute_action,
+    *,
+    action_low: torch.Tensor,
+    action_high: torch.Tensor,
+    delta_mask,
+    current_state,
+    physical_action_dim: int,
+    model_action_dim: int,
+) -> torch.Tensor:
+    """Map an absolute joint-target chunk back to the model's training space."""
+
+    represented = torch.as_tensor(
+        absolute_action,
+        dtype=torch.float32,
+        device=action_low.device,
+    )
+    if represented.ndim != 2 or represented.shape[1] != physical_action_dim:
+        raise ValueError(
+            f"Expected absolute action [T,{physical_action_dim}], got {tuple(represented.shape)}"
+        )
+    represented = represented.clone()
+    mask = torch.as_tensor(delta_mask, dtype=torch.bool, device=represented.device).flatten()
+    if mask.numel() != physical_action_dim:
+        raise ValueError("delta_mask length must equal physical_action_dim")
+    current = torch.as_tensor(
+        current_state,
+        dtype=torch.float32,
+        device=represented.device,
+    ).flatten()[:physical_action_dim]
+    represented[:, mask] -= current[mask]
+    low = action_low.flatten()[:physical_action_dim]
+    high = action_high.flatten()[:physical_action_dim]
+    normalized = ((represented - low) / (high - low).clamp_min(1e-8) * 2.0 - 1.0).clamp(-1.0, 1.0)
+    return torch_F.pad(normalized, (0, model_action_dim - physical_action_dim), value=0.0)
+
+
 def _load_transformer_checkpoint(path: Path, dtype: torch.dtype):
     from safetensors.torch import load_file
 
@@ -208,7 +246,7 @@ def _load_transformer_checkpoint(path: Path, dtype: torch.dtype):
             f"Checkpoint/model mismatch for {path}: missing={missing[:20]}, "
             f"unexpected={unexpected[:20]}"
         )
-    return transformer.eval()
+    return transformer.eval().requires_grad_(False)
 
 
 class SonicHistoryPolicy:
@@ -302,13 +340,16 @@ class SonicHistoryPolicy:
             episode_progress=episode_progress,
         )
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def predict(
         self,
         images: Sequence,
         states,
         episode_progress: float = 0.0,
         seed: int = 0,
+        rtc_previous_chunk_tail=None,
+        rtc_inference_delay: int = 0,
+        rtc_config: RTCConfig | None = None,
     ) -> np.ndarray:
         if len(images) < self.required_visual_history:
             raise ValueError(
@@ -320,6 +361,17 @@ class SonicHistoryPolicy:
             for image in images
         ]
         state_tokens, current_state = self._state_tokens(states, episode_progress)
+        normalized_rtc_tail = None
+        if rtc_config is not None and rtc_previous_chunk_tail is not None:
+            normalized_rtc_tail = encode_sonic_action_chunk(
+                rtc_previous_chunk_tail,
+                action_low=self.action_low,
+                action_high=self.action_high,
+                delta_mask=self.delta_mask,
+                current_state=current_state,
+                physical_action_dim=self.physical_action_dim,
+                model_action_dim=self.model_action_dim,
+            ).to(dtype=self.dtype)
         generator = torch.Generator(device=self.device).manual_seed(int(seed))
         predicted = self.pipe(
             image=images,
@@ -334,6 +386,9 @@ class SonicHistoryPolicy:
             return_dict=False,
             action_dim=self.model_action_dim,
             generator=generator,
+            rtc_previous_chunk_tail=normalized_rtc_tail,
+            rtc_inference_delay=rtc_inference_delay,
+            rtc_config=rtc_config,
         )[0, :, : self.physical_action_dim].float()
         predicted = decode_sonic_action(
             predicted,

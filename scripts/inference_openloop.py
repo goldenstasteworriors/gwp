@@ -55,6 +55,7 @@ from PIL import Image
 from transformers import AutoTokenizer, CLIPImageProcessor, CLIPVisionModel, UMT5EncoderModel
 
 from world_action_model.models import CasualWorldActionTransformer, CasualWorldActionTransformer_MoT
+from world_action_model.rtc import RTCConfig, guided_flow_velocity
 from giga_models.sockets import RobotInferenceClient, RobotInferenceServer
 
 if is_torch_xla_available():
@@ -448,6 +449,9 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
         action_dim: int = 32,
+        rtc_previous_chunk_tail: Optional[torch.Tensor] = None,
+        rtc_inference_delay: int = 0,
+        rtc_config: Optional[RTCConfig] = None,
     ):
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
@@ -632,22 +636,47 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                         if skip_cache_context
                         else current_model.cache_context("cond")
                     )
-                    with cache_context:
+                    rtc_active = (
+                        rtc_config is not None
+                        and rtc_previous_chunk_tail is not None
+                        and rtc_previous_chunk_tail.shape[-2] > 0
+                    )
+
+                    def predict_action_velocity(action_input):
                         if getattr(self, "_torch_compile_mark_step", False):
                             mark_step = getattr(getattr(torch, "compiler", None), "cudagraph_mark_step_begin", None)
                             if mark_step is not None:
                                 mark_step()
-
-                        action_pred = current_model(
+                        return current_model(
                             ref_latents=ref_latents_for_action,
                             noisy_latents=empty_noisy_latents_for_action,
                             timestep=timestep,
                             encoder_hidden_states=prompt_embeds,
                             return_dict=False,
-                            action=action,
+                            action=action_input,
                             state=state,
                             action_only=True,
+                            allow_action_input_grad=rtc_active,
                         )
+
+                    with cache_context:
+                        if rtc_active:
+                            if i == 0:
+                                # The visual/state prefix is independent of the noisy action.
+                                # Prime it once without a graph, then differentiate only the
+                                # cached action path for RTC guidance.
+                                with torch.no_grad():
+                                    predict_action_velocity(action)
+                            action_pred = guided_flow_velocity(
+                                action,
+                                predict_action_velocity,
+                                rtc_previous_chunk_tail,
+                                noise_level=self.action_scheduler.sigmas[i],
+                                inference_delay=rtc_inference_delay,
+                                config=rtc_config,
+                            )
+                        else:
+                            action_pred = predict_action_velocity(action)
 
                     if self.do_classifier_free_guidance:
                         with current_model.cache_context("uncond"):
