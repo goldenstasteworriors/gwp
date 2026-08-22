@@ -84,6 +84,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-embedding", type=Path)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
+        "--model-dtype",
+        choices=("bf16", "float32"),
+        default="bf16",
+        help="Transformer compute dtype; float32 is an accelerator compatibility fallback.",
+    )
+    parser.add_argument(
         "--vae-dtype",
         choices=("bf16", "float32"),
         default="bf16",
@@ -243,7 +249,7 @@ def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path
             "max_guidance_weight": args.rtc_max_guidance_weight,
             "prefix_schedule": args.rtc_prefix_schedule,
         },
-        "model_dtype": "bf16",
+        "model_dtype": args.model_dtype,
         "vae_dtype": args.vae_dtype,
         "action_flow_shift": 5.0,
         "rollout_semantics": {
