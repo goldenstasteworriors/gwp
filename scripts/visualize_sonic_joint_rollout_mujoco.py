@@ -86,7 +86,9 @@ def load_rollout_metadata(path: Path) -> tuple[str, str]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     rollout_semantics = manifest.get("rollout_semantics", {})
     semantics = rollout_semantics.get("left_arm_channels_0_7")
-    state_feedback = rollout_semantics.get("state_feedback", "unknown")
+    state_feedback = rollout_semantics.get(
+        "state_feedback", manifest.get("state_feedback", "unknown")
+    )
     return str(semantics or "unknown_action_representation"), str(state_feedback)
 
 
