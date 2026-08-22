@@ -46,7 +46,14 @@ class EmbodimentSpecificLinear(nn.Module):
         # simple lookup.
         selected_weight = self.weight[embodiment_id]
         selected_bias = self.bias[embodiment_id]
-        out = torch.bmm(x.to(dtype=selected_weight.dtype), selected_weight) + selected_bias.unsqueeze(1)
+        projected = x.to(dtype=selected_weight.dtype)
+        if x.shape[0] == 1:
+            # The deployment path is batch one.  A plain matrix multiply is
+            # better supported than BMM by CUDA-compatible PPU runtimes.
+            out = torch.matmul(projected[0], selected_weight[0]).unsqueeze(0)
+        else:
+            out = torch.bmm(projected, selected_weight)
+        out = out + selected_bias.unsqueeze(1)
         return out.to(dtype=x.dtype)
 
     def extra_repr(self):
