@@ -246,7 +246,7 @@ def _load_transformer_checkpoint(path: Path, dtype: torch.dtype):
             f"Checkpoint/model mismatch for {path}: missing={missing[:20]}, "
             f"unexpected={unexpected[:20]}"
         )
-    return transformer.eval().requires_grad_(False)
+    return transformer.eval()
 
 
 class SonicHistoryPolicy:
@@ -284,6 +284,10 @@ class SonicHistoryPolicy:
             expand_timesteps=True,
         )
         self.pipe.to(device=self.device, dtype=self.dtype)
+        # Freeze only after materializing the empty-initialized model on the
+        # accelerator.  Some CUDA-compatible runtimes cannot transfer a
+        # meta-loaded module whose parameter flags were changed beforehand.
+        self.pipe.transformer.requires_grad_(False)
 
         stats = json.loads(norm_stats.read_text(encoding="utf-8"))["norm_stats"]
         self.physical_action_dim = int(self.manifest["physical_action_dim"])
