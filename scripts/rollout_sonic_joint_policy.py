@@ -321,7 +321,10 @@ def compute_jitter_metrics(
     reference_velocity = np.diff(reference_states, axis=0)
     reference_acceleration = np.diff(reference_states, n=2, axis=0)
     return {
-        "units": "joint radians per 50-Hz step; L2 is over 13 output channels",
+        "units": (
+            "per 50-Hz step: arm channels are joint radians and hand channels "
+            "are normalized DDS commands; L2 mixes all 13 output channels"
+        ),
         "chunk_internal_velocity": _vector_stats(internal_velocity),
         "chunk_internal_acceleration": _vector_stats(internal_acceleration),
         "chunk_overlap_disagreement": _vector_stats(overlap_array),
