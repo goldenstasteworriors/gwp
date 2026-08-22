@@ -287,6 +287,9 @@ class SonicHistoryPolicy:
         self.pipe.to(device=self.device, dtype=self.dtype)
         if self.vae_dtype != self.dtype:
             self.pipe.vae.to(dtype=self.vae_dtype)
+        if self.manifest.get("cast_time_embedding_to_model_dtype", False):
+            self.pipe.transformer.condition_embedder.time_embedder.to(dtype=self.dtype)
+            self.pipe.transformer.action_condition_embedder.time_embedder.to(dtype=self.dtype)
         # Freeze only after materializing the empty-initialized model on the
         # accelerator.  Some CUDA-compatible runtimes cannot transfer a
         # meta-loaded module whose parameter flags were changed beforehand.

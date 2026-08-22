@@ -95,6 +95,11 @@ def parse_args() -> argparse.Namespace:
         default="bf16",
         help="VAE compute dtype; float32 is a compatibility fallback for some accelerators.",
     )
+    parser.add_argument(
+        "--cast-time-embedding-to-model-dtype",
+        action="store_true",
+        help="Avoid FP32 linear kernels in the timestep embedder on PPU accelerators.",
+    )
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--num-steps", type=int, default=300)
     parser.add_argument(
@@ -251,6 +256,7 @@ def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path
         },
         "model_dtype": args.model_dtype,
         "vae_dtype": args.vae_dtype,
+        "cast_time_embedding_to_model_dtype": args.cast_time_embedding_to_model_dtype,
         "action_flow_shift": 5.0,
         "rollout_semantics": {
             "reference_state_used_only_at_initialization": args.state_feedback == "predicted",
