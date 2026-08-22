@@ -258,6 +258,7 @@ class SonicHistoryPolicy:
         self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         self.device = str(device)
         self.dtype = resolve_torch_dtype(self.manifest.get("model_dtype", "bf16"))
+        self.vae_dtype = resolve_torch_dtype(self.manifest.get("vae_dtype", "bf16"))
 
         checkpoint = _resolve_path(self.manifest["transformer"], self.manifest_dir)
         base_model = _resolve_path(self.manifest["base_model"], self.manifest_dir)
@@ -269,7 +270,7 @@ class SonicHistoryPolicy:
         vae = AutoencoderKLWan.from_pretrained(
             base_model,
             subfolder="vae",
-            torch_dtype=self.dtype,
+            torch_dtype=self.vae_dtype,
         )
         transformer = _load_transformer_checkpoint(checkpoint, self.dtype)
         scheduler = FlowMatchEulerDiscreteScheduler(
@@ -284,6 +285,8 @@ class SonicHistoryPolicy:
             expand_timesteps=True,
         )
         self.pipe.to(device=self.device, dtype=self.dtype)
+        if self.vae_dtype != self.dtype:
+            self.pipe.vae.to(dtype=self.vae_dtype)
         # Freeze only after materializing the empty-initialized model on the
         # accelerator.  Some CUDA-compatible runtimes cannot transfer a
         # meta-loaded module whose parameter flags were changed beforehand.

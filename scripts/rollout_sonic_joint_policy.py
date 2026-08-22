@@ -83,6 +83,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--norm-stats", type=Path)
     parser.add_argument("--prompt-embedding", type=Path)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--vae-dtype",
+        choices=("bf16", "float32"),
+        default="bf16",
+        help="VAE compute dtype; float32 is a compatibility fallback for some accelerators.",
+    )
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--num-steps", type=int, default=300)
     parser.add_argument(
@@ -238,6 +244,7 @@ def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path
             "prefix_schedule": args.rtc_prefix_schedule,
         },
         "model_dtype": "bf16",
+        "vae_dtype": args.vae_dtype,
         "action_flow_shift": 5.0,
         "rollout_semantics": {
             "reference_state_used_only_at_initialization": args.state_feedback == "predicted",
