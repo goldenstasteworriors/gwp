@@ -43,7 +43,7 @@ class EmbodimentSpecificLinear(nn.Module):
     def forward(self, x: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         embodiment_id = self._normalize_embodiment_id(embodiment_id, batch_size=x.shape[0])
         if x.shape[0] == 1:
-            # PPU deployment requires at least 128 matrix rows.  Zero-padding
+            # PPU deployment requires at least 256 matrix rows.  Zero-padding
             # rows cannot affect the real token outputs, which are sliced back.
             selected_weight = self.weight[embodiment_id[0]]
             selected_bias = self.bias[embodiment_id[0]]
@@ -53,7 +53,7 @@ class EmbodimentSpecificLinear(nn.Module):
             padded_output_dim = max(self.output_dim, 128)
             projected = F.pad(
                 projected,
-                (0, padded_input_dim - self.input_dim, 0, max(128 - token_count, 0)),
+                (0, padded_input_dim - self.input_dim, 0, max(256 - token_count, 0)),
             )
             linear_weight = F.pad(
                 selected_weight.t(),

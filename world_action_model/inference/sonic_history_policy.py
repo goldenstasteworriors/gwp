@@ -29,7 +29,7 @@ from world_action_model.rtc import RTCConfig
 class _PaddedLinear(torch.nn.Module):
     """Preserve Linear results while padding PPU-incompatible small row counts."""
 
-    def __init__(self, linear: torch.nn.Linear, minimum_rows: int = 128) -> None:
+    def __init__(self, linear: torch.nn.Linear, minimum_rows: int = 256) -> None:
         super().__init__()
         self.linear = linear
         self.minimum_rows = int(minimum_rows)
