@@ -42,31 +42,10 @@ class EmbodimentSpecificLinear(nn.Module):
 
     def forward(self, x: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         embodiment_id = self._normalize_embodiment_id(embodiment_id, batch_size=x.shape[0])
-        if x.shape[0] == 1:
-            # PPU deployment requires at least 256 matrix rows.  Zero-padding
-            # rows cannot affect the real token outputs, which are sliced back.
-            selected_weight = self.weight[embodiment_id[0]]
-            selected_bias = self.bias[embodiment_id[0]]
-            projected = x.to(dtype=selected_weight.dtype)
-            token_count = projected.shape[1]
-            padded_input_dim = max(self.input_dim, 128)
-            padded_output_dim = max(self.output_dim, 128)
-            projected = F.pad(
-                projected,
-                (0, padded_input_dim - self.input_dim, 0, max(256 - token_count, 0)),
-            )
-            linear_weight = F.pad(
-                selected_weight.t(),
-                (0, padded_input_dim - self.input_dim, 0, padded_output_dim - self.output_dim),
-            )
-            linear_bias = F.pad(selected_bias, (0, padded_output_dim - self.output_dim))
-            out = F.linear(projected, linear_weight, linear_bias)
-            out = out[:, :token_count, : self.output_dim]
-        else:
-            one_hot = F.one_hot(embodiment_id, num_classes=self.num_categories).to(dtype=self.weight.dtype)
-            selected_weight = torch.einsum("bc,cij->bij", one_hot, self.weight)
-            selected_bias = torch.einsum("bc,cj->bj", one_hot, self.bias)
-            out = torch.bmm(x.to(dtype=selected_weight.dtype), selected_weight) + selected_bias.unsqueeze(1)
+        one_hot = F.one_hot(embodiment_id, num_classes=self.num_categories).to(dtype=self.weight.dtype)
+        selected_weight = torch.einsum("bc,cij->bij", one_hot, self.weight)
+        selected_bias = torch.einsum("bc,cj->bj", one_hot, self.bias)
+        out = torch.bmm(x.to(dtype=selected_weight.dtype), selected_weight) + selected_bias.unsqueeze(1)
         return out.to(dtype=x.dtype)
 
     def extra_repr(self):

@@ -83,28 +83,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--norm-stats", type=Path)
     parser.add_argument("--prompt-embedding", type=Path)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument(
-        "--model-dtype",
-        choices=("bf16", "float32"),
-        default="bf16",
-        help="Transformer compute dtype; float32 is an accelerator compatibility fallback.",
-    )
-    parser.add_argument(
-        "--vae-dtype",
-        choices=("bf16", "float32"),
-        default="bf16",
-        help="VAE compute dtype; float32 is a compatibility fallback for some accelerators.",
-    )
-    parser.add_argument(
-        "--cast-time-embedding-to-model-dtype",
-        action="store_true",
-        help="Avoid FP32 linear kernels in the timestep embedder on PPU accelerators.",
-    )
-    parser.add_argument(
-        "--ppu-pad-small-linears",
-        action="store_true",
-        help="Pad sub-128-row transformer linear calls for PPU inference.",
-    )
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--num-steps", type=int, default=300)
     parser.add_argument(
@@ -259,10 +237,7 @@ def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path
             "max_guidance_weight": args.rtc_max_guidance_weight,
             "prefix_schedule": args.rtc_prefix_schedule,
         },
-        "model_dtype": args.model_dtype,
-        "vae_dtype": args.vae_dtype,
-        "cast_time_embedding_to_model_dtype": args.cast_time_embedding_to_model_dtype,
-        "ppu_pad_small_linears": args.ppu_pad_small_linears,
+        "model_dtype": "bf16",
         "action_flow_shift": 5.0,
         "rollout_semantics": {
             "reference_state_used_only_at_initialization": args.state_feedback == "predicted",

@@ -26,46 +26,6 @@ from world_action_model.models import CasualWorldActionTransformer_MoT
 from world_action_model.rtc import RTCConfig
 
 
-class _PaddedLinear(torch.nn.Module):
-    """Preserve Linear results while padding PPU-incompatible small row counts."""
-
-    def __init__(self, linear: torch.nn.Linear, minimum_rows: int = 256) -> None:
-        super().__init__()
-        self.linear = linear
-        self.minimum_rows = int(minimum_rows)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        rows = int(np.prod(inputs.shape[:-1]))
-        in_features = self.linear.in_features
-        out_features = self.linear.out_features
-        if rows >= self.minimum_rows and in_features >= 128 and out_features >= 128:
-            return self.linear(inputs)
-        flat = inputs.reshape(rows, inputs.shape[-1])
-        padded_in = max(in_features, 128)
-        padded_out = max(out_features, 128)
-        padded = torch_F.pad(
-            flat,
-            (0, padded_in - in_features, 0, max(self.minimum_rows - rows, 0)),
-        )
-        weight = torch_F.pad(
-            self.linear.weight,
-            (0, padded_in - in_features, 0, padded_out - out_features),
-        )
-        bias = self.linear.bias
-        if bias is not None:
-            bias = torch_F.pad(bias, (0, padded_out - out_features))
-        output = torch_F.linear(padded, weight, bias)[:rows, :out_features]
-        return output.reshape(*inputs.shape[:-1], out_features)
-
-
-def _wrap_small_linear_calls(module: torch.nn.Module) -> None:
-    for name, child in list(module.named_children()):
-        if isinstance(child, torch.nn.Linear):
-            setattr(module, name, _PaddedLinear(child))
-        else:
-            _wrap_small_linear_calls(child)
-
-
 def _resolve_path(value: str, manifest_dir: Path) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
@@ -298,7 +258,6 @@ class SonicHistoryPolicy:
         self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         self.device = str(device)
         self.dtype = resolve_torch_dtype(self.manifest.get("model_dtype", "bf16"))
-        self.vae_dtype = resolve_torch_dtype(self.manifest.get("vae_dtype", "bf16"))
 
         checkpoint = _resolve_path(self.manifest["transformer"], self.manifest_dir)
         base_model = _resolve_path(self.manifest["base_model"], self.manifest_dir)
@@ -310,7 +269,7 @@ class SonicHistoryPolicy:
         vae = AutoencoderKLWan.from_pretrained(
             base_model,
             subfolder="vae",
-            torch_dtype=self.vae_dtype,
+            torch_dtype=self.dtype,
         )
         transformer = _load_transformer_checkpoint(checkpoint, self.dtype)
         scheduler = FlowMatchEulerDiscreteScheduler(
@@ -325,13 +284,6 @@ class SonicHistoryPolicy:
             expand_timesteps=True,
         )
         self.pipe.to(device=self.device, dtype=self.dtype)
-        if self.vae_dtype != self.dtype:
-            self.pipe.vae.to(dtype=self.vae_dtype)
-        if self.manifest.get("cast_time_embedding_to_model_dtype", False):
-            self.pipe.transformer.condition_embedder.time_embedder.to(dtype=self.dtype)
-            self.pipe.transformer.action_condition_embedder.time_embedder.to(dtype=self.dtype)
-        if self.manifest.get("ppu_pad_small_linears", False):
-            _wrap_small_linear_calls(self.pipe.transformer)
         # Freeze only after materializing the empty-initialized model on the
         # accelerator.  Some CUDA-compatible runtimes cannot transfer a
         # meta-loaded module whose parameter flags were changed beforehand.
