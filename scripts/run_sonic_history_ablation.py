@@ -41,6 +41,15 @@ EXPERIMENTS = [
             "GWP_MASK_PADDED_ACTION_STEPS": "1",
         },
     ),
+    Experiment(
+        "m00_all_absolute",
+        "M00 baseline with every physical joint supervised as an absolute target.",
+        {
+            "GWP_MASK_PADDED_ACTION_DIMS": "1",
+            "GWP_MASK_PADDED_ACTION_STEPS": "1",
+        },
+        norm_stats_filename="norm_stats_all_absolute_h48.json",
+    ),
     Experiment("m01_dim_mask", "Mask the 19 padded model action dimensions.", {"GWP_MASK_PADDED_ACTION_DIMS": "1"}),
     Experiment(
         "m02_dim_time_mask",
@@ -598,13 +607,6 @@ def validate_action_representation(
             "The left-arm/left-hand dataset requires a 13-D action delta mask, got "
             f"{len(action_delta_mask)}"
         )
-    expected = [True] * 7 + [False] * 6
-    if action_delta_mask != expected:
-        raise ValueError(
-            "Expected left arm joints to be relative and Inspire hand joints to be "
-            f"absolute: {expected}, got {action_delta_mask}"
-        )
-
     expected_padded = action_delta_mask + [False] * (32 - len(action_delta_mask))
     for experiment in experiments:
         norm_path = dataset / experiment.norm_stats_filename
