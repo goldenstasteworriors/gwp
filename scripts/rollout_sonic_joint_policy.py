@@ -99,6 +99,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num-inference-steps", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260820)
+    parser.add_argument(
+        "--chunk-overlap-method",
+        choices=("none", "uniform", "act_old", "exp_new", "median"),
+        default="none",
+        help=(
+            "Fuse all raw action chunks covering each executed target. "
+            "act_old reproduces ACT's older-prediction exponential weighting; "
+            "exp_new applies the exponential bias toward newer predictions."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-overlap-decay",
+        type=float,
+        default=0.01,
+        help="Exponential decay used by act_old/exp_new overlap fusion.",
+    )
     parser.add_argument("--rtc", action="store_true", help="Enable training-free RTC guidance.")
     parser.add_argument(
         "--rtc-execution-horizon",
@@ -243,6 +259,11 @@ def write_runtime_manifest(
         "execution_steps": args.execution_steps,
         "replan_interval_seconds": args.execution_steps / 50.0,
         "state_feedback": args.state_feedback,
+        "chunk_overlap": {
+            "method": args.chunk_overlap_method,
+            "decay": args.chunk_overlap_decay,
+            "space": "decoded_absolute_joint_target",
+        },
         "rtc": {
             "enabled": args.rtc,
             "method": "PiGDM-guided flow matching over aligned chunk overlap",
@@ -259,6 +280,7 @@ def write_runtime_manifest(
             "reference_images_used_at_every_replan": True,
             "full_action_chunk_predicted_at_every_replan": True,
             "executed_prefix_steps_per_chunk": args.execution_steps,
+            "overlapping_chunk_execution": args.chunk_overlap_method,
             "left_arm_channels_0_7": "relative_delta_integrated_to_absolute_joint_target",
             "left_arm_integration_state": args.state_feedback,
             "left_inspire_channels_7_13": "absolute_command",
@@ -294,6 +316,45 @@ def recursive_history(
 def reference_history(states: np.ndarray, offsets: list[int], frame_index: int) -> np.ndarray:
     indices = [max(0, min(len(states) - 1, frame_index + offset)) for offset in offsets]
     return np.stack([states[index] for index in indices]).astype(np.float32)
+
+
+def fuse_overlapping_action(
+    action_chunks: list[np.ndarray],
+    replan_frame_indices: list[int],
+    frame_index: int,
+    chunk_offset: int,
+    method: str,
+    decay: float,
+) -> tuple[np.ndarray, int]:
+    """Fuse decoded absolute targets from every chunk covering this control step."""
+    candidates = []
+    for chunk, replan_frame in zip(action_chunks, replan_frame_indices, strict=True):
+        candidate_index = frame_index - replan_frame + chunk_offset
+        if 0 <= candidate_index < len(chunk):
+            candidates.append(chunk[candidate_index])
+    if not candidates:
+        raise RuntimeError(
+            f"no action chunk covers frame={frame_index}, offset={chunk_offset}"
+        )
+
+    values = np.stack(candidates).astype(np.float32)
+    if method == "none" or len(values) == 1:
+        return values[-1].copy(), len(values)
+    if method == "uniform":
+        return np.mean(values, axis=0, dtype=np.float64).astype(np.float32), len(values)
+    if method == "median":
+        return np.median(values, axis=0).astype(np.float32), len(values)
+
+    age = np.arange(len(values), dtype=np.float64)
+    if method == "act_old":
+        weights = np.exp(-decay * age)
+    elif method == "exp_new":
+        weights = np.exp(-decay * age[::-1])
+    else:
+        raise ValueError(f"unsupported chunk overlap method: {method}")
+    weights /= np.sum(weights)
+    fused = np.sum(values.astype(np.float64) * weights[:, None], axis=0)
+    return fused.astype(np.float32), len(values)
 
 
 def _vector_stats(vectors: np.ndarray) -> dict:
@@ -371,6 +432,8 @@ def main() -> None:
         raise SystemExit("episode/start-frame must be non-negative and num-steps must be positive")
     if args.num_inference_steps <= 0 or args.execution_steps <= 0:
         raise SystemExit("num-inference-steps and execution-steps must be positive")
+    if not np.isfinite(args.chunk_overlap_decay) or args.chunk_overlap_decay < 0:
+        raise SystemExit("chunk-overlap-decay must be finite and non-negative")
     if args.rtc_inference_delay < 0:
         raise SystemExit("rtc-inference-delay must be non-negative")
     spec = EXPERIMENTS[args.experiment]
@@ -430,6 +493,7 @@ def main() -> None:
     executed_action_counts: list[int] = []
     executed_chunk_indices: list[int] = []
     executed_chunk_offsets: list[int] = []
+    executed_overlap_counts: list[int] = []
     wall_start = time.time()
     total_steps = stop_frame - args.start_frame
     replan_frames = list(range(args.start_frame, stop_frame, args.execution_steps))
@@ -475,13 +539,22 @@ def main() -> None:
         input_state_histories.append(state_history.copy())
         replan_frame_indices.append(frame_index)
         executed_action_counts.append(execute_count)
-        for chunk_offset, next_state in enumerate(action_chunk[:execute_count]):
+        for chunk_offset in range(execute_count):
+            next_state, overlap_count = fuse_overlapping_action(
+                action_chunks,
+                replan_frame_indices,
+                frame_index,
+                chunk_offset,
+                args.chunk_overlap_method,
+                args.chunk_overlap_decay,
+            )
             current_state = predicted_states[-1]
             arm_deltas.append(next_state[:7] - current_state[:7])
             hand_commands.append(next_state[7:13].copy())
             predicted_states.append(next_state.copy())
             executed_chunk_indices.append(replan_index)
             executed_chunk_offsets.append(chunk_offset)
+            executed_overlap_counts.append(overlap_count)
 
         completed_replans = replan_index + 1
         elapsed = time.time() - wall_start
@@ -518,6 +591,9 @@ def main() -> None:
         executed_action_counts=np.asarray(executed_action_counts, dtype=np.int64),
         executed_chunk_indices=np.asarray(executed_chunk_indices, dtype=np.int64),
         executed_chunk_offsets=np.asarray(executed_chunk_offsets, dtype=np.int64),
+        executed_overlap_counts=np.asarray(executed_overlap_counts, dtype=np.int64),
+        chunk_overlap_method=np.asarray(args.chunk_overlap_method),
+        chunk_overlap_decay=np.asarray(args.chunk_overlap_decay, dtype=np.float64),
         rtc_enabled=np.asarray(args.rtc),
         rtc_execution_horizon=np.asarray(
             args.rtc_execution_horizon or args.execution_steps, dtype=np.int64
@@ -548,6 +624,15 @@ def main() -> None:
         "physical_state_dim": physical_state_dim,
         "auxiliary_state_dim": physical_state_dim - 13,
         "state_feedback": args.state_feedback,
+        "chunk_overlap": {
+            "method": args.chunk_overlap_method,
+            "decay": args.chunk_overlap_decay,
+            "space": "decoded_absolute_joint_target",
+            "mean_candidates_per_executed_step": float(
+                np.mean(executed_overlap_counts)
+            ),
+            "max_candidates_per_executed_step": int(max(executed_overlap_counts)),
+        },
         "auxiliary_state_feedback": (
             "ground_truth" if physical_state_dim > 13 else "not_present"
         ),
