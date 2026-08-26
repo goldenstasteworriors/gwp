@@ -72,6 +72,7 @@ def encode_sonic_state_tokens(
     state_low: torch.Tensor,
     state_high: torch.Tensor,
     physical_action_dim: int,
+    physical_state_dim: int | None = None,
     model_action_dim: int,
     required_state_history: int,
     append_state_velocity_token: bool = False,
@@ -79,21 +80,33 @@ def encode_sonic_state_tokens(
     episode_progress: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply the deployment state normalization without loading a policy model."""
+    physical_state_dim = (
+        physical_action_dim if physical_state_dim is None else int(physical_state_dim)
+    )
     states = torch.as_tensor(states, dtype=torch.float32, device=state_low.device)
     if states.ndim == 1:
         states = states[None]
     if states.ndim != 2:
         raise ValueError(f"Expected state history [T,D], got {tuple(states.shape)}")
-    if physical_action_dim <= 0 or model_action_dim < physical_action_dim:
+    if (
+        physical_action_dim <= 0
+        or physical_state_dim < physical_action_dim
+        or model_action_dim < physical_state_dim
+    ):
         raise ValueError(
-            f"Invalid physical/model action dimensions: {physical_action_dim}/{model_action_dim}"
+            "Invalid physical action/state/model dimensions: "
+            f"{physical_action_dim}/{physical_state_dim}/{model_action_dim}"
         )
     if required_state_history < 1:
         raise ValueError("required_state_history must be at least one")
-    if state_low.numel() < physical_action_dim or state_high.numel() < physical_action_dim:
-        raise ValueError("State normalization statistics are shorter than physical_action_dim")
+    if state_low.numel() < physical_state_dim or state_high.numel() < physical_state_dim:
+        raise ValueError("State normalization statistics are shorter than physical_state_dim")
+    if states.shape[1] < physical_state_dim:
+        raise ValueError(
+            f"Expected state width >= {physical_state_dim}, got {states.shape[1]}"
+        )
 
-    states = states[:, :physical_action_dim]
+    states = states[:, :physical_state_dim]
     if states.shape[0] > required_state_history:
         states = states[-required_state_history:]
     elif states.shape[0] < required_state_history:
@@ -101,14 +114,14 @@ def encode_sonic_state_tokens(
             [states[:1].expand(required_state_history - states.shape[0], -1), states],
             dim=0,
         )
-    current_state = states[-1].clone()
-    low = state_low.flatten()[:physical_action_dim]
-    high = state_high.flatten()[:physical_action_dim]
+    current_state = states[-1, :physical_action_dim].clone()
+    low = state_low.flatten()[:physical_state_dim]
+    high = state_high.flatten()[:physical_state_dim]
     state_range = (high - low).clamp_min(1e-8)
     norm_state = ((states - low) / state_range * 2.0 - 1.0).clamp(-1.0, 1.0)
     norm_state = torch_F.pad(
         norm_state,
-        (0, model_action_dim - physical_action_dim),
+        (0, model_action_dim - physical_state_dim),
         value=0.0,
     )
     tokens = [norm_state]
@@ -291,6 +304,9 @@ class SonicHistoryPolicy:
 
         stats = json.loads(norm_stats.read_text(encoding="utf-8"))["norm_stats"]
         self.physical_action_dim = int(self.manifest["physical_action_dim"])
+        self.physical_state_dim = int(
+            self.manifest.get("physical_state_dim", self.physical_action_dim)
+        )
         self.model_action_dim = int(self.manifest.get("model_action_dim", 32))
         self.action_horizon = int(self.manifest["action_horizon"])
         self.model_image_frames = int(self.manifest["model_image_frames"])
@@ -310,12 +326,12 @@ class SonicHistoryPolicy:
         )[: self.physical_action_dim]
 
         self.state_low = torch.tensor(
-            stats["observation.state"]["q01"][: self.physical_action_dim],
+            stats["observation.state"]["q01"][: self.physical_state_dim],
             dtype=torch.float32,
             device=self.device,
         )
         self.state_high = torch.tensor(
-            stats["observation.state"]["q99"][: self.physical_action_dim],
+            stats["observation.state"]["q99"][: self.physical_state_dim],
             dtype=torch.float32,
             device=self.device,
         )
@@ -337,6 +353,7 @@ class SonicHistoryPolicy:
             state_low=self.state_low,
             state_high=self.state_high,
             physical_action_dim=self.physical_action_dim,
+            physical_state_dim=self.physical_state_dim,
             model_action_dim=self.model_action_dim,
             required_state_history=self.required_state_history,
             append_state_velocity_token=self.append_state_velocity_token,

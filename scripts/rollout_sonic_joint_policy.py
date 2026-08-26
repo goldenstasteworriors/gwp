@@ -144,8 +144,16 @@ def load_reference_episode(dataset: Path, episode: int) -> tuple[np.ndarray, np.
     table = table.sort_values(order_key).reset_index(drop=True)
     states = np.stack(table["observation.state"]).astype(np.float32)
     actions = np.stack(table["action"]).astype(np.float32)
-    if states.shape != (len(table), 13) or actions.shape != states.shape:
-        raise ValueError(f"expected finite [T,13] state/action, got {states.shape}/{actions.shape}")
+    if (
+        states.ndim != 2
+        or states.shape[0] != len(table)
+        or states.shape[1] < 13
+        or actions.shape != (len(table), 13)
+    ):
+        raise ValueError(
+            "expected finite state [T,D>=13] and action [T,13], got "
+            f"{states.shape}/{actions.shape}"
+        )
     if not np.isfinite(states).all() or not np.isfinite(actions).all():
         raise ValueError("reference state/action contains non-finite values")
     timestamps = (
@@ -176,7 +184,12 @@ def load_rgb_frames(video: Path, start: int, stop: int) -> list[np.ndarray]:
     return frames
 
 
-def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path) -> Path:
+def write_runtime_manifest(
+    args: argparse.Namespace,
+    dataset: Path,
+    output: Path,
+    physical_state_dim: int,
+) -> Path:
     spec = EXPERIMENTS[args.experiment]
     checkpoint = args.checkpoint.expanduser().resolve()
     if checkpoint.name != "transformer" and (checkpoint / "transformer").is_dir():
@@ -221,6 +234,7 @@ def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path
         "action_horizon": spec["action_horizon"],
         "model_image_frames": len(spec["image_frame_offsets"]),
         "physical_action_dim": 13,
+        "physical_state_dim": physical_state_dim,
         "model_action_dim": 32,
         "delta_mask": spec["delta_mask"],
         "fps": 50,
@@ -248,6 +262,11 @@ def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path
             "left_arm_channels_0_7": "relative_delta_integrated_to_absolute_joint_target",
             "left_arm_integration_state": args.state_feedback,
             "left_inspire_channels_7_13": "absolute_command",
+            "auxiliary_state_channels_13_plus": (
+                "reference_dataset_at_every_replan"
+                if physical_state_dim > 13
+                else "not_present"
+            ),
         },
     }
     manifest_path = output.with_suffix(".manifest.json")
@@ -256,10 +275,20 @@ def write_runtime_manifest(args: argparse.Namespace, dataset: Path, output: Path
 
 
 def recursive_history(
-    predicted_states: list[np.ndarray], offsets: list[int], local_step: int
+    predicted_states: list[np.ndarray],
+    reference_states: np.ndarray,
+    offsets: list[int],
+    local_step: int,
+    start_frame: int,
 ) -> np.ndarray:
     indices = [max(0, min(local_step, local_step + offset)) for offset in offsets]
-    return np.stack([predicted_states[index] for index in indices]).astype(np.float32)
+    joint_history = np.stack([predicted_states[index] for index in indices])
+    if reference_states.shape[1] == 13:
+        return joint_history.astype(np.float32)
+    auxiliary_history = np.stack(
+        [reference_states[start_frame + index, 13:] for index in indices]
+    )
+    return np.concatenate([joint_history, auxiliary_history], axis=1).astype(np.float32)
 
 
 def reference_history(states: np.ndarray, offsets: list[int], frame_index: int) -> np.ndarray:
@@ -367,7 +396,8 @@ def main() -> None:
         raise ValueError(
             f"start frame {args.start_frame} leaves no transition in {len(reference_states)} frames"
         )
-    manifest_path = write_runtime_manifest(args, dataset, output)
+    physical_state_dim = int(reference_states.shape[1])
+    manifest_path = write_runtime_manifest(args, dataset, output, physical_state_dim)
     print(f"runtime manifest: {manifest_path}", flush=True)
     print(f"reference parquet: {parquet}", flush=True)
     print(f"reference video: {video}", flush=True)
@@ -390,7 +420,7 @@ def main() -> None:
             max_guidance_weight=args.rtc_max_guidance_weight,
             prefix_schedule=args.rtc_prefix_schedule,
         )
-    predicted_states = [reference_states[args.start_frame].copy()]
+    predicted_states = [reference_states[args.start_frame, :13].copy()]
     arm_deltas: list[np.ndarray] = []
     hand_commands: list[np.ndarray] = []
     latencies: list[float] = []
@@ -408,7 +438,11 @@ def main() -> None:
         local_step = frame_index - args.start_frame
         if args.state_feedback == "predicted":
             state_history = recursive_history(
-                predicted_states, spec["state_history_offsets"], local_step
+                predicted_states,
+                reference_states,
+                spec["state_history_offsets"],
+                local_step,
+                args.start_frame,
             )
         else:
             state_history = reference_history(
@@ -463,18 +497,21 @@ def main() -> None:
     arm_delta = np.stack(arm_deltas).astype(np.float32)
     hand_absolute = np.stack(hand_commands).astype(np.float32)
     frame_indices = np.arange(args.start_frame, stop_frame + 1, dtype=np.int64)
-    aligned_reference = reference_states[frame_indices]
+    aligned_reference_input = reference_states[frame_indices]
+    aligned_reference = aligned_reference_input[:, :13]
     np.savez_compressed(
         output,
         predicted_state=predicted,
         predicted_arm_delta=arm_delta,
         predicted_hand_absolute=hand_absolute,
         reference_state=aligned_reference,
+        reference_input_state=aligned_reference_input,
         reference_action=reference_actions[frame_indices],
         frame_indices=frame_indices,
         timestamps=timestamps[frame_indices],
         latency_seconds=np.asarray(latencies, dtype=np.float64),
-        initial_reference_state=reference_states[args.start_frame],
+        initial_reference_state=reference_states[args.start_frame, :13],
+        initial_reference_input_state=reference_states[args.start_frame],
         action_chunks=np.stack(action_chunks).astype(np.float32),
         input_state_history=np.stack(input_state_histories).astype(np.float32),
         replan_frame_indices=np.asarray(replan_frame_indices, dtype=np.int64),
@@ -508,7 +545,12 @@ def main() -> None:
         "execution_steps": args.execution_steps,
         "replan_interval_seconds": args.execution_steps / 50.0,
         "reference_fps": fps,
+        "physical_state_dim": physical_state_dim,
+        "auxiliary_state_dim": physical_state_dim - 13,
         "state_feedback": args.state_feedback,
+        "auxiliary_state_feedback": (
+            "ground_truth" if physical_state_dim > 13 else "not_present"
+        ),
         "rtc": {
             "enabled": args.rtc,
             "execution_horizon": args.rtc_execution_horizon or args.execution_steps,
