@@ -299,6 +299,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--min-convergence-step", type=int, default=50000)
     parser.add_argument("--checkpoint-interval", type=int, default=250)
+    parser.add_argument(
+        "--checkpoint-total-limit",
+        type=int,
+        default=1,
+        help="Number of most recent training checkpoints to retain.",
+    )
     parser.add_argument("--poll-seconds", type=float, default=20.0)
     parser.add_argument(
         "--benchmark-stride",
@@ -762,7 +768,7 @@ def job_environment(
             "GWP_MAX_STEPS": str(run_max_steps or args.max_steps),
             "GWP_GRAD_ACCUM_STEPS": "4",
             "GWP_CHECKPOINT_INTERVAL": str(args.checkpoint_interval),
-            "GWP_CHECKPOINT_TOTAL_LIMIT": "1",
+            "GWP_CHECKPOINT_TOTAL_LIMIT": str(args.checkpoint_total_limit),
             "GWP_CHECKPOINT_WEIGHTS_ONLY": "1",
             "GWP_LOG_INTERVAL": "1",
             "GWP_WITH_EMA": "0",
@@ -1219,6 +1225,8 @@ def monitor_export_and_benchmark_jobs(
 
 def main() -> None:
     args = parse_args()
+    if args.checkpoint_total_limit < 1:
+        raise ValueError("--checkpoint-total-limit must be at least 1")
     args.output_root = args.output_root.expanduser().resolve()
     args.dataset = args.dataset.expanduser().resolve()
     if args.warm_start_root is not None:
