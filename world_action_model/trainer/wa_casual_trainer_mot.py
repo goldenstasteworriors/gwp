@@ -971,6 +971,17 @@ def load_pretrained_weights(
             checkpoint = checkpoint["state_dict"]
         state_dicts.update(checkpoint)
 
+    canonical_state_dicts = {}
+    for name, tensor in state_dicts.items():
+        canonical_name = canonical_checkpoint_parameter_name(name)
+        if canonical_name in canonical_state_dicts:
+            raise RuntimeError(
+                f"Duplicate canonical checkpoint key {canonical_name!r} while loading "
+                f"{pretrained_path}"
+            )
+        canonical_state_dicts[canonical_name] = tensor
+    state_dicts = canonical_state_dicts
+
     architecture, checkpoint_class = _detect_checkpoint_architecture(
         pretrained_path, state_dicts
     )
