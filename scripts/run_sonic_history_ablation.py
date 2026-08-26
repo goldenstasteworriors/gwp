@@ -222,6 +222,20 @@ EXPERIMENTS = [
             "GWP_ACTION_JITTER_MAX_PIXELS": "8",
         },
     ),
+    Experiment(
+        "j04_sampled_video_jitter_action_consistency_all_absolute",
+        (
+            "J04 sampled-video-jitter action consistency with every physical joint "
+            "supervised as an absolute target."
+        ),
+        {
+            "GWP_MASK_PADDED_ACTION_DIMS": "1",
+            "GWP_MASK_PADDED_ACTION_STEPS": "1",
+            "GWP_ACTION_JITTER_CONSISTENCY_WEIGHT": "0.1",
+            "GWP_ACTION_JITTER_MAX_PIXELS": "8",
+        },
+        norm_stats_filename="norm_stats_all_absolute_h48.json",
+    ),
 ]
 
 
