@@ -79,17 +79,23 @@ def load_rollout(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return predicted, reference, frame_indices
 
 
-def load_rollout_metadata(path: Path) -> tuple[str, str]:
+def load_rollout_metadata(path: Path) -> tuple[str, str, str]:
     manifest_path = path.with_suffix(".manifest.json")
     if not manifest_path.is_file():
-        return "unknown_action_representation", "unknown"
+        return "unknown_action_representation", "unknown", "unknown"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     rollout_semantics = manifest.get("rollout_semantics", {})
     semantics = rollout_semantics.get("left_arm_channels_0_7")
     state_feedback = rollout_semantics.get(
         "state_feedback", manifest.get("state_feedback", "unknown")
     )
-    return str(semantics or "unknown_action_representation"), str(state_feedback)
+    chunk_overlap = manifest.get("chunk_overlap", {})
+    overlap_method = chunk_overlap.get("method", "none")
+    return (
+        str(semantics or "unknown_action_representation"),
+        str(state_feedback),
+        str(overlap_method),
+    )
 
 
 def qpos_indices(model: mujoco.MjModel, names: tuple[str, ...]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -182,7 +188,7 @@ def main() -> None:
     rollout = args.rollout.expanduser().resolve()
     model_xml = args.model_xml.expanduser().resolve()
     predicted, reference, frame_indices = load_rollout(rollout)
-    arm_semantics, state_feedback = load_rollout_metadata(rollout)
+    arm_semantics, state_feedback, overlap_method = load_rollout_metadata(rollout)
     if not model_xml.is_file():
         raise FileNotFoundError(model_xml)
 
@@ -207,6 +213,7 @@ def main() -> None:
     print(f"frames: {len(predicted)}, duration: {duration:.2f}s at {args.speed:g}x")
     print(f"left-arm action semantics: {arm_semantics}")
     print(f"state feedback: {state_feedback}")
+    print(f"chunk overlap method: {overlap_method}")
     print(f"right Inspire geoms hidden: {hidden_right_geoms}")
 
     if args.viewer:
@@ -285,6 +292,7 @@ def main() -> None:
                 feedback_title,
                 [
                     f"dataset frame={frame_indices[source_index]}  t={source_position / args.source_fps:.2f}s",
+                    f"chunk overlap={overlap_method}",
                     f"arm={arm_semantics}; hand=absolute",
                     f"range clips: arm={arm_clip} hand={hand_clip}",
                 ],
@@ -329,6 +337,7 @@ def main() -> None:
         "right_inspire_hidden": not args.show_right_hand,
         "left_arm_action_semantics": arm_semantics,
         "state_feedback": state_feedback,
+        "chunk_overlap_method": overlap_method,
         "arm_limit_clip_events": total_arm_clips,
         "hand_range_clip_events": total_hand_clips,
     }
