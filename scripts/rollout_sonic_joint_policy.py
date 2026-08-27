@@ -207,6 +207,10 @@ def write_runtime_manifest(
     physical_state_dim: int,
 ) -> Path:
     spec = EXPERIMENTS[args.experiment]
+    all_absolute = not any(spec["delta_mask"])
+    action_representation = (
+        "all_absolute" if all_absolute else "delta_arm_absolute_hand"
+    )
     checkpoint = args.checkpoint.expanduser().resolve()
     if checkpoint.name != "transformer" and (checkpoint / "transformer").is_dir():
         checkpoint = checkpoint / "transformer"
@@ -253,6 +257,7 @@ def write_runtime_manifest(
         "physical_state_dim": physical_state_dim,
         "model_action_dim": 32,
         "delta_mask": spec["delta_mask"],
+        "action_representation": action_representation,
         "fps": 50,
         "image_size": [320, 384],
         "num_inference_steps": args.num_inference_steps,
@@ -281,8 +286,16 @@ def write_runtime_manifest(
             "full_action_chunk_predicted_at_every_replan": True,
             "executed_prefix_steps_per_chunk": args.execution_steps,
             "overlapping_chunk_execution": args.chunk_overlap_method,
-            "left_arm_channels_0_7": "relative_delta_integrated_to_absolute_joint_target",
-            "left_arm_integration_state": args.state_feedback,
+            "left_arm_channels_0_7": (
+                "absolute_joint_target"
+                if all_absolute
+                else "relative_delta_integrated_to_absolute_joint_target"
+            ),
+            "left_arm_integration_state": (
+                "not_applicable_all_absolute"
+                if all_absolute
+                else args.state_feedback
+            ),
             "left_inspire_channels_7_13": "absolute_command",
             "auxiliary_state_channels_13_plus": (
                 "reference_dataset_at_every_replan"
@@ -622,6 +635,11 @@ def main() -> None:
         "replan_interval_seconds": args.execution_steps / 50.0,
         "reference_fps": fps,
         "physical_state_dim": physical_state_dim,
+        "action_representation": (
+            "all_absolute"
+            if not any(spec["delta_mask"])
+            else "delta_arm_absolute_hand"
+        ),
         "auxiliary_state_dim": physical_state_dim - 13,
         "state_feedback": args.state_feedback,
         "chunk_overlap": {
@@ -644,7 +662,11 @@ def main() -> None:
             "prefix_schedule": args.rtc_prefix_schedule,
         },
         "visual_input": "reference RGB at each chunk replan",
-        "left_arm": "relative delta integrated to absolute target by policy wrapper",
+        "left_arm": (
+            "predicted absolute joint target"
+            if not any(spec["delta_mask"])
+            else "relative delta integrated to absolute target by policy wrapper"
+        ),
         "left_inspire_hand": "predicted absolute command",
         "mean_latency_seconds": float(np.mean(latencies)),
         "arm_rmse_vs_reference": float(np.sqrt(np.mean(error[:, :7] ** 2))),
