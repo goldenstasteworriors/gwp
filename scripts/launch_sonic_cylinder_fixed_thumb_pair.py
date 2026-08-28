@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -52,6 +53,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=50000)
     parser.add_argument("--checkpoint-interval", type=int, default=250)
     parser.add_argument("--checkpoint-total-limit", type=int, default=1)
+    parser.add_argument(
+        "--min-free-gib",
+        type=float,
+        default=50.0,
+        help="Refuse to launch both full-model runs below this free-space guard.",
+    )
     parser.add_argument("--startup-wait-seconds", type=float, default=5.0)
     return parser.parse_args()
 
@@ -90,6 +97,7 @@ def run_environment(args: argparse.Namespace, spec: RunSpec, output_dir: Path) -
             "GWP_CHECKPOINT_INTERVAL": str(args.checkpoint_interval),
             "GWP_CHECKPOINT_TOTAL_LIMIT": str(args.checkpoint_total_limit),
             "GWP_CHECKPOINT_WEIGHTS_ONLY": "1",
+            "GWP_CHECKPOINT_EXPORT_DTYPE": "bf16",
             "GWP_LOG_INTERVAL": "1",
             "GWP_WITH_EMA": "0",
             "GWP_ACTIVATION_CHECKPOINTING": "1",
@@ -119,6 +127,12 @@ def validate(args: argparse.Namespace) -> None:
             raise FileNotFoundError(required)
     if args.output_root.exists() and any(args.output_root.iterdir()):
         raise FileExistsError(f"Refusing to reuse non-empty output root: {args.output_root}")
+    free_gib = shutil.disk_usage(args.output_root.parent).free / (1024**3)
+    if free_gib < args.min_free_gib:
+        raise RuntimeError(
+            f"Insufficient free space for two checkpoint streams: "
+            f"free={free_gib:.2f} GiB required={args.min_free_gib:.2f} GiB"
+        )
 
 
 def start_run(args: argparse.Namespace, spec: RunSpec) -> dict[str, object]:
@@ -141,6 +155,7 @@ def start_run(args: argparse.Namespace, spec: RunSpec) -> dict[str, object]:
         "effective_batch_size": 4,
         "checkpoint_interval": args.checkpoint_interval,
         "checkpoint_total_limit": args.checkpoint_total_limit,
+        "checkpoint_export_dtype": "bf16",
         "transformer_pretrained": str(PROJECT_ROOT / "weights" / "Giga-World-Policy-0.5"),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
