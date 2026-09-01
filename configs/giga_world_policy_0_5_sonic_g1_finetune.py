@@ -179,6 +179,9 @@ config = dict(
                 state_history_dropout_prob=float(
                     _env("GWP_STATE_HISTORY_DROPOUT_PROB", "0")
                 ),
+                state_condition_dropout_prob=float(
+                    _env("GWP_STATE_CONDITION_DROPOUT_PROB", "0")
+                ),
                 append_episode_progress_token=(
                     _env("GWP_APPEND_EPISODE_PROGRESS_TOKEN", "0") == "1"
                 ),

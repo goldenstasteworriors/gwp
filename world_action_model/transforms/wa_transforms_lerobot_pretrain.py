@@ -40,6 +40,7 @@ class WALeRobotTransformsPretrain(WATransforms):
         subtask_prob=0,
         state_history_tokens=1,
         state_history_dropout_prob=0.0,
+        state_condition_dropout_prob=0.0,
         append_episode_progress_token=False,
         append_state_velocity_token=False,
         emit_action_dim_mask=False,
@@ -125,6 +126,9 @@ class WALeRobotTransformsPretrain(WATransforms):
         self.state_history_dropout_prob = float(state_history_dropout_prob)
         if not 0.0 <= self.state_history_dropout_prob <= 1.0:
             raise ValueError("state_history_dropout_prob must be in [0, 1]")
+        self.state_condition_dropout_prob = float(state_condition_dropout_prob)
+        if not 0.0 <= self.state_condition_dropout_prob <= 1.0:
+            raise ValueError("state_condition_dropout_prob must be in [0, 1]")
         self.append_episode_progress_token = bool(append_episode_progress_token)
         self.append_state_velocity_token = bool(append_state_velocity_token)
         self.emit_action_dim_mask = bool(emit_action_dim_mask)
@@ -486,6 +490,20 @@ class WALeRobotTransformsPretrain(WATransforms):
         if self.is_train and self.state_history_dropout_prob > 0.0 and norm_state.shape[0] > 1:
             drop = torch.rand(norm_state.shape[0] - 1, device=norm_state.device) < self.state_history_dropout_prob
             norm_state[:-1] = torch.where(drop[:, None], norm_state[-1:], norm_state[:-1])
+
+        # Drop only the model's proprioceptive condition.  The action target
+        # (including delta conversion above) has already been computed from the
+        # real current state, so this cannot corrupt supervision.  Keeping the
+        # token count fixed also preserves attention layouts and inference
+        # checkpoint compatibility while forcing a subset of samples through
+        # the visual path.
+        if (
+            self.is_train
+            and self.state_condition_dropout_prob > 0.0
+            and torch.rand((), device=norm_state.device)
+            < self.state_condition_dropout_prob
+        ):
+            norm_state.zero_()
 
         state_tokens = [norm_state]
         if self.append_state_velocity_token:
