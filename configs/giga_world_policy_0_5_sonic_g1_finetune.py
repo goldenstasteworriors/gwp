@@ -54,7 +54,7 @@ def _episode_list(name: str) -> list[int] | None:
 
 num_frames = int(_env("GWP_ACTION_HORIZON", "48"))
 training_time_rtc_delay_steps = int(
-    _env("GWP_TRAINING_TIME_RTC_DELAY_STEPS", "5")
+    _env("GWP_TRAINING_TIME_RTC_DELAY_STEPS", "0")
 )
 if not 0 <= training_time_rtc_delay_steps < num_frames:
     raise ValueError(
@@ -67,7 +67,11 @@ transformer_pretrained = _required("GWP05_TRANSFORMER_PRETRAINED")
 wan_pretrained = _env("GWP_WAN_PRETRAINED", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 project_dir = _env(
     "GWP05_PROJECT_DIR",
-    f"outputs/gwp0_5_sonic_g1_finetune_ttrtc{training_time_rtc_delay_steps}",
+    (
+        "outputs/gwp0_5_sonic_g1_finetune"
+        if training_time_rtc_delay_steps == 0
+        else f"outputs/gwp0_5_sonic_g1_finetune_ttrtc{training_time_rtc_delay_steps}"
+    ),
 )
 gpu_ids = [int(x) for x in _env("GWP_GPU_IDS", "0,1,2,3").split(",")]
 physical_action_dim = int(_env("GWP_PHYSICAL_ACTION_DIM", "30"))
