@@ -39,29 +39,26 @@ PPU_RUNTIME_ENV_KEYS = {
 class RunSpec:
     name: str
     description: str
-    gpu_id: int
     state_condition_dropout_prob: float
     state_history_offsets: tuple[int, ...]
 
 
 RUNS = (
     RunSpec(
-        name="m02_state_dropout05_armdelta_handabs_gpu1",
+        name="m02_state_dropout05_armdelta_handabs",
         description=(
             "Fixed-thumb arm-delta/hand-absolute baseline with sample-level "
             "proprioceptive condition dropout 0.5."
         ),
-        gpu_id=1,
         state_condition_dropout_prob=0.5,
         state_history_offsets=(0,),
     ),
     RunSpec(
-        name="m03_state_history8_compact_armdelta_handabs_gpu3",
+        name="m03_state_history8_compact_armdelta_handabs",
         description=(
             "Fixed-thumb arm-delta/hand-absolute baseline with eight consecutive "
             "state frames spanning the most recent 140 ms at 50 Hz."
         ),
-        gpu_id=3,
         state_condition_dropout_prob=0.0,
         state_history_offsets=COMPACT_STATE_HISTORY_OFFSETS,
     ),
@@ -72,6 +69,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument(
+        "--gpu-ids",
+        default="1,3",
+        help="Two distinct GPU ids in dropout,history order.",
+    )
     parser.add_argument("--max-steps", type=int, default=50000)
     parser.add_argument("--checkpoint-interval", type=int, default=250)
     parser.add_argument("--checkpoint-total-limit", type=int, default=1)
@@ -103,12 +105,21 @@ def int_spec(values: tuple[int, ...]) -> str:
     return ",".join(str(value) for value in values)
 
 
+def parse_gpu_ids(raw: str) -> tuple[int, int]:
+    values = tuple(int(item.strip()) for item in raw.split(",") if item.strip())
+    if len(values) != len(RUNS):
+        raise ValueError(f"--gpu-ids must contain exactly {len(RUNS)} ids")
+    if len(set(values)) != len(values) or min(values) < 0:
+        raise ValueError("--gpu-ids must contain distinct non-negative ids")
+    return values
+
+
 def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def dated_name(spec: RunSpec, run_date: str, run_suffix: str) -> str:
-    base = f"{run_date}_{spec.name}"
+def dated_name(spec: RunSpec, run_date: str, run_suffix: str, gpu_id: int) -> str:
+    base = f"{run_date}_{spec.name}_gpu{gpu_id}"
     return f"{base}_{run_suffix}" if run_suffix else base
 
 
@@ -189,6 +200,7 @@ def validate_derived_dataset(dataset: Path) -> None:
 def run_environment(
     args: argparse.Namespace,
     spec: RunSpec,
+    gpu_id: int,
     output_dir: Path,
     run_name: str,
 ) -> dict[str, str]:
@@ -207,9 +219,10 @@ def run_environment(
                 PROJECT_ROOT / "weights" / "Wan2.2-TI2V-5B-Diffusers"
             ),
             "GWP05_PROJECT_DIR": str(output_dir),
-            "GWP_GPU_IDS": str(spec.gpu_id),
+            "GWP_GPU_IDS": str(gpu_id),
             "GWP_PHYSICAL_ACTION_DIM": "13",
             "GWP_ACTION_DELTA_MASK": bool_spec(ACTION_DELTA_MASK),
+            "GWP_TRAINING_TIME_RTC_DELAY_STEPS": "0",
             "GWP_STATE_CONDITION_DROPOUT_PROB": str(
                 spec.state_condition_dropout_prob
             ),
@@ -261,12 +274,11 @@ def validate(args: argparse.Namespace, run_date: str) -> None:
         if not required.exists():
             raise FileNotFoundError(required)
 
-    if len({spec.gpu_id for spec in RUNS}) != len(RUNS):
-        raise ValueError("Each experiment must use a distinct GPU")
     if COMPACT_STATE_HISTORY_OFFSETS != tuple(range(-7, 1)):
         raise ValueError("Compact history must contain eight consecutive frames ending at zero")
     for output_dir in (
-        args.output_root / dated_name(spec, run_date, args.run_suffix) for spec in RUNS
+        args.output_root / dated_name(spec, run_date, args.run_suffix, gpu_id)
+        for spec, gpu_id in zip(RUNS, args.gpu_ids, strict=True)
     ):
         if output_dir.exists():
             raise FileExistsError(f"Refusing to reuse output directory: {output_dir}")
@@ -282,16 +294,17 @@ def validate(args: argparse.Namespace, run_date: str) -> None:
 def run_record(
     args: argparse.Namespace,
     spec: RunSpec,
+    gpu_id: int,
     run_date: str,
 ) -> dict[str, object]:
-    run_name = dated_name(spec, run_date, args.run_suffix)
+    run_name = dated_name(spec, run_date, args.run_suffix, gpu_id)
     return {
         "name": run_name,
         "description": spec.description,
         "dataset": str(args.dataset),
         "norm_stats": str(args.dataset / NORM_STATS_NAME),
         "prompt": PROMPT,
-        "gpu_id": spec.gpu_id,
+        "gpu_id": gpu_id,
         "output_dir": str(args.output_root / run_name),
         "action_delta_mask": list(ACTION_DELTA_MASK),
         "action_semantics": {
@@ -303,6 +316,7 @@ def run_record(
         "state_history_tokens": len(spec.state_history_offsets),
         "state_history_span_frames": -min(spec.state_history_offsets),
         "state_history_span_seconds_at_50hz": -min(spec.state_history_offsets) / 50.0,
+        "training_time_rtc_delay_steps": 0,
         "training_episode_spec": TRAIN_EPISODES,
         "evaluation_episodes": EVALUATION_EPISODES,
         "max_steps": args.max_steps,
@@ -321,15 +335,16 @@ def run_record(
 def start_run(
     args: argparse.Namespace,
     spec: RunSpec,
+    gpu_id: int,
     run_date: str,
 ) -> dict[str, object]:
-    record = run_record(args, spec, run_date)
+    record = run_record(args, spec, gpu_id, run_date)
     output_dir = Path(str(record["output_dir"]))
     output_dir.mkdir(parents=True, exist_ok=False)
     record["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     write_json(output_dir / "experiment.json", record)
 
-    environment = run_environment(args, spec, output_dir, str(record["name"]))
+    environment = run_environment(args, spec, gpu_id, output_dir, str(record["name"]))
     env_record = {
         key: environment[key]
         for key in sorted(environment)
@@ -358,7 +373,7 @@ def start_run(
     (output_dir / "launcher.pid").write_text(f"{process.pid}\n", encoding="utf-8")
     return {
         "name": record["name"],
-        "gpu_id": spec.gpu_id,
+        "gpu_id": gpu_id,
         "output_dir": str(output_dir),
         "pid": process.pid,
         "process": process,
@@ -369,12 +384,16 @@ def main() -> None:
     args = parse_args()
     args.dataset = args.dataset.expanduser().resolve()
     args.output_root = args.output_root.expanduser().resolve()
+    args.gpu_ids = parse_gpu_ids(args.gpu_ids)
     run_date = time.strftime("%Y%m%d")
     validate(args, run_date)
     if args.dry_run:
         print(
             json.dumps(
-                [run_record(args, spec, run_date) for spec in RUNS],
+                [
+                    run_record(args, spec, gpu_id, run_date)
+                    for spec, gpu_id in zip(RUNS, args.gpu_ids, strict=True)
+                ],
                 indent=2,
                 ensure_ascii=False,
             )
@@ -384,8 +403,8 @@ def main() -> None:
     args.output_root.mkdir(parents=True, exist_ok=True)
     started = []
     try:
-        for spec in RUNS:
-            started.append(start_run(args, spec, run_date))
+        for spec, gpu_id in zip(RUNS, args.gpu_ids, strict=True):
+            started.append(start_run(args, spec, gpu_id, run_date))
         time.sleep(args.startup_wait_seconds)
         failures = []
         for item in started:
