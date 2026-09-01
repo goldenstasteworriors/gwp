@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -23,6 +24,14 @@ COMPACT_STATE_HISTORY_OFFSETS = tuple(range(-7, 1))
 EXPECTED_FIXED_JOINTS = {
     "left_hand_thumb_bend": 1.0,
     "left_hand_thumb_rotate": 0.0,
+}
+PPU_RUNTIME_ENV_KEYS = {
+    "CUDA_HOME",
+    "CUDA_PATH",
+    "CUDA_TOOLKIT_ROOT",
+    "LD_LIBRARY_PATH",
+    "LIBRARY_PATH",
+    "PPU_SDK",
 }
 
 
@@ -74,6 +83,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--startup-wait-seconds", type=float, default=20.0)
     parser.add_argument(
+        "--run-suffix",
+        default="",
+        help="Optional safe suffix for a non-overwriting retry, for example retry1.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate all inputs and print the dated run plan without training.",
@@ -93,8 +107,52 @@ def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def dated_name(spec: RunSpec, run_date: str) -> str:
-    return f"{run_date}_{spec.name}"
+def dated_name(spec: RunSpec, run_date: str, run_suffix: str) -> str:
+    base = f"{run_date}_{spec.name}"
+    return f"{base}_{run_suffix}" if run_suffix else base
+
+
+def prepend_env_path(env: dict[str, str], key: str, *paths: Path) -> None:
+    values = [str(path) for path in paths]
+    current = env.get(key, "")
+    if current:
+        values.append(current)
+    env[key] = os.pathsep.join(values)
+
+
+def configure_ppu_sdk_environment(env: dict[str, str]) -> None:
+    sdk_root = Path(env.get("PPU_SDK", "/usr/local/PPU_SDK")).resolve()
+    cuda_root = sdk_root / "CUDA_SDK"
+    env.update(
+        {
+            "PPU_SDK": str(sdk_root),
+            "CUDA_PATH": str(cuda_root),
+            "CUDA_HOME": str(cuda_root),
+            "CUDA_TOOLKIT_ROOT": str(cuda_root),
+        }
+    )
+    prepend_env_path(
+        env,
+        "PATH",
+        cuda_root / "bin",
+        sdk_root / "asight" / "bin",
+        sdk_root / "bin",
+        sdk_root / "ppu-smi" / "bin",
+    )
+    prepend_env_path(
+        env,
+        "LD_LIBRARY_PATH",
+        Path("/opt/accl-p"),
+        cuda_root / "lib64",
+        sdk_root / "lib",
+        sdk_root / "sailSHMEM" / "lib",
+    )
+    prepend_env_path(
+        env,
+        "LIBRARY_PATH",
+        cuda_root / "lib64",
+        sdk_root / "lib",
+    )
 
 
 def validate_derived_dataset(dataset: Path) -> None:
@@ -135,6 +193,7 @@ def run_environment(
     run_name: str,
 ) -> dict[str, str]:
     env = dict(os.environ)
+    configure_ppu_sdk_environment(env)
     env.update(
         {
             "PYTHONUNBUFFERED": "1",
@@ -186,6 +245,8 @@ def validate(args: argparse.Namespace, run_date: str) -> None:
         raise ValueError("Checkpoint interval and retention limit must be positive")
     if not args.dataset.is_dir():
         raise FileNotFoundError(args.dataset)
+    if args.run_suffix and not re.fullmatch(r"[A-Za-z0-9_-]+", args.run_suffix):
+        raise ValueError("--run-suffix may contain only letters, numbers, '_' and '-'")
     validate_derived_dataset(args.dataset)
     norm_path = args.dataset / NORM_STATS_NAME
     if not norm_path.is_file():
@@ -194,6 +255,8 @@ def validate(args: argparse.Namespace, run_date: str) -> None:
         PROJECT_ROOT / ".venv-ppu" / "bin" / "python",
         PROJECT_ROOT / "weights" / "Giga-World-Policy-0.5",
         PROJECT_ROOT / "weights" / "Wan2.2-TI2V-5B-Diffusers",
+        Path("/usr/local/PPU_SDK/lib/libhggcrt1.so"),
+        Path("/usr/local/PPU_SDK/CUDA_SDK/lib64"),
     ):
         if not required.exists():
             raise FileNotFoundError(required)
@@ -203,7 +266,7 @@ def validate(args: argparse.Namespace, run_date: str) -> None:
     if COMPACT_STATE_HISTORY_OFFSETS != tuple(range(-7, 1)):
         raise ValueError("Compact history must contain eight consecutive frames ending at zero")
     for output_dir in (
-        args.output_root / dated_name(spec, run_date) for spec in RUNS
+        args.output_root / dated_name(spec, run_date, args.run_suffix) for spec in RUNS
     ):
         if output_dir.exists():
             raise FileExistsError(f"Refusing to reuse output directory: {output_dir}")
@@ -221,7 +284,7 @@ def run_record(
     spec: RunSpec,
     run_date: str,
 ) -> dict[str, object]:
-    run_name = dated_name(spec, run_date)
+    run_name = dated_name(spec, run_date, args.run_suffix)
     return {
         "name": run_name,
         "description": spec.description,
@@ -270,7 +333,10 @@ def start_run(
     env_record = {
         key: environment[key]
         for key in sorted(environment)
-        if key.startswith("GWP_") or key.startswith("GWP05_") or key == "WANDB_NAME"
+        if key.startswith("GWP_")
+        or key.startswith("GWP05_")
+        or key == "WANDB_NAME"
+        or key in PPU_RUNTIME_ENV_KEYS
     }
     write_json(output_dir / "launch_environment.json", env_record)
 
