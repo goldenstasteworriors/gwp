@@ -452,9 +452,15 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         rtc_previous_chunk_tail: Optional[torch.Tensor] = None,
         rtc_inference_delay: int = 0,
         rtc_config: Optional[RTCConfig] = None,
+        trained_rtc_prefix: Optional[torch.Tensor] = None,
     ):
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
+        if rtc_config is not None and trained_rtc_prefix is not None:
+            raise ValueError(
+                "Inference-time PiGDM RTC and training-time RTC prefix conditioning "
+                "are alternative modes; choose exactly one."
+            )
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
@@ -571,6 +577,33 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
         # 6. Denoising loop
         action = action.to(dtype=transformer_dtype, device=device)
+        trained_rtc_prefix_tensor = None
+        trained_rtc_prefix_length = 0
+        if trained_rtc_prefix is not None:
+            trained_rtc_prefix_tensor = torch.as_tensor(
+                trained_rtc_prefix, dtype=action.dtype, device=action.device
+            )
+            if trained_rtc_prefix_tensor.ndim == 2:
+                trained_rtc_prefix_tensor = trained_rtc_prefix_tensor.unsqueeze(0)
+            if trained_rtc_prefix_tensor.ndim != 3:
+                raise ValueError("trained_rtc_prefix must have shape [P, A] or [B, P, A]")
+            if trained_rtc_prefix_tensor.shape[0] == 1 and action.shape[0] > 1:
+                trained_rtc_prefix_tensor = trained_rtc_prefix_tensor.expand(
+                    action.shape[0], -1, -1
+                )
+            if trained_rtc_prefix_tensor.shape[0] != action.shape[0]:
+                raise ValueError("trained_rtc_prefix batch size must be one or match action batch size")
+            trained_rtc_prefix_length = int(trained_rtc_prefix_tensor.shape[1])
+            if not 0 < trained_rtc_prefix_length < action.shape[1]:
+                raise ValueError(
+                    "trained_rtc_prefix length must be in "
+                    f"[1, {action.shape[1] - 1}], got {trained_rtc_prefix_length}"
+                )
+            if trained_rtc_prefix_tensor.shape[2] != action.shape[2]:
+                raise ValueError(
+                    "trained_rtc_prefix action dimension must match model action dimension "
+                    f"({trained_rtc_prefix_tensor.shape[2]} != {action.shape[2]})"
+                )
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
 
@@ -627,6 +660,13 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
                     timestep = action_timestep_template.clone()
                     timestep[:, action_noise_t_index:] = t.to(timestep.dtype)
+                    if trained_rtc_prefix_tensor is not None:
+                        action[:, :trained_rtc_prefix_length] = trained_rtc_prefix_tensor
+                        timestep[
+                            :,
+                            action_noise_t_index : action_noise_t_index
+                            + trained_rtc_prefix_length,
+                        ] = 0
 
                     skip_cache_context = (
                         getattr(current_model, "_enable_action_only_prefix_cache", False)
@@ -696,6 +736,8 @@ class WAPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
                     # compute the previous noisy sample x_t -> x_t-1
                     action = self.action_scheduler.step(action_pred, t, action, return_dict=False)[0]
+                    if trained_rtc_prefix_tensor is not None:
+                        action[:, :trained_rtc_prefix_length] = trained_rtc_prefix_tensor
 
                     if callback_on_step_end is not None:
                         callback_kwargs = {}

@@ -53,11 +53,22 @@ def _episode_list(name: str) -> list[int] | None:
 
 
 num_frames = int(_env("GWP_ACTION_HORIZON", "48"))
+training_time_rtc_delay_steps = int(
+    _env("GWP_TRAINING_TIME_RTC_DELAY_STEPS", "5")
+)
+if not 0 <= training_time_rtc_delay_steps < num_frames:
+    raise ValueError(
+        "GWP_TRAINING_TIME_RTC_DELAY_STEPS must be in "
+        f"[0, {num_frames - 1}], got {training_time_rtc_delay_steps}"
+    )
 data_path = _required("GWP_SONIC_DATA_PATH")
 norm_stats_path = _required("GWP_NORM_STATS_PATH")
 transformer_pretrained = _required("GWP05_TRANSFORMER_PRETRAINED")
 wan_pretrained = _env("GWP_WAN_PRETRAINED", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
-project_dir = _env("GWP05_PROJECT_DIR", "outputs/gwp0_5_sonic_g1_finetune")
+project_dir = _env(
+    "GWP05_PROJECT_DIR",
+    f"outputs/gwp0_5_sonic_g1_finetune_ttrtc{training_time_rtc_delay_steps}",
+)
 gpu_ids = [int(x) for x in _env("GWP_GPU_IDS", "0,1,2,3").split(",")]
 physical_action_dim = int(_env("GWP_PHYSICAL_ACTION_DIM", "30"))
 action_delta_mask = _bool_list(
@@ -178,7 +189,8 @@ config = dict(
                     _env("GWP_MASK_PADDED_ACTION_DIMS", "0") == "1"
                 ),
                 emit_action_time_mask=(
-                    _env("GWP_MASK_PADDED_ACTION_STEPS", "0") == "1"
+                    training_time_rtc_delay_steps > 0
+                    or _env("GWP_MASK_PADDED_ACTION_STEPS", "0") == "1"
                 ),
                 expected_state_dim=int(
                     _env("GWP_EXPECTED_STATE_DIM", "23" if use_imu else str(physical_action_dim))
@@ -269,6 +281,10 @@ config = dict(
         action_jitter_max_pixels=int(
             _env("GWP_ACTION_JITTER_MAX_PIXELS", "0")
         ),
+        # Average end-to-end real-robot inference latency is five 50 Hz
+        # control targets.  Keep that prefix clean and optimize only the
+        # remaining continuation during flow-matching training.
+        training_time_rtc_delay_steps=training_time_rtc_delay_steps,
         train_action_head_only=(
             _env("GWP_TRAIN_ACTION_HEAD_ONLY", "0") == "1"
         ),

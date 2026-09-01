@@ -117,6 +117,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rtc", action="store_true", help="Enable training-free RTC guidance.")
     parser.add_argument(
+        "--training-time-rtc",
+        action="store_true",
+        help=(
+            "Use a checkpoint trained with clean committed-prefix conditioning; "
+            "this has no inference-time gradient guidance overhead."
+        ),
+    )
+    parser.add_argument(
+        "--training-time-rtc-delay-steps",
+        type=int,
+        default=5,
+        help="Committed prefix length for a training-time RTC checkpoint.",
+    )
+    parser.add_argument(
         "--rtc-execution-horizon",
         type=int,
         default=None,
@@ -276,6 +290,11 @@ def write_runtime_manifest(
             "inference_delay": args.rtc_inference_delay,
             "max_guidance_weight": args.rtc_max_guidance_weight,
             "prefix_schedule": args.rtc_prefix_schedule,
+        },
+        "training_time_rtc": {
+            "enabled": args.training_time_rtc,
+            "delay_steps": args.training_time_rtc_delay_steps,
+            "mode": "clean_prefix_hard_overwrite" if args.training_time_rtc else "off",
         },
         "model_dtype": "bf16",
         "action_flow_shift": 5.0,
@@ -449,6 +468,8 @@ def main() -> None:
         raise SystemExit("chunk-overlap-decay must be finite and non-negative")
     if args.rtc_inference_delay < 0:
         raise SystemExit("rtc-inference-delay must be non-negative")
+    if args.rtc and args.training_time_rtc:
+        raise SystemExit("--rtc and --training-time-rtc are mutually exclusive")
     spec = EXPERIMENTS[args.experiment]
     rtc_execution_horizon = args.rtc_execution_horizon or args.execution_steps
     if rtc_execution_horizon < 1 or rtc_execution_horizon > spec["action_horizon"]:
@@ -459,6 +480,15 @@ def main() -> None:
         raise SystemExit(
             f"execution-steps {args.execution_steps} exceeds action horizon "
             f"{spec['action_horizon']}"
+        )
+    if args.training_time_rtc and not (
+        1
+        <= args.training_time_rtc_delay_steps
+        < spec["action_horizon"]
+    ):
+        raise SystemExit(
+            "training-time-rtc-delay-steps must be in "
+            f"[1, {spec['action_horizon'] - 1}] when --training-time-rtc is set"
         )
 
     dataset = args.dataset.expanduser().resolve()
@@ -529,6 +559,11 @@ def main() -> None:
         previous_tail = None
         if rtc_config is not None and action_chunks:
             previous_tail = action_chunks[-1][executed_action_counts[-1] :]
+        trained_rtc_previous_tail = None
+        if args.training_time_rtc and action_chunks:
+            trained_rtc_previous_tail = action_chunks[-1][
+                executed_action_counts[-1] :
+            ]
         started = time.perf_counter()
         action_chunk = policy.predict(
             [rgb_frames[local_step]],
@@ -538,6 +573,8 @@ def main() -> None:
             rtc_previous_chunk_tail=previous_tail,
             rtc_inference_delay=args.rtc_inference_delay,
             rtc_config=rtc_config,
+            trained_rtc_previous_chunk_tail=trained_rtc_previous_tail,
+            training_time_rtc_delay_steps=args.training_time_rtc_delay_steps,
         )
         latencies.append(time.perf_counter() - started)
         action_chunk = np.asarray(action_chunk, dtype=np.float32)
@@ -660,6 +697,11 @@ def main() -> None:
             "inference_delay": args.rtc_inference_delay,
             "max_guidance_weight": args.rtc_max_guidance_weight,
             "prefix_schedule": args.rtc_prefix_schedule,
+        },
+        "training_time_rtc": {
+            "enabled": args.training_time_rtc,
+            "delay_steps": args.training_time_rtc_delay_steps,
+            "mode": "clean_prefix_hard_overwrite" if args.training_time_rtc else "off",
         },
         "visual_input": "reference RGB at each chunk replan",
         "left_arm": (

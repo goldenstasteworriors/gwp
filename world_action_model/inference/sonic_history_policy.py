@@ -371,6 +371,8 @@ class SonicHistoryPolicy:
         rtc_previous_chunk_tail=None,
         rtc_inference_delay: int = 0,
         rtc_config: RTCConfig | None = None,
+        trained_rtc_previous_chunk_tail=None,
+        training_time_rtc_delay_steps: int = 0,
     ) -> np.ndarray:
         if len(images) < self.required_visual_history:
             raise ValueError(
@@ -393,6 +395,26 @@ class SonicHistoryPolicy:
                 physical_action_dim=self.physical_action_dim,
                 model_action_dim=self.model_action_dim,
             ).to(dtype=self.dtype)
+        if training_time_rtc_delay_steps < 0:
+            raise ValueError("training_time_rtc_delay_steps must be non-negative")
+        normalized_trained_rtc_prefix = None
+        if (
+            training_time_rtc_delay_steps > 0
+            and trained_rtc_previous_chunk_tail is not None
+        ):
+            normalized_tail = encode_sonic_action_chunk(
+                trained_rtc_previous_chunk_tail,
+                action_low=self.action_low,
+                action_high=self.action_high,
+                delta_mask=self.delta_mask,
+                current_state=current_state,
+                physical_action_dim=self.physical_action_dim,
+                model_action_dim=self.model_action_dim,
+            ).to(dtype=self.dtype)
+            if normalized_tail.shape[0] > 0:
+                normalized_trained_rtc_prefix = normalized_tail[
+                    :training_time_rtc_delay_steps
+                ]
         generator = torch.Generator(device=self.device).manual_seed(int(seed))
         predicted = self.pipe(
             image=images,
@@ -410,6 +432,7 @@ class SonicHistoryPolicy:
             rtc_previous_chunk_tail=normalized_rtc_tail,
             rtc_inference_delay=rtc_inference_delay,
             rtc_config=rtc_config,
+            trained_rtc_prefix=normalized_trained_rtc_prefix,
         )[0, :, : self.physical_action_dim].float()
         predicted = decode_sonic_action(
             predicted,
