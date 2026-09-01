@@ -1,9 +1,10 @@
-"""Training-free Real-Time Chunking guidance for action flow inference.
+"""Real-Time Chunking utilities for action-flow policies.
 
-The implementation follows the PiGDM-style correction from "Real-Time
-Execution of Action Chunking Flow Policies" (arXiv:2506.07339).  It operates
-on normalized model actions; callers must provide the already time-aligned,
-unexecuted tail of the previous chunk.
+``RTCConfig`` implements the original training-free, PiGDM-style inference
+guidance from "Real-Time Execution of Action Chunking Flow Policies"
+(arXiv:2506.07339).  ``training_time_rtc_condition`` implements the clean
+prefix conditioning used by training-time RTC.  Both operate on normalized
+model actions.
 """
 
 from __future__ import annotations
@@ -33,6 +34,71 @@ class RTCConfig:
             raise ValueError("RTC max_guidance_weight must be finite and positive")
         if self.prefix_schedule not in ("exp", "linear", "ones", "hard"):
             raise ValueError(f"unsupported RTC prefix_schedule={self.prefix_schedule!r}")
+
+
+@dataclass(frozen=True)
+class TrainingTimeRTCConfig:
+    """Fixed simulated execution delay for training-time RTC.
+
+    ``simulated_delay_steps`` is the number of initial action targets that are
+    already committed while a new chunk is inferred.  Zero leaves the baseline
+    flow-matching objective unchanged.
+    """
+
+    simulated_delay_steps: int = 0
+
+    def __post_init__(self) -> None:
+        if self.simulated_delay_steps < 0:
+            raise ValueError("training-time RTC simulated_delay_steps must be non-negative")
+
+
+def training_time_rtc_condition(
+    action: torch.Tensor,
+    noisy_action: torch.Tensor,
+    action_sigma: torch.Tensor,
+    action_timestep: torch.Tensor,
+    *,
+    config: TrainingTimeRTCConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Condition a flow-training action chunk on a clean committed prefix.
+
+    The first ``simulated_delay_steps`` targets remain clean and receive
+    timestep/sigma zero.  The returned prefix mask marks positions which must
+    be excluded from every action prediction loss.
+    """
+
+    if action.ndim != 3:
+        raise ValueError(f"action must be [B, H, A], got {tuple(action.shape)}")
+    if noisy_action.shape != action.shape:
+        raise ValueError("noisy_action must have the same shape as action")
+    if action_timestep.ndim != 1 or action_timestep.shape[0] != action.shape[0]:
+        raise ValueError("action_timestep must be [B]")
+    if action_sigma.ndim != 3 or action_sigma.shape[0] != action.shape[0]:
+        raise ValueError("action_sigma must be [B, 1, 1]")
+
+    batch_size, horizon, _ = action.shape
+    delay = config.simulated_delay_steps
+    if delay >= horizon:
+        raise ValueError(
+            "training-time RTC simulated_delay_steps must be smaller than "
+            f"the action horizon ({delay} >= {horizon})"
+        )
+
+    prefix_mask = torch.zeros(
+        batch_size, horizon, dtype=torch.bool, device=action.device
+    )
+    if delay == 0:
+        action_timesteps = action_timestep[:, None].expand(-1, horizon)
+        action_sigmas = action_sigma.expand(-1, horizon, -1)
+        return noisy_action, action_sigmas, action_timesteps, prefix_mask
+
+    prefix_mask[:, :delay] = True
+    noisy_action = torch.where(prefix_mask[:, :, None], action, noisy_action)
+    action_sigmas = action_sigma.expand(-1, horizon, -1).clone()
+    action_sigmas[prefix_mask] = 0
+    action_timesteps = action_timestep[:, None].expand(-1, horizon).clone()
+    action_timesteps[prefix_mask] = 0
+    return noisy_action, action_sigmas, action_timesteps, prefix_mask
 
 
 def prefix_attention_weights(

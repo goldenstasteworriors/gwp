@@ -10,6 +10,7 @@ from diffusers.video_processor import VideoProcessor
 from einops import rearrange
 from giga_models import utils as gm_utils
 from world_action_model.models import CasualWorldActionTransformer_MoT
+from world_action_model.rtc import TrainingTimeRTCConfig, training_time_rtc_condition
 from giga_train import ModuleDict, Trainer
 
 
@@ -336,6 +337,11 @@ class CasualWATrainerMoT(Trainer):
         self.action_jitter_max_pixels = int(
             model_config.get("action_jitter_max_pixels", 0)
         )
+        self.training_time_rtc = TrainingTimeRTCConfig(
+            simulated_delay_steps=int(
+                model_config.get("training_time_rtc_delay_steps", 0)
+            )
+        )
         if self.action_jitter_consistency_weight < 0.0:
             raise ValueError("action_jitter_consistency_weight must be non-negative")
         if self.action_jitter_max_pixels < 0:
@@ -439,6 +445,18 @@ class CasualWATrainerMoT(Trainer):
         action_noise = torch.randn_like(action)
         action_target = action_noise - action
         noisy_action = action_noise * action_sigma + action * (1 - action_sigma)
+        (
+            noisy_action,
+            action_sigma,
+            action_timestep,
+            training_time_rtc_prefix_mask,
+        ) = training_time_rtc_condition(
+            action,
+            noisy_action,
+            action_sigma,
+            action_timestep,
+            config=self.training_time_rtc,
+        )
 
         prompt_embeds = prompt_embeds.to(self.dtype)
         if "ref_images" not in batch_dict:
@@ -513,9 +531,7 @@ class CasualWATrainerMoT(Trainer):
             device=noisy_latents.device,
             dtype=noisy_latents.dtype,
         )
-        timestep[:, num_state_tokens + num_clean_latent_tokens : num_state_tokens + num_clean_latent_tokens + num_action_tokens] = (
-            action_timestep[:, None]
-        )
+        timestep[:, num_state_tokens + num_clean_latent_tokens : num_state_tokens + num_clean_latent_tokens + num_action_tokens] = action_timestep
         timestep[:, num_state_tokens + num_action_tokens + num_clean_latent_tokens :] = visual_timestep[:, None]
 
         visual_pred, action_pred = transformer(
@@ -611,6 +627,7 @@ class CasualWATrainerMoT(Trainer):
             action_time_mask = torch.ones_like(action_error[:, :, 0], dtype=torch.bool)
         else:
             action_time_mask = action_time_mask.to(action_error.device).bool()
+        action_prediction_mask = action_time_mask & ~training_time_rtc_prefix_mask
 
         action_steps = action_error.shape[1]
         progress = torch.linspace(0.0, 1.0, action_steps, device=action_error.device)
@@ -622,7 +639,7 @@ class CasualWATrainerMoT(Trainer):
             temporal_weight = torch.ones_like(progress)
         temporal_weight = temporal_weight / temporal_weight.mean()
         loss_weight = (
-            action_time_mask[:, :, None]
+            action_prediction_mask[:, :, None]
             * action_dim_mask[:, None, :]
             * temporal_weight[None, :, None]
         ).to(action_error.dtype)
@@ -648,15 +665,20 @@ class CasualWATrainerMoT(Trainer):
             target_velocity = action.float()[:, 1:] - action.float()[:, :-1]
             velocity_error = (pred_velocity - target_velocity).pow(2)
             velocity_mask = (
-                action_time_mask[:, 1:]
-                & action_time_mask[:, :-1]
+                action_prediction_mask[:, 1:]
+                & action_prediction_mask[:, :-1]
             )[:, :, None] & action_dim_mask[:, None, :]
             velocity_mask = velocity_mask.to(velocity_error.dtype)
             smoothness_loss = (velocity_error * velocity_mask).sum() / velocity_mask.sum().clamp_min(1.0)
             action_loss = action_loss + self.action_smoothness_weight * smoothness_loss
 
         if self.action_terminal_weight > 0.0:
-            last_valid = action_time_mask.long().sum(dim=1).sub(1).clamp_min(0)
+            action_indices = torch.arange(
+                action_steps, device=action_error.device
+            ).expand(bs, -1)
+            last_valid = torch.where(
+                action_prediction_mask, action_indices, torch.zeros_like(action_indices)
+            ).amax(dim=1)
             batch_indices = torch.arange(bs, device=action_error.device)
             terminal_error = (
                 pred_clean_action[batch_indices, last_valid]
