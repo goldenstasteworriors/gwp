@@ -340,7 +340,7 @@ def main() -> None:
         failures = [
             (item["name"], item["pid"], item["process"].poll())
             for item in started
-            if item["process"].poll() is not None
+            if item["process"].poll() not in (None, 0)
         ]
         if failures:
             raise RuntimeError(f"Training exited during startup: {failures}")
