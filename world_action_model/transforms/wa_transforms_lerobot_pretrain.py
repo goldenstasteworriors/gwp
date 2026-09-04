@@ -628,7 +628,14 @@ class WALeRobotSequenceTransformsPretrain(WALeRobotTransformsPretrain):
             )
 
         transformed_steps = []
+        # The baseline augmentation already shares one sample across frames in
+        # a video tensor.  Preserve that contract across the outer memory
+        # sequence as well, otherwise longer contexts receive more artificial
+        # crop/rotation jitter than shorter contexts.
+        shared_random_state = random.getstate()
+        final_random_state = None
         for step in range(self.context_length):
+            random.setstate(shared_random_state)
             step_data = dict(data_dict)
             action_start = step * self.replan_stride
             action_stop = action_start + self.num_frames
@@ -647,6 +654,10 @@ class WALeRobotSequenceTransformsPretrain(WALeRobotTransformsPretrain):
                     )
                 step_data[view_key] = view[step]
             transformed_steps.append(super().__call__(step_data))
+            final_random_state = random.getstate()
+
+        if final_random_state is not None:
+            random.setstate(final_random_state)
 
         output = {
             key: torch.stack([step[key] for step in transformed_steps], dim=0)
