@@ -569,3 +569,90 @@ class WALeRobotTransformsPretrain(WATransforms):
                 out.pop(k)
 
         return out
+
+
+@TRANSFORMS.register
+class WALeRobotSequenceTransformsPretrain(WALeRobotTransformsPretrain):
+    """Apply the regular SONIC transform at every step of a context window."""
+
+    def __init__(
+        self,
+        *args,
+        context_length: int,
+        replan_stride: int,
+        **kwargs,
+    ) -> None:
+        self.context_length = int(context_length)
+        self.replan_stride = int(replan_stride)
+        if self.context_length < 1:
+            raise ValueError("context_length must be at least 1")
+        if self.replan_stride < 1:
+            raise ValueError("replan_stride must be at least 1")
+        super().__init__(*args, **kwargs)
+
+    def __call__(self, data_dict):
+        context_length = int(data_dict.get("memory_context_length", -1))
+        replan_stride = int(data_dict.get("memory_replan_stride", -1))
+        action_horizon = int(data_dict.get("memory_action_horizon", -1))
+        if context_length != self.context_length:
+            raise ValueError(
+                f"Dataset/transform context mismatch: {context_length} != {self.context_length}"
+            )
+        if replan_stride != self.replan_stride:
+            raise ValueError(
+                f"Dataset/transform stride mismatch: {replan_stride} != {self.replan_stride}"
+            )
+        if action_horizon != self.num_frames:
+            raise ValueError(
+                f"Dataset/transform action horizon mismatch: {action_horizon} != {self.num_frames}"
+            )
+
+        dense_actions = torch.as_tensor(data_dict[self.action_key])
+        dense_action_pad = data_dict.get(f"{self.action_key}_is_pad")
+        if dense_action_pad is None:
+            dense_action_pad = data_dict.get("action_is_pad")
+        if dense_action_pad is not None:
+            dense_action_pad = torch.as_tensor(dense_action_pad)
+        states = torch.as_tensor(data_dict[self.state_key])
+        expected_dense_actions = (
+            (self.context_length - 1) * self.replan_stride + self.num_frames
+        )
+        if dense_actions.shape[0] != expected_dense_actions:
+            raise ValueError(
+                "Unexpected dense action window length: "
+                f"{dense_actions.shape[0]} != {expected_dense_actions}"
+            )
+        if states.shape[0] != self.context_length:
+            raise ValueError(
+                f"Unexpected state context length: {states.shape[0]} != {self.context_length}"
+            )
+
+        transformed_steps = []
+        for step in range(self.context_length):
+            step_data = dict(data_dict)
+            action_start = step * self.replan_stride
+            action_stop = action_start + self.num_frames
+            step_data[self.action_key] = dense_actions[action_start:action_stop]
+            if dense_action_pad is not None:
+                step_data["action_is_pad"] = dense_action_pad[
+                    action_start:action_stop
+                ]
+            step_data[self.state_key] = states[step]
+            for view_key in self.view_keys:
+                view = torch.as_tensor(data_dict[view_key])
+                if view.shape[0] != self.context_length:
+                    raise ValueError(
+                        f"Unexpected image context for {view_key}: "
+                        f"{view.shape[0]} != {self.context_length}"
+                    )
+                step_data[view_key] = view[step]
+            transformed_steps.append(super().__call__(step_data))
+
+        output = {
+            key: torch.stack([step[key] for step in transformed_steps], dim=0)
+            for key in transformed_steps[0]
+        }
+        output["memory_context_valid"] = torch.as_tensor(
+            data_dict["memory_context_valid"], dtype=torch.bool
+        )
+        return output

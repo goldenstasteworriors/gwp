@@ -88,6 +88,9 @@ image_augmentation_enabled = _env("GWP_IMAGE_AUGMENTATION", "1") == "1"
 view_keys = ["observation.images.ego_view"]
 image_frame_offsets = _int_list("GWP_IMAGE_FRAME_OFFSETS", "0,12,24,36,48")
 state_history_offsets = _int_list("GWP_STATE_HISTORY_OFFSETS", "0")
+memory_context_length = int(_env("GWP_MEMORY_CONTEXT_LENGTH", "0"))
+memory_replan_stride = int(_env("GWP_MEMORY_REPLAN_STRIDE", "8"))
+memory_layer_indices = _int_list("GWP_MEMORY_LAYER_INDICES", "")
 train_episodes = _episode_list("GWP_TRAIN_EPISODES")
 max_ref_frames = int(_env("GWP_MAX_REF_FRAMES", "1"))
 min_ref_latents = int(_env("GWP_MIN_REF_LATENTS", "1"))
@@ -100,13 +103,14 @@ if len(state_history_offsets) > 1 or state_history_offsets != [0]:
 if use_imu:
     delta_frames[jitter_score_key] = image_frame_offsets
 
-data_or_config = [
-    dict(
-        _class_name="WAMLeRobotDataset",
+dataset_config = dict(
+        _class_name=(
+            "WAMLeRobotSequenceDataset"
+            if memory_context_length > 0
+            else "WAMLeRobotDataset"
+        ),
         data_path=data_path,
         data_size=None,
-        delta_info={"action": num_frames},
-        delta_frames=delta_frames,
         video_backend="pyav",
         t5_load_from=_env("GWP_T5_LOAD_FROM", "dir"),
         t5_cfg=dict(
@@ -120,8 +124,20 @@ data_or_config = [
         t5_cache_size=4096,
         robotype="sonic_g1",
         episodes=train_episodes,
+)
+if memory_context_length > 0:
+    dataset_config.update(
+        context_length=memory_context_length,
+        replan_stride=memory_replan_stride,
+        action_horizon=num_frames,
+        view_keys=view_keys,
     )
-]
+else:
+    dataset_config.update(
+        delta_info={"action": num_frames},
+        delta_frames=delta_frames,
+    )
+data_or_config = [dataset_config]
 
 config = dict(
     runners=["world_action_model.CasualWATrainerMoT"],
@@ -156,7 +172,11 @@ config = dict(
             num_workers=int(_env("GWP_NUM_WORKERS", "8")),
             pin_memory=True,
             transform=dict(
-                type="WALeRobotTransformsPretrain",
+                type=(
+                    "WALeRobotSequenceTransformsPretrain"
+                    if memory_context_length > 0
+                    else "WALeRobotTransformsPretrain"
+                ),
                 dst_size=(320, 384),
                 num_frames=num_frames,
                 is_train=True,
@@ -216,6 +236,14 @@ config = dict(
                 ),
                 max_prompt_len=64,
                 subtask_prob=0,
+                **(
+                    dict(
+                        context_length=memory_context_length,
+                        replan_stride=memory_replan_stride,
+                    )
+                    if memory_context_length > 0
+                    else {}
+                ),
             ),
         ),
         test=dict(),
@@ -252,6 +280,17 @@ config = dict(
             in_action_channels=32,
             out_action_channels=32,
             num_embodiments=2,
+            memory_layer_indices=memory_layer_indices,
+            memory_dim=int(_env("GWP_MEMORY_DIM", "256")),
+            memory_hidden_dim=int(_env("GWP_MEMORY_HIDDEN_DIM", "256")),
+            memory_inner_lr=float(_env("GWP_MEMORY_INNER_LR", "0.05")),
+            memory_gate_init=float(_env("GWP_MEMORY_GATE_INIT", "0.001")),
+            memory_context_half_life=int(
+                _env(
+                    "GWP_MEMORY_CONTEXT_HALF_LIFE",
+                    str(max(memory_context_length, 1)),
+                )
+            ),
         ),
         visual_flow_shift=2.0,
         action_flow_shift=5.0,
@@ -295,6 +334,10 @@ config = dict(
         train_action_head_only=(
             _env("GWP_TRAIN_ACTION_HEAD_ONLY", "0") == "1"
         ),
+        train_memory_only=_env("GWP_TRAIN_MEMORY_ONLY", "0") == "1",
+        memory_sequence_training=memory_context_length > 0,
+        memory_tbptt_steps=int(_env("GWP_MEMORY_TBPTT_STEPS", "8")),
+        memory_persistent=_env("GWP_MEMORY_PERSISTENT", "1") == "1",
         checkpoint_export_mode=_env("GWP_CHECKPOINT_EXPORT_MODE", "auto"),
         checkpoint_export_dtype=_env(
             "GWP_CHECKPOINT_EXPORT_DTYPE", "preserve"

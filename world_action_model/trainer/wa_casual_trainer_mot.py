@@ -200,6 +200,7 @@ def is_action_head_parameter(name: str) -> bool:
                 break
     return (
         stripped == "action_scale_shift_table"
+        or stripped.startswith("memory_layers.")
         or stripped.startswith(_ACTION_HEAD_PARAMETER_PREFIXES)
         or (stripped.startswith("blocks.") and ".action_expert." in stripped)
     )
@@ -260,12 +261,26 @@ class CasualWATrainerMoT(Trainer):
         self.visual_flow_shift = float(model_config.visual_flow_shift)
         self.action_flow_shift = float(model_config.action_flow_shift)
         self.train_action_head_only = bool(model_config.get("train_action_head_only", False))
+        self.train_memory_only = bool(model_config.get("train_memory_only", False))
+        self.memory_sequence_training = bool(
+            model_config.get("memory_sequence_training", False)
+        )
+        self.memory_tbptt_steps = int(model_config.get("memory_tbptt_steps", 8))
+        self.memory_persistent = bool(model_config.get("memory_persistent", True))
+        if self.memory_tbptt_steps < 1:
+            raise ValueError("memory_tbptt_steps must be at least 1")
+        if self.train_memory_only and self.train_action_head_only:
+            raise ValueError(
+                "train_memory_only and train_action_head_only are mutually exclusive"
+            )
         checkpoint_export_mode = str(
             model_config.get("checkpoint_export_mode", "auto")
         )
         if checkpoint_export_mode == "auto":
             checkpoint_export_mode = (
-                "action_head_only" if self.train_action_head_only else "full"
+                "action_head_only"
+                if self.train_action_head_only or self.train_memory_only
+                else "full"
             )
         valid_export_modes = {
             "full",
@@ -277,9 +292,12 @@ class CasualWATrainerMoT(Trainer):
                 f"checkpoint_export_mode must be one of {sorted(valid_export_modes)}, "
                 f"got {checkpoint_export_mode!r}"
             )
-        if self.train_action_head_only and checkpoint_export_mode != "action_head_only":
+        if (
+            self.train_action_head_only or self.train_memory_only
+        ) and checkpoint_export_mode != "action_head_only":
             raise ValueError(
-                "train_action_head_only requires checkpoint_export_mode=action_head_only"
+                "action-head or memory-only training requires "
+                "checkpoint_export_mode=action_head_only"
             )
         self.checkpoint_export_mode = checkpoint_export_mode
         self.checkpoint_export_dtype = str(
@@ -388,7 +406,26 @@ class CasualWATrainerMoT(Trainer):
             ),
         )
         transformer.to(self.device)
-        if self.train_action_head_only:
+        if self.train_memory_only:
+            transformer.requires_grad_(False)
+            trainable_names = []
+            for name, parameter in transformer.named_parameters():
+                if name.startswith("memory_layers."):
+                    parameter.requires_grad_(True)
+                    trainable_names.append(name)
+            if not trainable_names:
+                raise RuntimeError("Memory-only training found no memory parameters")
+            self.visual_loss_weight = 0.0
+            trainable_count = sum(
+                parameter.numel()
+                for parameter in transformer.parameters()
+                if parameter.requires_grad
+            )
+            print(
+                "Memory-only training enabled: "
+                f"{len(trainable_names)} tensors, {trainable_count:,} parameters trainable"
+            )
+        elif self.train_action_head_only:
             transformer.requires_grad_(False)
             trainable_names = []
             for name, parameter in transformer.named_parameters():
@@ -420,6 +457,8 @@ class CasualWATrainerMoT(Trainer):
         return model
 
     def forward_step(self, batch_dict):
+        if self.memory_sequence_training:
+            return self.forward_memory_sequence_step(batch_dict)
         transformer = functools.partial(self.model, "transformer")
         images = batch_dict["images"]
         bs = images.shape[0]
@@ -696,6 +735,136 @@ class CasualWATrainerMoT(Trainer):
             ),
         }
 
+    @staticmethod
+    def _detach_memory_state(memory_state):
+        if memory_state is None:
+            return None
+        return {
+            key: tuple(tensor.detach() for tensor in state)
+            for key, state in memory_state.items()
+        }
+
+    def _forward_memory_segment(
+        self,
+        batch_dict,
+        start: int,
+        stop: int,
+        memory_state,
+    ):
+        transformer = functools.partial(self.model, "transformer")
+        images = batch_dict["images"][:, start:stop]
+        action = batch_dict["action"][:, start:stop]
+        state = batch_dict["state"][:, start:stop]
+        prompt_embeds = batch_dict["prompt_embeds"][:, start:stop]
+        embodiment_id = batch_dict["embodiment_id"][:, start:stop]
+        context_valid = batch_dict["memory_context_valid"][:, start:stop].bool()
+        batch_size, segment_length = action.shape[:2]
+        flat_batch = batch_size * segment_length
+
+        images = images.flatten(0, 1)
+        action = action.flatten(0, 1)
+        state = state.flatten(0, 1)
+        prompt_embeds = prompt_embeds.flatten(0, 1).to(self.dtype)
+        embodiment_id = embodiment_id.flatten(0, 1)
+        ref_latents = self.forward_vae(images).to(self.dtype)
+
+        action_timestep, action_sigma = self.get_timestep_and_sigma(
+            flat_batch, action.ndim, self.action_flow_shift
+        )
+        action_noise = torch.randn_like(action)
+        action_target = action_noise - action
+        noisy_action = (
+            action_noise * action_sigma + action * (1 - action_sigma)
+        ).to(self.dtype)
+        state = state.to(self.dtype)
+
+        num_state_tokens = state.shape[1]
+        num_action_tokens = action.shape[1]
+        patch_t, patch_h, patch_w = self.model["transformer"].config.patch_size
+        num_ref_tokens = (
+            ref_latents.shape[2] // patch_t
+            * (ref_latents.shape[3] // patch_h)
+            * (ref_latents.shape[4] // patch_w)
+        )
+        timestep = torch.zeros(
+            flat_batch,
+            num_state_tokens + num_ref_tokens + num_action_tokens,
+            device=ref_latents.device,
+            dtype=ref_latents.dtype,
+        )
+        timestep[
+            :,
+            num_state_tokens
+            + num_ref_tokens : num_state_tokens
+            + num_ref_tokens
+            + num_action_tokens,
+        ] = action_timestep[:, None]
+
+        _, action_pred, memory_state = transformer(
+            ref_latents=ref_latents,
+            timestep=timestep,
+            encoder_hidden_states=prompt_embeds,
+            return_dict=False,
+            action=noisy_action,
+            state=state,
+            embodiment_id=embodiment_id,
+            action_only=True,
+            no_video_tokens=True,
+            memory_sequence_length=segment_length,
+            memory_state=memory_state,
+            memory_update_mask=context_valid,
+            memory_persistent=self.memory_persistent,
+            return_memory_state=True,
+        )
+        action_error = (action_pred.float() - action_target.float()).pow(2)
+        action_dim_mask = batch_dict.get("action_dim_mask")
+        if action_dim_mask is None:
+            action_dim_mask = torch.ones_like(action_error[:, 0], dtype=torch.bool)
+        else:
+            action_dim_mask = action_dim_mask[:, start:stop].flatten(0, 1).bool()
+        action_time_mask = batch_dict.get("action_time_mask")
+        if action_time_mask is None:
+            action_time_mask = torch.ones_like(
+                action_error[:, :, 0], dtype=torch.bool
+            )
+        else:
+            action_time_mask = action_time_mask[:, start:stop].flatten(0, 1).bool()
+        valid_flat = context_valid.flatten()[:, None, None]
+        loss_weight = (
+            valid_flat
+            & action_time_mask[:, :, None]
+            & action_dim_mask[:, None, :]
+        ).to(action_error.dtype)
+        action_loss = (
+            (action_error * loss_weight).sum()
+            / loss_weight.sum().clamp_min(1.0)
+        )
+        return action_loss, memory_state
+
+    def forward_memory_sequence_step(self, batch_dict):
+        context_length = int(batch_dict["action"].shape[1])
+        supervised_start = max(0, context_length - self.memory_tbptt_steps)
+        memory_state = None
+        for start in range(0, supervised_start, self.memory_tbptt_steps):
+            stop = min(start + self.memory_tbptt_steps, supervised_start)
+            with torch.no_grad():
+                _, memory_state = self._forward_memory_segment(
+                    batch_dict, start, stop, memory_state
+                )
+            memory_state = self._detach_memory_state(memory_state)
+        action_loss, _ = self._forward_memory_segment(
+            batch_dict,
+            supervised_start,
+            context_length,
+            memory_state,
+        )
+        zero = action_loss.new_zeros(())
+        return {
+            "visual_loss": zero,
+            "action_loss": action_loss * self.action_loss_weight,
+            "action_jitter_consistency_loss": zero,
+        }
+
     def save_model_hook(self, models, weights, output_dir):
         """Export full weights or compact action/non-action artifacts."""
         compact_modes = {
@@ -852,6 +1021,7 @@ def _detect_checkpoint_architecture(
 def _skip_mot_action_key(key: str) -> bool:
     return (
         key.startswith((
+            "memory_layers.",
             "state_encoder.",
             "action_encoder.",
             "action_decoder.",
@@ -919,10 +1089,19 @@ def _load_mot_pretrained_state_dict(
                 continue
             skipped.append(key)
 
+    checkpoint_has_memory = any(
+        key.startswith("memory_layers.") for key in state_dict
+    )
+    initialized_new = [
+        key
+        for key in own_state
+        if key.startswith("memory_layers.") and not checkpoint_has_memory
+    ]
     eligible = [
         key
         for key in own_state
         if not (skip_action_expert and _skip_mot_action_key(key))
+        and key not in initialized_new
     ]
     loaded_set = set(loaded)
     missing = [key for key in eligible if key not in loaded_set]
@@ -945,6 +1124,7 @@ def _load_mot_pretrained_state_dict(
         "unexpected": unexpected,
         "skipped": skipped,
         "shape_mismatches": shape_mismatches,
+        "initialized_new": initialized_new,
     }
     if coverage < min_load_coverage:
         raise RuntimeError(

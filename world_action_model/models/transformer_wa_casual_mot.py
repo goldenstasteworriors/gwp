@@ -35,6 +35,166 @@ from .action_projectors import EmbodimentSpecificActionDecoder, EmbodimentSpecif
 
 logger = logging.get_logger(__name__)
 
+
+class TTTKVBMemoryLayer(nn.Module):
+    """Small two-layer fast-weight MLP with an analytic KVB update.
+
+    The analytic update keeps deployment compatible with ``inference_mode``:
+    fast weights still take one gradient-descent-equivalent MSE step, but the
+    update does not call autograd from inside the model forward.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        memory_dim: int = 256,
+        hidden_dim: int = 256,
+        inner_lr: float = 0.05,
+        gate_init: float = 0.001,
+        context_half_life: int = 64,
+    ) -> None:
+        super().__init__()
+        self.norm = FP32LayerNorm(dim, 1e-6, elementwise_affine=False)
+        self.query_proj = nn.Linear(dim, memory_dim, bias=False)
+        self.key_proj = nn.Linear(dim, memory_dim, bias=False)
+        self.value_proj = nn.Linear(dim, memory_dim, bias=False)
+        self.output_proj = nn.Linear(memory_dim, dim, bias=False)
+        self.fast_w1_init = nn.Parameter(
+            torch.empty(hidden_dim, memory_dim)
+        )
+        self.fast_b1_init = nn.Parameter(torch.zeros(hidden_dim))
+        self.fast_w2_init = nn.Parameter(
+            torch.empty(memory_dim, hidden_dim)
+        )
+        self.fast_b2_init = nn.Parameter(torch.zeros(memory_dim))
+        self.log_inner_lr = nn.Parameter(
+            torch.log(torch.expm1(torch.tensor(float(inner_lr))))
+        )
+        self.gate = nn.Parameter(torch.full((dim,), float(gate_init)))
+        self.decay = float(0.5 ** (1.0 / max(int(context_half_life), 1)))
+        nn.init.xavier_uniform_(self.fast_w1_init)
+        nn.init.xavier_uniform_(self.fast_w2_init)
+        nn.init.xavier_uniform_(self.query_proj.weight)
+        nn.init.xavier_uniform_(self.key_proj.weight)
+        nn.init.xavier_uniform_(self.value_proj.weight)
+        nn.init.xavier_uniform_(self.output_proj.weight, gain=0.1)
+
+    def initial_state(self, batch_size: int) -> tuple[torch.Tensor, ...]:
+        return (
+            self.fast_w1_init.unsqueeze(0).expand(batch_size, -1, -1),
+            self.fast_b1_init.unsqueeze(0).expand(batch_size, -1),
+            self.fast_w2_init.unsqueeze(0).expand(batch_size, -1, -1),
+            self.fast_b2_init.unsqueeze(0).expand(batch_size, -1),
+        )
+
+    @staticmethod
+    def detach_state(state: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+        return tuple(tensor.detach() for tensor in state)
+
+    def _decay_to_initial(
+        self, state: tuple[torch.Tensor, ...]
+    ) -> tuple[torch.Tensor, ...]:
+        initial = self.initial_state(state[0].shape[0])
+        return tuple(
+            self.decay * value + (1.0 - self.decay) * init
+            for value, init in zip(state, initial)
+        )
+
+    def forward_step(
+        self,
+        hidden_states: torch.Tensor,
+        state: tuple[torch.Tensor, ...] | None,
+        update_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        batch_size, token_count, _ = hidden_states.shape
+        if state is None:
+            state = self.initial_state(batch_size)
+        state = self._decay_to_initial(state)
+        w1, b1, w2, b2 = state
+
+        normalized = self.norm(hidden_states.float()).type_as(hidden_states)
+        query = self.query_proj(normalized).float()
+        key = self.key_proj(normalized).float()
+        value = self.value_proj(normalized).float()
+        w1_f, b1_f, w2_f, b2_f = (
+            w1.float(),
+            b1.float(),
+            w2.float(),
+            b2.float(),
+        )
+        pre_activation = torch.einsum("bsd,bhd->bsh", key, w1_f) + b1_f[:, None]
+        activation = F.silu(pre_activation)
+        prediction = torch.einsum("bsh,bdh->bsd", activation, w2_f) + b2_f[:, None]
+
+        error_grad = 2.0 * (prediction - value) / max(
+            token_count * value.shape[-1], 1
+        )
+        grad_w2 = torch.einsum("bsd,bsh->bdh", error_grad, activation)
+        grad_b2 = error_grad.sum(dim=1)
+        grad_activation = torch.einsum("bsd,bdh->bsh", error_grad, w2_f)
+        sigmoid = torch.sigmoid(pre_activation)
+        silu_grad = sigmoid * (1.0 + pre_activation * (1.0 - sigmoid))
+        grad_pre_activation = grad_activation * silu_grad
+        grad_w1 = torch.einsum("bsh,bsd->bhd", grad_pre_activation, key)
+        grad_b1 = grad_pre_activation.sum(dim=1)
+
+        learning_rate = F.softplus(self.log_inner_lr.float())
+        candidate = (
+            w1_f - learning_rate * grad_w1,
+            b1_f - learning_rate * grad_b1,
+            w2_f - learning_rate * grad_w2,
+            b2_f - learning_rate * grad_b2,
+        )
+        if update_mask is not None:
+            mask = update_mask.to(device=hidden_states.device, dtype=torch.bool)
+            candidate = tuple(
+                torch.where(
+                    mask.reshape(batch_size, *([1] * (new_value.ndim - 1))),
+                    new_value,
+                    old_value.float(),
+                )
+                for new_value, old_value in zip(candidate, state)
+            )
+        new_state = tuple(
+            value.to(dtype=parameter.dtype)
+            for value, parameter in zip(
+                candidate,
+                (self.fast_w1_init, self.fast_b1_init, self.fast_w2_init, self.fast_b2_init),
+            )
+        )
+
+        new_w1, new_b1, new_w2, new_b2 = (value.float() for value in new_state)
+        query_hidden = F.silu(
+            torch.einsum("bsd,bhd->bsh", query, new_w1) + new_b1[:, None]
+        )
+        memory_output = (
+            torch.einsum("bsh,bdh->bsd", query_hidden, new_w2)
+            + new_b2[:, None]
+        )
+        memory_output = self.output_proj(memory_output.to(hidden_states.dtype))
+        gated_output = torch.tanh(self.gate).to(memory_output.dtype) * memory_output
+        return hidden_states + gated_output, new_state
+
+    def forward_sequence(
+        self,
+        hidden_states: torch.Tensor,
+        state: tuple[torch.Tensor, ...] | None = None,
+        update_mask: torch.Tensor | None = None,
+        persistent: bool = True,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        outputs = []
+        for step in range(hidden_states.shape[1]):
+            step_state = state if persistent else None
+            step_mask = None if update_mask is None else update_mask[:, step]
+            output, updated_state = self.forward_step(
+                hidden_states[:, step], step_state, step_mask
+            )
+            outputs.append(output)
+            state = updated_state if persistent else None
+        if state is None:
+            state = updated_state
+        return torch.stack(outputs, dim=1), state
+
 def _copy_param_sliced(dst: torch.Tensor, src: torch.Tensor) -> None:
     """Copy ``src`` into ``dst``, taking leading slices when ``src`` is larger."""
     if dst.shape == src.shape:
@@ -564,6 +724,12 @@ class CasualWorldActionTransformer_MoT(
         in_action_channels: int = 32,
         out_action_channels: int = 32,
         num_embodiments: int = 4,
+        memory_layer_indices: Tuple[int, ...] = (),
+        memory_dim: int = 256,
+        memory_hidden_dim: int = 256,
+        memory_inner_lr: float = 0.05,
+        memory_gate_init: float = 0.001,
+        memory_context_half_life: int = 64,
     ) -> None:
         super().__init__()
 
@@ -605,6 +771,33 @@ class CasualWorldActionTransformer_MoT(
                 )
                 for _ in range(num_layers)
             ]
+        )
+        memory_layer_indices = tuple(int(index) for index in memory_layer_indices)
+        invalid_memory_layers = [
+            index
+            for index in memory_layer_indices
+            if index < 0 or index >= num_layers
+        ]
+        if invalid_memory_layers:
+            raise ValueError(
+                f"memory_layer_indices out of range for {num_layers} layers: "
+                f"{invalid_memory_layers}"
+            )
+        if len(set(memory_layer_indices)) != len(memory_layer_indices):
+            raise ValueError("memory_layer_indices must not contain duplicates")
+        self.memory_layer_indices = memory_layer_indices
+        self.memory_layers = nn.ModuleDict(
+            {
+                str(index): TTTKVBMemoryLayer(
+                    dim=action_expert_dim,
+                    memory_dim=memory_dim,
+                    hidden_dim=memory_hidden_dim,
+                    inner_lr=memory_inner_lr,
+                    gate_init=memory_gate_init,
+                    context_half_life=memory_context_half_life,
+                )
+                for index in memory_layer_indices
+            }
         )
 
         self.norm_out = FP32LayerNorm(inner_dim, eps, elementwise_affine=False)
@@ -874,8 +1067,35 @@ class CasualWorldActionTransformer_MoT(
         action_rotary_emb: Tuple[torch.Tensor, torch.Tensor],
         visual_rotary_emb: Tuple[torch.Tensor, torch.Tensor],
         self_attention_mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        for block in self.blocks:
+        memory_sequence_length: int = 1,
+        memory_state: Optional[Dict[str, tuple[torch.Tensor, ...]]] = None,
+        memory_update_mask: Optional[torch.Tensor] = None,
+        memory_persistent: bool = True,
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        Dict[str, tuple[torch.Tensor, ...]],
+    ]:
+        memory_sequence_length = int(memory_sequence_length)
+        if memory_sequence_length < 1:
+            raise ValueError("memory_sequence_length must be at least 1")
+        if action_hidden_states.shape[0] % memory_sequence_length != 0:
+            raise ValueError(
+                "Flattened batch is not divisible by memory_sequence_length: "
+                f"{action_hidden_states.shape[0]} % {memory_sequence_length}"
+            )
+        memory_batch_size = action_hidden_states.shape[0] // memory_sequence_length
+        if memory_update_mask is not None and tuple(memory_update_mask.shape) != (
+            memory_batch_size,
+            memory_sequence_length,
+        ):
+            raise ValueError(
+                "memory_update_mask must have shape "
+                f"{(memory_batch_size, memory_sequence_length)}, got "
+                f"{tuple(memory_update_mask.shape)}"
+            )
+        memory_state = dict(memory_state or {})
+        for block_index, block in enumerate(self.blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 action_hidden_states, visual_hidden_states = self._gradient_checkpointing_func(
                     block,
@@ -901,7 +1121,22 @@ class CasualWorldActionTransformer_MoT(
                     visual_rotary_emb,
                     self_attention_mask,
                 )
-        return action_hidden_states, visual_hidden_states
+            memory_key = str(block_index)
+            if memory_key in self.memory_layers:
+                sequence_states = action_hidden_states.unflatten(
+                    0, (memory_batch_size, memory_sequence_length)
+                )
+                sequence_states, layer_state = self.memory_layers[
+                    memory_key
+                ].forward_sequence(
+                    sequence_states,
+                    state=memory_state.get(memory_key),
+                    update_mask=memory_update_mask,
+                    persistent=memory_persistent,
+                )
+                action_hidden_states = sequence_states.flatten(0, 1)
+                memory_state[memory_key] = layer_state
+        return action_hidden_states, visual_hidden_states, memory_state
 
     def _empty_visual_stream(
         self,
@@ -948,6 +1183,11 @@ class CasualWorldActionTransformer_MoT(
         output_visual: bool = True,
         visual_grid_info: Optional[Dict[str, int]] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        memory_sequence_length: int = 1,
+        memory_state: Optional[Dict[str, tuple[torch.Tensor, ...]]] = None,
+        memory_update_mask: Optional[torch.Tensor] = None,
+        memory_persistent: bool = True,
+        return_memory_state: bool = False,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
@@ -1023,7 +1263,7 @@ class CasualWorldActionTransformer_MoT(
             action_hidden_states.dtype,
         )
 
-        action_hidden_states, visual_hidden_states = self._process_blocks(
+        action_hidden_states, visual_hidden_states, memory_state = self._process_blocks(
             action_hidden_states,
             visual_hidden_states,
             encoder_visual_hidden_states,
@@ -1033,6 +1273,10 @@ class CasualWorldActionTransformer_MoT(
             action_rotary_emb,
             visual_rotary_emb,
             self_attention_mask,
+            memory_sequence_length=memory_sequence_length,
+            memory_state=memory_state,
+            memory_update_mask=memory_update_mask,
+            memory_persistent=memory_persistent,
         )
 
         action_pred = None
@@ -1090,13 +1334,21 @@ class CasualWorldActionTransformer_MoT(
             unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
+            if return_memory_state:
+                return video_output, action_pred, memory_state
             return video_output, action_pred
 
         if output_action and output_visual:
-            return {"sample": video_output, "action_pred": action_pred}
+            output = {"sample": video_output, "action_pred": action_pred}
+            if return_memory_state:
+                output["memory_state"] = memory_state
+            return output
         if output_visual:
             return Transformer2DModelOutput(sample=video_output)
-        return {"action_pred": action_pred}
+        output = {"action_pred": action_pred}
+        if return_memory_state:
+            output["memory_state"] = memory_state
+        return output
     
     def _forward_train(
         self,
@@ -1179,6 +1431,11 @@ class CasualWorldActionTransformer_MoT(
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         embodiment_id: Optional[torch.Tensor] = None,
+        memory_sequence_length: int = 1,
+        memory_state: Optional[Dict[str, tuple[torch.Tensor, ...]]] = None,
+        memory_update_mask: Optional[torch.Tensor] = None,
+        memory_persistent: bool = True,
+        return_memory_state: bool = False,
     ) -> Union[Tuple[torch.Tensor, ...], Dict[str, torch.Tensor], Transformer2DModelOutput]:
         action_hidden_states, action_rotary_emb, num_state_tokens, _ = self.encode_action_tokens(state, action, embodiment_id=embodiment_id)
         if ref_latents is not None:
@@ -1206,6 +1463,11 @@ class CasualWorldActionTransformer_MoT(
             output_action=True,
             output_visual=False,
             embodiment_id=embodiment_id,
+            memory_sequence_length=memory_sequence_length,
+            memory_state=memory_state,
+            memory_update_mask=memory_update_mask,
+            memory_persistent=memory_persistent,
+            return_memory_state=return_memory_state,
         )
 
     def _forward_inference(

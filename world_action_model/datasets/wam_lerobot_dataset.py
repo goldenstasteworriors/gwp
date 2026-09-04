@@ -297,3 +297,98 @@ class WAMLeRobotDataset(BaseDataset):
             emb = self._load_t5_from_path(path)
             if emb is not None:
                 data_dict[self.t5_embedding_key] = emb
+
+
+@register_dataset
+class WAMLeRobotSequenceDataset(WAMLeRobotDataset):
+    """Return one strided, episode-bounded trajectory window per sample.
+
+    The underlying LeRobot query is a single batched temporal lookup: images
+    and proprioception are sampled at the policy replan stride, while actions
+    are fetched densely so every context step retains the original action
+    horizon.  Windows are left-padded by LeRobot at episode starts and expose a
+    validity mask so padded steps neither update fast weights nor contribute to
+    the outer loss.
+    """
+
+    def __init__(
+        self,
+        *args,
+        context_length: int = 16,
+        replan_stride: int = 8,
+        action_horizon: int = 48,
+        view_keys: list[str] | None = None,
+        **kwargs,
+    ) -> None:
+        self.context_length = int(context_length)
+        self.replan_stride = int(replan_stride)
+        self.action_horizon = int(action_horizon)
+        if self.context_length < 1:
+            raise ValueError("context_length must be at least 1")
+        if self.replan_stride < 1:
+            raise ValueError("replan_stride must be at least 1")
+        if self.action_horizon < 1:
+            raise ValueError("action_horizon must be at least 1")
+        self.sequence_view_keys = list(
+            view_keys or ["observation.images.ego_view"]
+        )
+        context_offsets = [
+            (index - self.context_length + 1) * self.replan_stride
+            for index in range(self.context_length)
+        ]
+        dense_action_offsets = list(
+            range(context_offsets[0], self.action_horizon)
+        )
+        delta_frames = {
+            "action": dense_action_offsets,
+            "observation.state": context_offsets,
+        }
+        delta_frames.update(
+            {view_key: context_offsets for view_key in self.sequence_view_keys}
+        )
+        kwargs.pop("delta_info", None)
+        kwargs.pop("delta_frames", None)
+        super().__init__(*args, delta_frames=delta_frames, **kwargs)
+        self._sequence_anchor_indices: list[int] | None = None
+
+    def open(self) -> None:
+        super().open()
+        if self._sequence_anchor_indices is not None:
+            return
+        self.dataset._ensure_hf_dataset_loaded()
+        frame_indices = self.dataset.hf_dataset["frame_index"]
+        self._sequence_anchor_indices = [
+            index
+            for index, frame_index in enumerate(frame_indices)
+            if int(frame_index) % self.replan_stride == 0
+        ]
+        self.data_size = len(self._sequence_anchor_indices)
+
+    def close(self) -> None:
+        self._sequence_anchor_indices = None
+        super().close()
+
+    def __len__(self) -> int:
+        self.open()
+        return len(self._sequence_anchor_indices)
+
+    def _get_data(self, index: int) -> dict:
+        if self._sequence_anchor_indices is None:
+            raise RuntimeError("Sequence anchors are not initialized")
+        anchor_index = self._sequence_anchor_indices[index]
+        data_dict = super()._get_data(anchor_index)
+        frame_index = data_dict.get("frame_index")
+        if hasattr(frame_index, "item"):
+            frame_index = frame_index.item()
+        frame_index = int(frame_index)
+        valid_steps = min(
+            self.context_length,
+            frame_index // self.replan_stride + 1,
+        )
+        context_valid = torch.zeros(self.context_length, dtype=torch.bool)
+        context_valid[-valid_steps:] = True
+        data_dict["memory_context_valid"] = context_valid
+        data_dict["memory_context_length"] = self.context_length
+        data_dict["memory_replan_stride"] = self.replan_stride
+        data_dict["memory_action_horizon"] = self.action_horizon
+        return data_dict

@@ -1,1 +1,1 @@
-from .wam_lerobot_dataset import WAMLeRobotDataset
+from .wam_lerobot_dataset import WAMLeRobotDataset, WAMLeRobotSequenceDataset

@@ -1,2 +1,5 @@
 from .wa_transforms import WATransforms
-from .wa_transforms_lerobot_pretrain import WALeRobotTransformsPretrain
+from .wa_transforms_lerobot_pretrain import (
+    WALeRobotSequenceTransformsPretrain,
+    WALeRobotTransformsPretrain,
+)
