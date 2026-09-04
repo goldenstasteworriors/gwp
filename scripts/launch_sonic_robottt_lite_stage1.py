@@ -253,7 +253,7 @@ def build_environment(
             "GWP_MEMORY_LAYER_INDICES": "7,15,23,29",
             "GWP_MEMORY_DIM": "256",
             "GWP_MEMORY_HIDDEN_DIM": "256",
-            "GWP_MEMORY_INNER_LR": "0.05",
+            "GWP_MEMORY_INNER_LR": "0.01",
             "GWP_MEMORY_GATE_INIT": "0.001",
             "GWP_MEMORY_TBPTT_STEPS": str(args.tbptt_steps),
             "GWP_MEMORY_PERSISTENT": "1" if spec.persistent else "0",

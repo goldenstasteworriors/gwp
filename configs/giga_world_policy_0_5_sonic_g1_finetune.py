@@ -283,7 +283,7 @@ config = dict(
             memory_layer_indices=memory_layer_indices,
             memory_dim=int(_env("GWP_MEMORY_DIM", "256")),
             memory_hidden_dim=int(_env("GWP_MEMORY_HIDDEN_DIM", "256")),
-            memory_inner_lr=float(_env("GWP_MEMORY_INNER_LR", "0.05")),
+            memory_inner_lr=float(_env("GWP_MEMORY_INNER_LR", "0.01")),
             memory_gate_init=float(_env("GWP_MEMORY_GATE_INIT", "0.001")),
             memory_context_half_life=int(
                 _env(

@@ -113,9 +113,15 @@ class TTTKVBMemoryLayer(nn.Module):
         w1, b1, w2, b2 = state
 
         normalized = self.norm(hidden_states.float()).type_as(hidden_states)
-        query = self.query_proj(normalized).float()
-        key = self.key_proj(normalized).float()
-        value = self.value_proj(normalized).float()
+        query = F.normalize(
+            self.query_proj(normalized).float(), dim=-1, eps=1e-6
+        )
+        key = F.normalize(
+            self.key_proj(normalized).float(), dim=-1, eps=1e-6
+        )
+        value = F.normalize(
+            self.value_proj(normalized).float(), dim=-1, eps=1e-6
+        )
         w1_f, b1_f, w2_f, b2_f = (
             w1.float(),
             b1.float(),
@@ -138,12 +144,36 @@ class TTTKVBMemoryLayer(nn.Module):
         grad_w1 = torch.einsum("bsh,bsd->bhd", grad_pre_activation, key)
         grad_b1 = grad_pre_activation.sum(dim=1)
 
-        learning_rate = F.softplus(self.log_inner_lr.float())
+        gradients = (grad_w1, grad_b1, grad_w2, grad_b2)
+        grad_norm = torch.sqrt(
+            sum(
+                gradient.flatten(1).square().sum(dim=1)
+                for gradient in gradients
+            ).clamp_min(1e-12)
+        )
+        grad_scale = (1.0 / grad_norm).clamp(max=1.0)
+        gradients = tuple(
+            gradient * grad_scale.reshape(
+                batch_size, *([1] * (gradient.ndim - 1))
+            )
+            for gradient in gradients
+        )
+        grad_w1, grad_b1, grad_w2, grad_b2 = gradients
+
+        learning_rate = F.softplus(self.log_inner_lr.float()).clamp(
+            min=1e-5, max=0.1
+        )
         candidate = (
             w1_f - learning_rate * grad_w1,
             b1_f - learning_rate * grad_b1,
             w2_f - learning_rate * grad_w2,
             b2_f - learning_rate * grad_b2,
+        )
+        candidate = tuple(
+            torch.nan_to_num(value, nan=0.0, posinf=4.0, neginf=-4.0).clamp(
+                -4.0, 4.0
+            )
+            for value in candidate
         )
         if update_mask is not None:
             mask = update_mask.to(device=hidden_states.device, dtype=torch.bool)
@@ -171,6 +201,7 @@ class TTTKVBMemoryLayer(nn.Module):
             torch.einsum("bsh,bdh->bsd", query_hidden, new_w2)
             + new_b2[:, None]
         )
+        memory_output = F.layer_norm(memory_output, (memory_output.shape[-1],))
         memory_output = self.output_proj(memory_output.to(hidden_states.dtype))
         gated_output = torch.tanh(self.gate).to(memory_output.dtype) * memory_output
         return hidden_states + gated_output, new_state
