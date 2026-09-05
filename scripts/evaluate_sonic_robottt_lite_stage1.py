@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--samples-per-episode", type=int, default=24)
+    parser.add_argument("--stream-batch-size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=20260905)
     parser.add_argument("--native-only", action="store_true")
     return parser.parse_args()
@@ -318,23 +319,35 @@ def current_metrics(
     }
 
 
+def stack_stream_steps(steps: list[dict]) -> dict:
+    if not steps:
+        raise ValueError("Cannot stack an empty stream segment")
+    expected_keys = set(steps[0])
+    if any(set(step) != expected_keys for step in steps[1:]):
+        raise ValueError("Stream steps do not expose identical tensor keys")
+    return {
+        key: torch.cat([step[key] for step in steps], dim=0)
+        for key in expected_keys
+    }
+
+
 @torch.no_grad()
-def evaluate_stream_step(
+def evaluate_stream_segment(
     model,
     vae,
     transformed: dict,
     *,
     episode: int,
-    anchor_frame: int,
+    anchor_frames: list[int],
     memory_state,
     native_persistent: bool,
-    measure: bool,
+    measure_mask: list[bool],
     include_reset: bool,
     base_seed: int,
     latent_mean: torch.Tensor,
     latent_std: torch.Tensor,
     device: str,
-) -> tuple[dict, dict[str, dict[str, float]]]:
+) -> tuple[dict, list[dict[str, dict[str, float]]]]:
     images = transformed["images"].to(device=device)
     action = transformed["action"].to(device=device)
     state = transformed["state"].to(device=device, dtype=torch.bfloat16)
@@ -343,15 +356,25 @@ def evaluate_stream_step(
     context_valid = transformed["memory_context_valid"].to(device=device).bool()
     action_time_mask = transformed["action_time_mask"].to(device=device).bool()
     action_dim_mask = transformed["action_dim_mask"].to(device=device).bool()
-    noisy_action, action_target, action_timestep, action_sigma = action_corruption(
-        action,
-        episode=episode,
-        anchor_frame=anchor_frame,
-        context_length=1,
-        base_seed=base_seed,
-        device=device,
+    corruptions = [
+        action_corruption(
+            action[index : index + 1],
+            episode=episode,
+            anchor_frame=frame,
+            context_length=1,
+            base_seed=base_seed,
+            device=device,
+        )
+        for index, frame in enumerate(anchor_frames)
+    ]
+    noisy_action, action_target, action_timestep, action_sigma = (
+        torch.cat([values[index] for values in corruptions], dim=0)
+        for index in range(4)
     )
     ref_latents = encode_images(vae, images, latent_mean, latent_std).to(torch.bfloat16)
+    sequence_length = len(anchor_frames)
+    if action.shape[0] != sequence_length or len(measure_mask) != sequence_length:
+        raise ValueError("Stream segment metadata does not match its tensor batch")
     num_state_tokens = state.shape[1]
     num_action_tokens = action.shape[1]
     patch_t, patch_h, patch_w = model.config.patch_size
@@ -361,7 +384,7 @@ def evaluate_stream_step(
         * (ref_latents.shape[4] // patch_w)
     )
     timestep = torch.zeros(
-        1,
+        sequence_length,
         num_state_tokens + num_ref_tokens + num_action_tokens,
         device=device,
         dtype=ref_latents.dtype,
@@ -380,7 +403,7 @@ def evaluate_stream_step(
             action=noisy_action,
             state=state,
             embodiment_id=embodiment,
-            memory_sequence_length=1,
+            memory_sequence_length=sequence_length,
             memory_state=state_value,
             memory_update_mask=context_valid[None],
             memory_persistent=persistent,
@@ -391,31 +414,37 @@ def evaluate_stream_step(
     native_prediction, next_memory_state = forward_one(
         memory_state, native_persistent
     )
-    if not measure:
-        return next_memory_state, {}
-
-    results = {
-        "native": current_metrics(
-            native_prediction,
-            action_target[0],
-            noisy_action[0],
-            action[0],
-            action_sigma[0],
-            action_time_mask[0],
-            action_dim_mask[0],
-        )
-    }
-    if include_reset and native_persistent:
+    reset_prediction = None
+    if include_reset and native_persistent and any(measure_mask):
         reset_prediction, _ = forward_one(None, False)
-        results["forced_reset"] = current_metrics(
-            reset_prediction,
-            action_target[0],
-            noisy_action[0],
-            action[0],
-            action_sigma[0],
-            action_time_mask[0],
-            action_dim_mask[0],
-        )
+
+    results = []
+    for index, measure in enumerate(measure_mask):
+        if not measure:
+            results.append({})
+            continue
+        row = {
+            "native": current_metrics(
+                native_prediction[index],
+                action_target[index],
+                noisy_action[index],
+                action[index],
+                action_sigma[index],
+                action_time_mask[index],
+                action_dim_mask[index],
+            )
+        }
+        if reset_prediction is not None:
+            row["forced_reset"] = current_metrics(
+                reset_prediction[index],
+                action_target[index],
+                noisy_action[index],
+                action[index],
+                action_sigma[index],
+                action_time_mask[index],
+                action_dim_mask[index],
+            )
+        results.append(row)
     return next_memory_state, results
 
 
@@ -458,8 +487,10 @@ def main() -> None:
     ):
         if not path.exists():
             raise FileNotFoundError(path)
-    if args.samples_per_episode < 0:
-        raise ValueError("samples-per-episode must be non-negative")
+    if args.samples_per_episode < 0 or args.stream_batch_size < 1:
+        raise ValueError(
+            "samples-per-episode must be non-negative and stream-batch-size positive"
+        )
     if args.device.startswith("cuda"):
         torch.cuda.set_device(args.device)
 
@@ -485,67 +516,85 @@ def main() -> None:
     native_persistent = bool(experiment["memory_persistent"])
     records = []
     started = time.perf_counter()
-    memory_state = None
-    current_episode = None
     processed = 0
     selected_total = len(selected_keys)
     last_selected_frame = {
         episode: max(frame for selected_episode, frame in selected_keys if selected_episode == episode)
         for episode in episodes
     }
+    anchors_by_episode = defaultdict(list)
+    for episode, frame, sequence_index in all_anchors:
+        if frame <= last_selected_frame[episode]:
+            anchors_by_episode[episode].append((frame, sequence_index))
     try:
-        for episode, frame, sequence_index in all_anchors:
-            if frame > last_selected_frame[episode]:
-                continue
-            selected = (episode, frame) in selected_keys
-            # A reset-only model has no state to warm between measured anchors.
-            if not native_persistent and not selected:
-                continue
-            if episode != current_episode:
-                memory_state = None
-                current_episode = episode
-            sample_seed = stable_seed(args.seed, episode, frame, salt=1)
-            random.seed(sample_seed)
-            np.random.seed(sample_seed % (2**32 - 1))
-            torch.manual_seed(sample_seed)
-            raw = dataset._get_data(sequence_index)
-            # LeRobot squeezes the temporal dimension for a one-frame video
-            # query, whereas the sequence transform intentionally requires it.
-            image = torch.as_tensor(raw[VIEW_KEY])
-            if image.ndim == 3:
-                raw[VIEW_KEY] = image.unsqueeze(0)
-            transformed = transform(raw)
-            memory_state, mode_results = evaluate_stream_step(
-                model,
-                vae,
-                transformed,
-                episode=episode,
-                anchor_frame=frame,
-                memory_state=memory_state,
-                native_persistent=native_persistent,
-                measure=selected,
-                include_reset=not args.native_only,
-                base_seed=args.seed,
-                latent_mean=latent_mean,
-                latent_std=latent_std,
-                device=args.device,
-            )
-            if not selected:
-                continue
-            processed += 1
-            for mode, metrics in mode_results.items():
-                records.append(
-                    {"episode": episode, "frame": frame, "mode": mode, **metrics}
+        for episode in episodes:
+            memory_state = None
+            episode_anchors = anchors_by_episode[episode]
+            if not native_persistent:
+                episode_anchors = [
+                    value
+                    for value in episode_anchors
+                    if (episode, value[0]) in selected_keys
+                ]
+            for batch_start in range(0, len(episode_anchors), args.stream_batch_size):
+                anchor_batch = episode_anchors[
+                    batch_start : batch_start + args.stream_batch_size
+                ]
+                frames = [frame for frame, _ in anchor_batch]
+                measure_mask = [
+                    (episode, frame) in selected_keys for frame in frames
+                ]
+                transformed_steps = []
+                for frame, sequence_index in anchor_batch:
+                    sample_seed = stable_seed(args.seed, episode, frame, salt=1)
+                    random.seed(sample_seed)
+                    np.random.seed(sample_seed % (2**32 - 1))
+                    torch.manual_seed(sample_seed)
+                    raw = dataset._get_data(sequence_index)
+                    # LeRobot squeezes the temporal dimension for a one-frame
+                    # video query, while the sequence transform requires it.
+                    image = torch.as_tensor(raw[VIEW_KEY])
+                    if image.ndim == 3:
+                        raw[VIEW_KEY] = image.unsqueeze(0)
+                    transformed_steps.append(transform(raw))
+                transformed = stack_stream_steps(transformed_steps)
+                memory_state, segment_results = evaluate_stream_segment(
+                    model,
+                    vae,
+                    transformed,
+                    episode=episode,
+                    anchor_frames=frames,
+                    memory_state=memory_state,
+                    native_persistent=native_persistent,
+                    measure_mask=measure_mask,
+                    include_reset=not args.native_only,
+                    base_seed=args.seed,
+                    latent_mean=latent_mean,
+                    latent_std=latent_std,
+                    device=args.device,
                 )
-            native_loss = mode_results["native"]["flow_mse"]
-            message = (
-                f"[{processed}/{selected_total}] episode={episode} frame={frame} "
-                f"native_flow_mse={native_loss:.8f}"
-            )
-            if "forced_reset" in mode_results:
-                reset_loss = mode_results["forced_reset"]["flow_mse"]
-                message += f" reset_flow_mse={reset_loss:.8f}"
-            print(message, flush=True)
+                for frame, mode_results in zip(frames, segment_results):
+                    if not mode_results:
+                        continue
+                    processed += 1
+                    for mode, metrics in mode_results.items():
+                        records.append(
+                            {
+                                "episode": episode,
+                                "frame": frame,
+                                "mode": mode,
+                                **metrics,
+                            }
+                        )
+                    native_loss = mode_results["native"]["flow_mse"]
+                    message = (
+                        f"[{processed}/{selected_total}] episode={episode} "
+                        f"frame={frame} native_flow_mse={native_loss:.8f}"
+                    )
+                    if "forced_reset" in mode_results:
+                        reset_loss = mode_results["forced_reset"]["flow_mse"]
+                        message += f" reset_flow_mse={reset_loss:.8f}"
+                    print(message, flush=True)
     finally:
         dataset.close()
 
@@ -595,6 +644,7 @@ def main() -> None:
         "selected_samples": selected_total,
         "anchor_coverage": coverage,
         "seed": args.seed,
+        "stream_batch_size": args.stream_batch_size,
         "metric_scope": {
             "primary": "normalized action flow-field MSE at the current replan",
             "arm_dimensions": [0, 7],
