@@ -385,7 +385,10 @@ def evaluate_modes(
             timestep[
                 :, num_state_tokens + num_ref_tokens :
             ] = action_timestep[start:stop, None]
-            _, prediction, memory_state = model(
+            # The existing deployment fast path does not yet expose recurrent
+            # memory state.  Call the sequence-capable action-only path
+            # directly while retaining eval mode and no-grad semantics.
+            _, prediction, memory_state = model._forward_train_action_only_no_video(
                 ref_latents=ref_latents,
                 timestep=timestep,
                 encoder_hidden_states=prompt[start:stop],
