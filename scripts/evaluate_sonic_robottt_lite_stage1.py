@@ -396,8 +396,6 @@ def evaluate_modes(
                 action=noisy_action[start:stop],
                 state=state[start:stop],
                 embodiment_id=embodiment[start:stop],
-                action_only=True,
-                no_video_tokens=True,
                 memory_sequence_length=count,
                 memory_state=memory_state,
                 memory_update_mask=context_valid[start:stop][None],
