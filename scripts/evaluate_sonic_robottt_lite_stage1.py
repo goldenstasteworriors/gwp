@@ -508,7 +508,13 @@ def main() -> None:
             random.seed(sample_seed)
             np.random.seed(sample_seed % (2**32 - 1))
             torch.manual_seed(sample_seed)
-            transformed = transform(dataset._get_data(sequence_index))
+            raw = dataset._get_data(sequence_index)
+            # LeRobot squeezes the temporal dimension for a one-frame video
+            # query, whereas the sequence transform intentionally requires it.
+            image = torch.as_tensor(raw[VIEW_KEY])
+            if image.ndim == 3:
+                raw[VIEW_KEY] = image.unsqueeze(0)
+            transformed = transform(raw)
             memory_state, mode_results = evaluate_stream_step(
                 model,
                 vae,
