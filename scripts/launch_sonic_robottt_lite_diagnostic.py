@@ -133,6 +133,20 @@ STAGE_C_RUNS = (
     ),
 )
 
+STAGE_D_RUNS = (
+    RunSpec(
+        "m40_history_residual_memory_only_c32_continue",
+        0,
+        True,
+        True,
+        0.0,
+        0.05,
+        0.05,
+        "Continue the significant Stage-C no-dropout history residual only.",
+        True,
+    ),
+)
+
 CONTEXT_LENGTH = 32
 TBPTT_STEPS = 16
 MEMORY_OUTER_LR = 6e-5
@@ -150,7 +164,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-free-gib", type=float, default=100.0)
     parser.add_argument("--startup-wait-seconds", type=float, default=60.0)
     parser.add_argument(
-        "--profile", choices=("stageA", "stageB", "stageC"), default="stageA"
+        "--profile",
+        choices=("stageA", "stageB", "stageC", "stageD"),
+        default="stageA",
     )
     parser.add_argument("--run-suffix", default="")
     parser.add_argument("--dry-run", action="store_true")
@@ -162,6 +178,7 @@ def selected_runs(args: argparse.Namespace) -> tuple[RunSpec, ...]:
         "stageA": STAGE_A_RUNS,
         "stageB": STAGE_B_RUNS,
         "stageC": STAGE_C_RUNS,
+        "stageD": STAGE_D_RUNS,
     }[args.profile]
 
 
