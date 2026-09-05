@@ -359,9 +359,8 @@ def evaluate_stream_segment(
     action_time_mask = transformed["action_time_mask"].to(device=device).bool()
     action_dim_mask = transformed["action_dim_mask"].to(device=device).bool()
     if len(anchor_frames) == 1:
-        # Preserve the validated deployment-equivalent singleton path exactly.
-        # The grouped multi-replan forward is not numerically equivalent to the
-        # singleton deployment path, so concatenate-on-one is deliberately avoided.
+        # Preserve the validated deployment-equivalent singleton path exactly
+        # and avoid an unnecessary concatenate-on-one operation.
         noisy_action, action_target, action_timestep, action_sigma = action_corruption(
             action,
             episode=episode,
@@ -538,8 +537,8 @@ def main() -> None:
         raise ValueError("samples-per-episode must be non-negative")
     if args.stream_batch_size != 1:
         raise ValueError(
-            "Only stream-batch-size=1 is currently valid: the action forward "
-            "path is not numerically batch-equivalent across distinct replans"
+            "Only stream-batch-size=1 is supported because this benchmark is "
+            "defined as sequential singleton deployment inference"
         )
     if args.device.startswith("cuda"):
         torch.cuda.set_device(args.device)
