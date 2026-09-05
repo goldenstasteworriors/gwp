@@ -72,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stream-batch-size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=20260905)
     parser.add_argument("--native-only", action="store_true")
+    parser.add_argument("--verify-batch-equivalence", action="store_true")
     return parser.parse_args()
 
 
@@ -343,6 +344,7 @@ def evaluate_stream_segment(
     native_persistent: bool,
     measure_mask: list[bool],
     include_reset: bool,
+    verify_batch_equivalence: bool,
     base_seed: int,
     latent_mean: torch.Tensor,
     latent_std: torch.Tensor,
@@ -414,6 +416,36 @@ def evaluate_stream_segment(
     native_prediction, next_memory_state = forward_one(
         memory_state, native_persistent
     )
+    if verify_batch_equivalence and memory_state is None and sequence_length > 1:
+        _, individual_prediction, _ = model._forward_train_action_only_no_video(
+            ref_latents=ref_latents[:1],
+            timestep=timestep[:1],
+            encoder_hidden_states=prompt[:1],
+            return_dict=False,
+            action=noisy_action[:1],
+            state=state[:1],
+            embodiment_id=embodiment[:1],
+            memory_sequence_length=1,
+            memory_state=None,
+            memory_update_mask=context_valid[:1][None],
+            memory_persistent=native_persistent,
+            return_memory_state=True,
+        )
+        max_difference = float(
+            (native_prediction[0].float() - individual_prediction[0].float())
+            .abs()
+            .max()
+            .item()
+        )
+        print(
+            f"batch_equivalence episode={episode} max_abs_diff={max_difference:.8g}",
+            flush=True,
+        )
+        if max_difference > 1e-2:
+            raise RuntimeError(
+                "Batched recurrent output differs from single-step output at "
+                f"the first replan: max_abs_diff={max_difference:.8g}"
+            )
     reset_prediction = None
     if include_reset and native_persistent and any(measure_mask):
         reset_prediction, _ = forward_one(None, False)
@@ -568,6 +600,7 @@ def main() -> None:
                     native_persistent=native_persistent,
                     measure_mask=measure_mask,
                     include_reset=not args.native_only,
+                    verify_batch_equivalence=args.verify_batch_equivalence,
                     base_seed=args.seed,
                     latent_mean=latent_mean,
                     latent_std=latent_std,
@@ -645,6 +678,7 @@ def main() -> None:
         "anchor_coverage": coverage,
         "seed": args.seed,
         "stream_batch_size": args.stream_batch_size,
+        "batch_equivalence_verified": args.verify_batch_equivalence,
         "metric_scope": {
             "primary": "normalized action flow-field MSE at the current replan",
             "arm_dimensions": [0, 7],
