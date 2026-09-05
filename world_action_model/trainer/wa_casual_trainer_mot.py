@@ -11,7 +11,7 @@ from einops import rearrange
 from giga_models import utils as gm_utils
 from world_action_model.models import CasualWorldActionTransformer_MoT
 from world_action_model.rtc import TrainingTimeRTCConfig, training_time_rtc_condition
-from giga_train import ModuleDict, Trainer
+from giga_train import ModuleDict, Trainer, build_optimizer
 
 
 _ACTION_HEAD_PARAMETER_PREFIXES = (
@@ -267,8 +267,19 @@ class CasualWATrainerMoT(Trainer):
         )
         self.memory_tbptt_steps = int(model_config.get("memory_tbptt_steps", 8))
         self.memory_persistent = bool(model_config.get("memory_persistent", True))
+        self.action_head_learning_rate = model_config.get(
+            "action_head_learning_rate", None
+        )
+        self.memory_learning_rate = model_config.get("memory_learning_rate", None)
+        self.memory_current_image_dropout_prob = float(
+            model_config.get("memory_current_image_dropout_prob", 0.0)
+        )
         if self.memory_tbptt_steps < 1:
             raise ValueError("memory_tbptt_steps must be at least 1")
+        if not 0.0 <= self.memory_current_image_dropout_prob <= 1.0:
+            raise ValueError(
+                "memory_current_image_dropout_prob must be in [0, 1]"
+            )
         if self.train_memory_only and self.train_action_head_only:
             raise ValueError(
                 "train_memory_only and train_action_head_only are mutually exclusive"
@@ -445,6 +456,15 @@ class CasualWATrainerMoT(Trainer):
                 "Action-head-only training enabled: "
                 f"{len(trainable_names)} tensors, {trainable_count:,}/{total_count:,} parameters trainable"
             )
+        if self.memory_current_image_dropout_prob > 0.0:
+            if not self.memory_sequence_training or not self.memory_persistent:
+                raise ValueError(
+                    "Memory current-image dropout requires persistent sequence training"
+                )
+            print(
+                "Memory forcing enabled on the supervised tail: "
+                f"current_image_dropout_prob={self.memory_current_image_dropout_prob:.3f}"
+            )
         if model_config.get("enable_gradient_checkpointing", True):
             transformer.enable_gradient_checkpointing()
 
@@ -455,6 +475,57 @@ class CasualWATrainerMoT(Trainer):
         model = ModuleDict(model)
         model.train()
         return model
+
+    def get_optimizers(self, optimizers):
+        """Build separate outer-LR groups for joint action-and-memory tuning."""
+        if not self.train_action_head_only:
+            return super().get_optimizers(optimizers)
+        if self.action_head_learning_rate is None and self.memory_learning_rate is None:
+            return super().get_optimizers(optimizers)
+        if not isinstance(optimizers, dict):
+            raise TypeError(
+                "Joint action/memory learning-rate groups require one optimizer config"
+            )
+
+        transformer = self.model["transformer"]
+        action_parameters = []
+        memory_parameters = []
+        for name, parameter in transformer.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            if name.startswith("memory_layers."):
+                memory_parameters.append(parameter)
+            else:
+                action_parameters.append(parameter)
+        if not action_parameters or not memory_parameters:
+            raise RuntimeError(
+                "Joint action/memory tuning requires non-empty action and memory groups"
+            )
+
+        optimizer_config = dict(optimizers)
+        default_lr = float(optimizer_config["lr"])
+        action_lr = float(
+            default_lr
+            if self.action_head_learning_rate is None
+            else self.action_head_learning_rate
+        )
+        memory_lr = float(
+            default_lr
+            if self.memory_learning_rate is None
+            else self.memory_learning_rate
+        )
+        if action_lr <= 0.0 or memory_lr <= 0.0:
+            raise ValueError("Action-head and memory learning rates must be positive")
+        parameter_groups = [
+            {"params": action_parameters, "lr": action_lr, "group_name": "action_head"},
+            {"params": memory_parameters, "lr": memory_lr, "group_name": "memory"},
+        ]
+        print(
+            "Joint optimizer groups: "
+            f"action={len(action_parameters)} tensors lr={action_lr:.3g}, "
+            f"memory={len(memory_parameters)} tensors lr={memory_lr:.3g}"
+        )
+        return [build_optimizer(optimizer_config, params=parameter_groups)]
 
     def forward_step(self, batch_dict):
         if self.memory_sequence_training:
@@ -750,6 +821,8 @@ class CasualWATrainerMoT(Trainer):
         start: int,
         stop: int,
         memory_state,
+        *,
+        apply_memory_forcing: bool,
     ):
         transformer = functools.partial(self.model, "transformer")
         images = batch_dict["images"][:, start:stop]
@@ -759,6 +832,18 @@ class CasualWATrainerMoT(Trainer):
         embodiment_id = batch_dict["embodiment_id"][:, start:stop]
         context_valid = batch_dict["memory_context_valid"][:, start:stop].bool()
         batch_size, segment_length = action.shape[:2]
+        if apply_memory_forcing and self.memory_current_image_dropout_prob > 0.0:
+            drop_current_image = (
+                torch.rand(
+                    batch_size,
+                    segment_length,
+                    device=images.device,
+                )
+                < self.memory_current_image_dropout_prob
+            ) & context_valid.to(device=images.device)
+            if drop_current_image.any():
+                images = images.clone()
+                images[drop_current_image] = 0.0
         flat_batch = batch_size * segment_length
 
         images = images.flatten(0, 1)
@@ -849,7 +934,11 @@ class CasualWATrainerMoT(Trainer):
             stop = min(start + self.memory_tbptt_steps, supervised_start)
             with torch.no_grad():
                 _, memory_state = self._forward_memory_segment(
-                    batch_dict, start, stop, memory_state
+                    batch_dict,
+                    start,
+                    stop,
+                    memory_state,
+                    apply_memory_forcing=False,
                 )
             memory_state = self._detach_memory_state(memory_state)
         action_loss, _ = self._forward_memory_segment(
@@ -857,6 +946,7 @@ class CasualWATrainerMoT(Trainer):
             supervised_start,
             context_length,
             memory_state,
+            apply_memory_forcing=True,
         )
         zero = action_loss.new_zeros(())
         return {

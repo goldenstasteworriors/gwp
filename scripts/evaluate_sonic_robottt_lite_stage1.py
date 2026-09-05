@@ -55,6 +55,7 @@ PHYSICAL_ACTION_DIM = 13
 MODEL_ACTION_DIM = 32
 ACTION_HORIZON = 48
 REPLAN_STRIDE = 8
+EXECUTED_ACTION_STEPS = REPLAN_STRIDE
 ACTION_FLOW_SHIFT = 5.0
 VIEW_KEY = "observation.images.ego_view"
 DELTA_MASK = (True,) * 7 + (False,) * 6
@@ -309,6 +310,8 @@ def current_metrics(
     hand_mask[:, :7] = False
     first_mask = base_mask.clone()
     first_mask[1:] = False
+    executed_prefix_mask = base_mask.clone()
+    executed_prefix_mask[EXECUTED_ACTION_STEPS:] = False
     predicted_clean = noisy_action.float() - sigma.float() * prediction
     clean_error = (predicted_clean - clean_action.float()).square()
     return {
@@ -316,7 +319,11 @@ def current_metrics(
         "flow_mse_arm": masked_mean(error, arm_mask),
         "flow_mse_hand": masked_mean(error, hand_mask),
         "flow_mse_first_action": masked_mean(error, first_mask),
+        "flow_mse_executed_prefix": masked_mean(error, executed_prefix_mask),
         "denoised_action_mse": masked_mean(clean_error, base_mask),
+        "denoised_action_mse_executed_prefix": masked_mean(
+            clean_error, executed_prefix_mask
+        ),
     }
 
 
@@ -501,7 +508,9 @@ def metric_summary(records: list[dict], mode: str) -> dict:
         "flow_mse_arm",
         "flow_mse_hand",
         "flow_mse_first_action",
+        "flow_mse_executed_prefix",
         "denoised_action_mse",
+        "denoised_action_mse_executed_prefix",
     )
     summary = {"samples": len(mode_records)}
     for metric in metric_names:
@@ -681,6 +690,37 @@ def main() -> None:
             ) if len(paired_array) > 1 else 0.0,
             "positive_means_memory_helped": True,
         }
+        native_prefix = summary["native"]["flow_mse_executed_prefix"]
+        reset_prefix = summary["forced_reset"]["flow_mse_executed_prefix"]
+        paired_prefix = []
+        for row in records:
+            if row["mode"] != "forced_reset":
+                continue
+            key = (row["episode"], row["frame"])
+            paired_prefix.append(
+                row["flow_mse_executed_prefix"]
+                - native_rows[key]["flow_mse_executed_prefix"]
+            )
+        paired_prefix_array = np.asarray(paired_prefix, dtype=np.float64)
+        paired_memory.update(
+            {
+                "reset_minus_native_executed_prefix_flow_mse": float(
+                    reset_prefix - native_prefix
+                ),
+                "relative_native_executed_prefix_improvement_percent": float(
+                    (reset_prefix - native_prefix) / max(reset_prefix, 1e-12) * 100.0
+                ),
+                "paired_executed_prefix_sample_mean": float(
+                    paired_prefix_array.mean()
+                ),
+                "paired_executed_prefix_sample_sem": float(
+                    paired_prefix_array.std(ddof=1)
+                    / math.sqrt(len(paired_prefix_array))
+                )
+                if len(paired_prefix_array) > 1
+                else 0.0,
+            }
+        )
 
     result = {
         "benchmark": "sonic_robottt_lite_stage1_teacher_forced_flow_matching",
@@ -705,6 +745,7 @@ def main() -> None:
             "arm_dimensions": [0, 7],
             "hand_dimensions": [7, 13],
             "action_horizon": ACTION_HORIZON,
+            "executed_action_prefix": EXECUTED_ACTION_STEPS,
             "note": "Teacher-forced offline metric; not a closed-loop success rate.",
         },
         "load_report": load_report,

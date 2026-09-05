@@ -338,6 +338,19 @@ config = dict(
         memory_sequence_training=memory_context_length > 0,
         memory_tbptt_steps=int(_env("GWP_MEMORY_TBPTT_STEPS", "8")),
         memory_persistent=_env("GWP_MEMORY_PERSISTENT", "1") == "1",
+        action_head_learning_rate=(
+            None
+            if _env("GWP_ACTION_HEAD_LEARNING_RATE") is None
+            else float(_env("GWP_ACTION_HEAD_LEARNING_RATE"))
+        ),
+        memory_learning_rate=(
+            None
+            if _env("GWP_MEMORY_LEARNING_RATE") is None
+            else float(_env("GWP_MEMORY_LEARNING_RATE"))
+        ),
+        memory_current_image_dropout_prob=float(
+            _env("GWP_MEMORY_CURRENT_IMAGE_DROPOUT_PROB", "0")
+        ),
         checkpoint_export_mode=_env("GWP_CHECKPOINT_EXPORT_MODE", "auto"),
         checkpoint_export_dtype=_env(
             "GWP_CHECKPOINT_EXPORT_DTYPE", "preserve"
@@ -345,7 +358,11 @@ config = dict(
         enable_gradient_checkpointing=_env("GWP_MODEL_GRADIENT_CHECKPOINTING", "0") == "1",
         skip_action_expert=False,
     ),
-    optimizers=dict(type="CAME8Bit", lr=6e-5, weight_decay=1e-2),
+    optimizers=dict(
+        type="CAME8Bit",
+        lr=float(_env("GWP_LEARNING_RATE", "6e-5")),
+        weight_decay=1e-2,
+    ),
     schedulers=dict(type="ConstantScheduler"),
     train=dict(
         resume=False,
