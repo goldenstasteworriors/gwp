@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--samples-per-episode", type=int, default=24)
-    parser.add_argument("--stream-batch-size", type=int, default=8)
+    parser.add_argument("--stream-batch-size", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260905)
     parser.add_argument("--native-only", action="store_true")
     parser.add_argument("--verify-batch-equivalence", action="store_true")
@@ -534,9 +534,12 @@ def main() -> None:
     ):
         if not path.exists():
             raise FileNotFoundError(path)
-    if args.samples_per_episode < 0 or args.stream_batch_size < 1:
+    if args.samples_per_episode < 0:
+        raise ValueError("samples-per-episode must be non-negative")
+    if args.stream_batch_size != 1:
         raise ValueError(
-            "samples-per-episode must be non-negative and stream-batch-size positive"
+            "Only stream-batch-size=1 is currently valid: the action forward "
+            "path is not numerically batch-equivalent across distinct replans"
         )
     if args.device.startswith("cuda"):
         torch.cuda.set_device(args.device)
