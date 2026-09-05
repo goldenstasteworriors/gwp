@@ -358,21 +358,34 @@ def evaluate_stream_segment(
     context_valid = transformed["memory_context_valid"].to(device=device).bool()
     action_time_mask = transformed["action_time_mask"].to(device=device).bool()
     action_dim_mask = transformed["action_dim_mask"].to(device=device).bool()
-    corruptions = [
-        action_corruption(
-            action[index : index + 1],
+    if len(anchor_frames) == 1:
+        # Preserve the validated deployment-equivalent singleton path exactly.
+        # Some current accelerator kernels are batch-size sensitive, so even a
+        # logically equivalent concatenate-on-one path is deliberately avoided.
+        noisy_action, action_target, action_timestep, action_sigma = action_corruption(
+            action,
             episode=episode,
-            anchor_frame=frame,
+            anchor_frame=anchor_frames[0],
             context_length=1,
             base_seed=base_seed,
             device=device,
         )
-        for index, frame in enumerate(anchor_frames)
-    ]
-    noisy_action, action_target, action_timestep, action_sigma = (
-        torch.cat([values[index] for values in corruptions], dim=0)
-        for index in range(4)
-    )
+    else:
+        corruptions = [
+            action_corruption(
+                action[index : index + 1],
+                episode=episode,
+                anchor_frame=frame,
+                context_length=1,
+                base_seed=base_seed,
+                device=device,
+            )
+            for index, frame in enumerate(anchor_frames)
+        ]
+        noisy_action, action_target, action_timestep, action_sigma = tuple(
+            torch.cat([values[index] for values in corruptions], dim=0)
+            for index in range(4)
+        )
     ref_latents = encode_images(vae, images, latent_mean, latent_std).to(torch.bfloat16)
     sequence_length = len(anchor_frames)
     if action.shape[0] != sequence_length or len(measure_mask) != sequence_length:
@@ -589,7 +602,11 @@ def main() -> None:
                     if image.ndim == 3:
                         raw[VIEW_KEY] = image.unsqueeze(0)
                     transformed_steps.append(transform(raw))
-                transformed = stack_stream_steps(transformed_steps)
+                transformed = (
+                    transformed_steps[0]
+                    if len(transformed_steps) == 1
+                    else stack_stream_steps(transformed_steps)
+                )
                 memory_state, segment_results = evaluate_stream_segment(
                     model,
                     vae,
