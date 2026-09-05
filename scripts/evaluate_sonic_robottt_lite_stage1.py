@@ -424,7 +424,9 @@ def evaluate_stream_segment(
             memory_persistent=persistent,
             return_memory_state=True,
         )
-        return prediction[0], next_state
+        # Keep the flattened stream-step batch axis.  The caller indexes one
+        # [action_horizon, action_dim] prediction per replan below.
+        return prediction, next_state
 
     native_prediction, next_memory_state = forward_one(
         memory_state, native_persistent
