@@ -251,6 +251,9 @@ config = dict(
     models=dict(
         pretrained=wan_pretrained,
         transformer_pretrained=transformer_pretrained,
+        transformer_overlay_pretrained=_env(
+            "GWP05_TRANSFORMER_OVERLAY_PRETRAINED"
+        ),
         # The released checkpoint has 16-D action projectors. SONIC uses a
         # 30-D action padded to 32-D, so load shared weights and slice-copy the
         # pretrained projector weights into expanded 32-D projectors.

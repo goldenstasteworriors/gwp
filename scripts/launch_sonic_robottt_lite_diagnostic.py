@@ -157,6 +157,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--overlay-checkpoint", type=Path)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--max-steps", type=int, default=2000)
     parser.add_argument("--checkpoint-interval", type=int, default=500)
@@ -195,13 +196,15 @@ def validate(args: argparse.Namespace) -> None:
         raise ValueError("checkpoint-total-limit must be positive")
     if args.run_suffix and not re.fullmatch(r"[A-Za-z0-9_-]+", args.run_suffix):
         raise ValueError("run suffix contains unsupported characters")
-    required = (
+    required = [
         args.dataset,
         args.checkpoint,
         args.dataset / NORM_STATS_NAME,
         RUNTIME_ROOT / ".venv-ppu" / "bin" / "python",
         RUNTIME_ROOT / "weights" / "Wan2.2-TI2V-5B-Diffusers",
-    )
+    ]
+    if args.overlay_checkpoint is not None:
+        required.append(args.overlay_checkpoint)
     for path in required:
         if not path.exists():
             raise FileNotFoundError(path)
@@ -227,6 +230,11 @@ def experiment_record(args: argparse.Namespace, spec: RunSpec) -> dict[str, obje
         "dataset": str(args.dataset),
         "norm_stats": str(args.dataset / NORM_STATS_NAME),
         "transformer_pretrained": str(args.checkpoint),
+        "transformer_overlay_pretrained": (
+            None
+            if args.overlay_checkpoint is None
+            else str(args.overlay_checkpoint)
+        ),
         "output_dir": str(args.output_root / name),
         "context_length_replans": CONTEXT_LENGTH,
         "context_seconds": CONTEXT_LENGTH * 8 / 50.0,
@@ -287,6 +295,11 @@ def build_environment(
             "GWP_T5_LOAD_FROM": "dir",
             "GWP_T5_EMBEDDING_DIR": str(args.dataset / "t5_embedding"),
             "GWP05_TRANSFORMER_PRETRAINED": str(args.checkpoint),
+            "GWP05_TRANSFORMER_OVERLAY_PRETRAINED": (
+                ""
+                if args.overlay_checkpoint is None
+                else str(args.overlay_checkpoint)
+            ),
             "GWP_WAN_PRETRAINED": str(
                 RUNTIME_ROOT / "weights" / "Wan2.2-TI2V-5B-Diffusers"
             ),
@@ -388,6 +401,8 @@ def main() -> None:
     args = parse_args()
     args.dataset = args.dataset.expanduser().resolve()
     args.checkpoint = args.checkpoint.expanduser().resolve()
+    if args.overlay_checkpoint is not None:
+        args.overlay_checkpoint = args.overlay_checkpoint.expanduser().resolve()
     args.output_root = args.output_root.expanduser().resolve()
     validate(args)
     plan = [experiment_record(args, spec) for spec in selected_runs(args)]

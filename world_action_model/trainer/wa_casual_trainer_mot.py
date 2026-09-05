@@ -416,6 +416,28 @@ class CasualWATrainerMoT(Trainer):
                 model_config.get("pretrained_load_min_coverage", 0.98)
             ),
         )
+        base_load_report = transformer._pretrained_load_report
+        transformer_overlay_pretrained = model_config.get(
+            "transformer_overlay_pretrained"
+        )
+        if transformer_overlay_pretrained:
+            transformer = load_pretrained_weights(
+                transformer,
+                transformer_overlay_pretrained,
+                skip_action_expert=False,
+                strict_load=False,
+                min_load_coverage=0.0,
+            )
+            overlay_load_report = transformer._pretrained_load_report
+            transformer._pretrained_load_report = {
+                "base": base_load_report,
+                "overlay": overlay_load_report,
+            }
+            print(
+                "Applied transformer overlay checkpoint: "
+                f"{transformer_overlay_pretrained} "
+                f"({overlay_load_report['loaded']} tensors)"
+            )
         transformer.to(self.device)
         if self.train_memory_only:
             transformer.requires_grad_(False)
