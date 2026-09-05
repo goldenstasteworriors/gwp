@@ -360,8 +360,8 @@ def evaluate_stream_segment(
     action_dim_mask = transformed["action_dim_mask"].to(device=device).bool()
     if len(anchor_frames) == 1:
         # Preserve the validated deployment-equivalent singleton path exactly.
-        # Some current accelerator kernels are batch-size sensitive, so even a
-        # logically equivalent concatenate-on-one path is deliberately avoided.
+        # The grouped multi-replan forward is not numerically equivalent to the
+        # singleton deployment path, so concatenate-on-one is deliberately avoided.
         noisy_action, action_target, action_timestep, action_sigma = action_corruption(
             action,
             episode=episode,
