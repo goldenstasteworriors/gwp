@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Evaluate one RoboTTT-lite stage-1 checkpoint on held-out trajectories.
 
-This benchmark measures the deterministic teacher-forced action flow-matching
-objective used during stage-1 training.  Every checkpoint sees the same anchor
-frames, image-transform seed, diffusion timestep, and action noise.  Persistent
-models are also evaluated with their fast weights forcibly reset at every
+This benchmark streams each held-out episode once at the policy replan rate and
+measures the deterministic teacher-forced action flow-matching objective at
+uniformly selected anchors.  Every checkpoint sees the same anchor frames,
+image-transform seed, diffusion timestep, and action noise.  Persistent models
+are also evaluated with their fast weights forcibly reset at every measured
 replan, producing a paired estimate of the value of temporal memory.
 """
 
@@ -68,7 +69,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--samples-per-episode", type=int, default=24)
-    parser.add_argument("--segment-length", type=int, default=8)
     parser.add_argument("--seed", type=int, default=20260905)
     parser.add_argument("--native-only", action="store_true")
     return parser.parse_args()
@@ -142,7 +142,11 @@ def build_dataset_and_transform(experiment: dict):
     dataset_root = Path(experiment["dataset"]).resolve()
     norm_stats = Path(experiment["norm_stats"]).resolve()
     episodes = [int(value) for value in experiment["evaluation_episodes"]]
-    context_length = int(experiment["context_length_replans"])
+    trained_context_length = int(experiment["context_length_replans"])
+    # Evaluation is streamed one replan at a time.  This avoids repeatedly
+    # decoding overlapping video windows and matches deployment-time state
+    # propagation; the checkpoint itself retains its trained decay half-life.
+    stream_context_length = 1
     dataset = WAMLeRobotSequenceDataset(
         data_path=str(dataset_root),
         video_backend="pyav",
@@ -155,7 +159,7 @@ def build_dataset_and_transform(experiment: dict):
         t5_cache_size=4096,
         robotype="sonic_g1",
         episodes=episodes,
-        context_length=context_length,
+        context_length=stream_context_length,
         replan_stride=REPLAN_STRIDE,
         action_horizon=ACTION_HORIZON,
         view_keys=[VIEW_KEY],
@@ -181,10 +185,10 @@ def build_dataset_and_transform(experiment: dict):
         expected_state_dim=PHYSICAL_ACTION_DIM,
         max_prompt_len=64,
         subtask_prob=0,
-        context_length=context_length,
+        context_length=stream_context_length,
         replan_stride=REPLAN_STRIDE,
     )
-    return dataset, transform, episodes, context_length
+    return dataset, transform, episodes, trained_context_length
 
 
 def select_anchors(dataset, episodes: list[int], samples_per_episode: int):
@@ -200,7 +204,8 @@ def select_anchors(dataset, episodes: list[int], samples_per_episode: int):
         frame = int(frame_column[row_index])
         candidates[episode].append((sequence_index, frame))
 
-    selected = []
+    all_anchors = []
+    selected_keys = set()
     coverage = {}
     for episode in episodes:
         values = candidates[episode]
@@ -210,14 +215,15 @@ def select_anchors(dataset, episodes: list[int], samples_per_episode: int):
         positions = np.linspace(0, len(values) - 1, num=count, dtype=np.int64)
         positions = np.unique(positions)
         chosen = [values[int(position)] for position in positions]
-        selected.extend((episode, frame, index) for index, frame in chosen)
+        all_anchors.extend((episode, frame, index) for index, frame in values)
+        selected_keys.update((episode, frame) for _, frame in chosen)
         coverage[str(episode)] = {
             "available_anchors": len(values),
             "selected_anchors": len(chosen),
             "first_frame": chosen[0][1],
             "last_frame": chosen[-1][1],
         }
-    return selected, coverage
+    return all_anchors, selected_keys, coverage
 
 
 def stable_seed(base_seed: int, episode: int, frame: int, salt: int = 0) -> int:
@@ -313,22 +319,22 @@ def current_metrics(
 
 
 @torch.no_grad()
-def evaluate_modes(
+def evaluate_stream_step(
     model,
     vae,
     transformed: dict,
     *,
     episode: int,
     anchor_frame: int,
-    context_length: int,
-    segment_length: int,
+    memory_state,
     native_persistent: bool,
+    measure: bool,
     include_reset: bool,
     base_seed: int,
     latent_mean: torch.Tensor,
     latent_std: torch.Tensor,
     device: str,
-) -> dict[str, dict[str, float]]:
+) -> tuple[dict, dict[str, dict[str, float]]]:
     images = transformed["images"].to(device=device)
     action = transformed["action"].to(device=device)
     state = transformed["state"].to(device=device, dtype=torch.bfloat16)
@@ -341,80 +347,76 @@ def evaluate_modes(
         action,
         episode=episode,
         anchor_frame=anchor_frame,
-        context_length=context_length,
+        context_length=1,
         base_seed=base_seed,
         device=device,
     )
+    ref_latents = encode_images(vae, images, latent_mean, latent_std).to(torch.bfloat16)
+    num_state_tokens = state.shape[1]
+    num_action_tokens = action.shape[1]
+    patch_t, patch_h, patch_w = model.config.patch_size
+    num_ref_tokens = (
+        ref_latents.shape[2] // patch_t
+        * (ref_latents.shape[3] // patch_h)
+        * (ref_latents.shape[4] // patch_w)
+    )
+    timestep = torch.zeros(
+        1,
+        num_state_tokens + num_ref_tokens + num_action_tokens,
+        device=device,
+        dtype=ref_latents.dtype,
+    )
+    timestep[:, num_state_tokens + num_ref_tokens :] = action_timestep[:, None]
 
-    encoded_segments = []
-    for start in range(0, context_length, segment_length):
-        stop = min(start + segment_length, context_length)
-        encoded_segments.append(
-            (
-                start,
-                stop,
-                encode_images(
-                    vae, images[start:stop], latent_mean, latent_std
-                ).to(torch.bfloat16),
-            )
+    def forward_one(state_value, persistent: bool):
+        # The existing deployment fast path does not yet expose recurrent
+        # memory state.  Call the sequence-capable action-only path directly
+        # while retaining eval mode and no-grad semantics.
+        _, prediction, next_state = model._forward_train_action_only_no_video(
+            ref_latents=ref_latents,
+            timestep=timestep,
+            encoder_hidden_states=prompt,
+            return_dict=False,
+            action=noisy_action,
+            state=state,
+            embodiment_id=embodiment,
+            memory_sequence_length=1,
+            memory_state=state_value,
+            memory_update_mask=context_valid[None],
+            memory_persistent=persistent,
+            return_memory_state=True,
         )
+        return prediction[0], next_state
 
-    modes = {"native": native_persistent}
+    native_prediction, next_memory_state = forward_one(
+        memory_state, native_persistent
+    )
+    if not measure:
+        return next_memory_state, {}
+
+    results = {
+        "native": current_metrics(
+            native_prediction,
+            action_target[0],
+            noisy_action[0],
+            action[0],
+            action_sigma[0],
+            action_time_mask[0],
+            action_dim_mask[0],
+        )
+    }
     if include_reset and native_persistent:
-        modes["forced_reset"] = False
-    results = {}
-    for mode_name, persistent in modes.items():
-        memory_state = None
-        final_prediction = None
-        for start, stop, ref_latents in encoded_segments:
-            count = stop - start
-            num_state_tokens = state[start:stop].shape[1]
-            num_action_tokens = action[start:stop].shape[1]
-            patch_t, patch_h, patch_w = model.config.patch_size
-            num_ref_tokens = (
-                ref_latents.shape[2] // patch_t
-                * (ref_latents.shape[3] // patch_h)
-                * (ref_latents.shape[4] // patch_w)
-            )
-            timestep = torch.zeros(
-                count,
-                num_state_tokens + num_ref_tokens + num_action_tokens,
-                device=device,
-                dtype=ref_latents.dtype,
-            )
-            timestep[
-                :, num_state_tokens + num_ref_tokens :
-            ] = action_timestep[start:stop, None]
-            # The existing deployment fast path does not yet expose recurrent
-            # memory state.  Call the sequence-capable action-only path
-            # directly while retaining eval mode and no-grad semantics.
-            _, prediction, memory_state = model._forward_train_action_only_no_video(
-                ref_latents=ref_latents,
-                timestep=timestep,
-                encoder_hidden_states=prompt[start:stop],
-                return_dict=False,
-                action=noisy_action[start:stop],
-                state=state[start:stop],
-                embodiment_id=embodiment[start:stop],
-                memory_sequence_length=count,
-                memory_state=memory_state,
-                memory_update_mask=context_valid[start:stop][None],
-                memory_persistent=persistent,
-                return_memory_state=True,
-            )
-            final_prediction = prediction[-1]
-        if final_prediction is None:
-            raise RuntimeError("No action prediction was produced")
-        results[mode_name] = current_metrics(
-            final_prediction,
-            action_target[-1],
-            noisy_action[-1],
-            action[-1],
-            action_sigma[-1],
-            action_time_mask[-1],
-            action_dim_mask[-1],
+        reset_prediction, _ = forward_one(None, False)
+        results["forced_reset"] = current_metrics(
+            reset_prediction,
+            action_target[0],
+            noisy_action[0],
+            action[0],
+            action_sigma[0],
+            action_time_mask[0],
+            action_dim_mask[0],
         )
-    return results
+    return next_memory_state, results
 
 
 def metric_summary(records: list[dict], mode: str) -> dict:
@@ -456,14 +458,18 @@ def main() -> None:
     ):
         if not path.exists():
             raise FileNotFoundError(path)
-    if args.samples_per_episode < 0 or args.segment_length < 1:
-        raise ValueError("samples-per-episode must be non-negative and segment-length positive")
+    if args.samples_per_episode < 0:
+        raise ValueError("samples-per-episode must be non-negative")
     if args.device.startswith("cuda"):
         torch.cuda.set_device(args.device)
 
     experiment = read_json(args.experiment)
-    dataset, transform, episodes, context_length = build_dataset_and_transform(experiment)
-    anchors, coverage = select_anchors(dataset, episodes, args.samples_per_episode)
+    dataset, transform, episodes, trained_context_length = build_dataset_and_transform(
+        experiment
+    )
+    all_anchors, selected_keys, coverage = select_anchors(
+        dataset, episodes, args.samples_per_episode
+    )
     model, load_report = load_model(args.checkpoint, args.base_checkpoint, args.device)
     vae = AutoencoderKLWan.from_pretrained(args.base_model, subfolder="vae")
     vae.requires_grad_(False)
@@ -479,35 +485,49 @@ def main() -> None:
     native_persistent = bool(experiment["memory_persistent"])
     records = []
     started = time.perf_counter()
+    memory_state = None
+    current_episode = None
+    processed = 0
+    selected_total = len(selected_keys)
     try:
-        for sample_number, (episode, frame, sequence_index) in enumerate(anchors, 1):
+        for episode, frame, sequence_index in all_anchors:
+            selected = (episode, frame) in selected_keys
+            # A reset-only model has no state to warm between measured anchors.
+            if not native_persistent and not selected:
+                continue
+            if episode != current_episode:
+                memory_state = None
+                current_episode = episode
             sample_seed = stable_seed(args.seed, episode, frame, salt=1)
             random.seed(sample_seed)
             np.random.seed(sample_seed % (2**32 - 1))
             torch.manual_seed(sample_seed)
             transformed = transform(dataset._get_data(sequence_index))
-            mode_results = evaluate_modes(
+            memory_state, mode_results = evaluate_stream_step(
                 model,
                 vae,
                 transformed,
                 episode=episode,
                 anchor_frame=frame,
-                context_length=context_length,
-                segment_length=args.segment_length,
+                memory_state=memory_state,
                 native_persistent=native_persistent,
+                measure=selected,
                 include_reset=not args.native_only,
                 base_seed=args.seed,
                 latent_mean=latent_mean,
                 latent_std=latent_std,
                 device=args.device,
             )
+            if not selected:
+                continue
+            processed += 1
             for mode, metrics in mode_results.items():
                 records.append(
                     {"episode": episode, "frame": frame, "mode": mode, **metrics}
                 )
             native_loss = mode_results["native"]["flow_mse"]
             message = (
-                f"[{sample_number}/{len(anchors)}] episode={episode} frame={frame} "
+                f"[{processed}/{selected_total}] episode={episode} frame={frame} "
                 f"native_flow_mse={native_loss:.8f}"
             )
             if "forced_reset" in mode_results:
@@ -555,14 +575,14 @@ def main() -> None:
         "dataset": experiment["dataset"],
         "norm_stats": experiment["norm_stats"],
         "episodes": episodes,
-        "context_length_replans": context_length,
+        "trained_context_length_replans": trained_context_length,
         "context_seconds": experiment["context_seconds"],
+        "evaluation_stream": "full held-out episode at stride-8 replans",
         "native_persistent": native_persistent,
         "samples_per_episode_requested": args.samples_per_episode,
-        "selected_samples": len(anchors),
+        "selected_samples": selected_total,
         "anchor_coverage": coverage,
         "seed": args.seed,
-        "segment_length": args.segment_length,
         "metric_scope": {
             "primary": "normalized action flow-field MSE at the current replan",
             "arm_dimensions": [0, 7],
