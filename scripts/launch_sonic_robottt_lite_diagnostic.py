@@ -12,7 +12,9 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from launch_sonic_robottt_lite_stage1 import (
     ACTION_DELTA_MASK,
@@ -95,7 +97,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_name(spec: RunSpec, suffix: str) -> str:
-    value = f"{time.strftime('%Y%m%d')}_{spec.name}_stageA_gpu{spec.gpu_id}"
+    training_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+    value = f"{training_date}_{spec.name}_stageA_gpu{spec.gpu_id}"
     return f"{value}_{suffix}" if suffix else value
 
 
