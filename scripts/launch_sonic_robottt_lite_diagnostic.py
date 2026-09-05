@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch the four-way SONIC RoboTTT-lite memory-activation diagnostic."""
+"""Launch a profiled SONIC RoboTTT-lite memory-activation diagnostic."""
 
 from __future__ import annotations
 
@@ -36,16 +36,20 @@ class RunSpec:
     persistent: bool
     memory_only: bool
     current_image_dropout_prob: float
+    memory_gate_init: float
+    memory_inner_lr: float
     description: str
 
 
-RUNS = (
+STAGE_A_RUNS = (
     RunSpec(
         "m10_nomemory_joint_control_c32",
         0,
         False,
         False,
         0.0,
+        0.01,
+        0.01,
         "Action head plus reset-every-replan memory as a compute-matched control.",
     ),
     RunSpec(
@@ -54,6 +58,8 @@ RUNS = (
         True,
         True,
         0.0,
+        0.01,
+        0.01,
         "Persistent C32 memory-only tuning with a stronger gate and TBPTT horizon.",
     ),
     RunSpec(
@@ -62,6 +68,8 @@ RUNS = (
         True,
         False,
         0.0,
+        0.01,
+        0.01,
         "Persistent C32 joint action-head and memory tuning.",
     ),
     RunSpec(
@@ -70,13 +78,37 @@ RUNS = (
         True,
         False,
         0.15,
+        0.01,
+        0.01,
         "Joint C32 tuning with supervised-tail current-image dropout.",
+    ),
+)
+
+STAGE_B_RUNS = (
+    RunSpec(
+        "m20_memory_only_c32_gate005_inner005_imgdrop050",
+        0,
+        True,
+        True,
+        0.50,
+        0.05,
+        0.05,
+        "FP32 recurrent state with stronger memory dynamics and current-image forcing.",
+    ),
+    RunSpec(
+        "m21_joint_c32_gate005_inner005_imgdrop050",
+        1,
+        True,
+        False,
+        0.50,
+        0.05,
+        0.05,
+        "Joint action-memory tuning under the same stronger memory forcing.",
     ),
 )
 
 CONTEXT_LENGTH = 32
 TBPTT_STEPS = 16
-MEMORY_GATE_INIT = 0.01
 MEMORY_OUTER_LR = 6e-5
 ACTION_HEAD_LR = 5e-6
 
@@ -91,14 +123,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-total-limit", type=int, default=2)
     parser.add_argument("--min-free-gib", type=float, default=100.0)
     parser.add_argument("--startup-wait-seconds", type=float, default=60.0)
+    parser.add_argument("--profile", choices=("stageA", "stageB"), default="stageA")
     parser.add_argument("--run-suffix", default="")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
-def run_name(spec: RunSpec, suffix: str) -> str:
+def selected_runs(args: argparse.Namespace) -> tuple[RunSpec, ...]:
+    return STAGE_A_RUNS if args.profile == "stageA" else STAGE_B_RUNS
+
+
+def run_name(spec: RunSpec, suffix: str, profile: str) -> str:
     training_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
-    value = f"{training_date}_{spec.name}_stageA_gpu{spec.gpu_id}"
+    value = f"{training_date}_{spec.name}_{profile}_gpu{spec.gpu_id}"
     return f"{value}_{suffix}" if suffix else value
 
 
@@ -120,8 +157,8 @@ def validate(args: argparse.Namespace) -> None:
         if not path.exists():
             raise FileNotFoundError(path)
     validate_dataset(args.dataset)
-    for spec in RUNS:
-        output_dir = args.output_root / run_name(spec, args.run_suffix)
+    for spec in selected_runs(args):
+        output_dir = args.output_root / run_name(spec, args.run_suffix, args.profile)
         if output_dir.exists():
             raise FileExistsError(f"Refusing to reuse output directory: {output_dir}")
     free_gib = shutil.disk_usage(args.output_root.parent).free / (1024**3)
@@ -132,10 +169,10 @@ def validate(args: argparse.Namespace) -> None:
 
 
 def experiment_record(args: argparse.Namespace, spec: RunSpec) -> dict[str, object]:
-    name = run_name(spec, args.run_suffix)
+    name = run_name(spec, args.run_suffix, args.profile)
     return {
         "name": name,
-        "stage": "stageA_memory_activation_diagnostic",
+        "stage": f"{args.profile}_memory_activation_diagnostic",
         "description": spec.description,
         "gpu_id": spec.gpu_id,
         "dataset": str(args.dataset),
@@ -149,8 +186,8 @@ def experiment_record(args: argparse.Namespace, spec: RunSpec) -> dict[str, obje
         "train_memory_only": spec.memory_only,
         "train_action_head_and_memory": not spec.memory_only,
         "memory_layers": [7, 15, 23, 29],
-        "memory_gate_init": MEMORY_GATE_INIT,
-        "memory_inner_lr": 0.01,
+        "memory_gate_init": spec.memory_gate_init,
+        "memory_inner_lr": spec.memory_inner_lr,
         "memory_outer_lr": MEMORY_OUTER_LR,
         "action_head_lr": None if spec.memory_only else ACTION_HEAD_LR,
         "memory_context_half_life": CONTEXT_LENGTH,
@@ -211,8 +248,8 @@ def build_environment(
             "GWP_MEMORY_LAYER_INDICES": "7,15,23,29",
             "GWP_MEMORY_DIM": "256",
             "GWP_MEMORY_HIDDEN_DIM": "256",
-            "GWP_MEMORY_INNER_LR": "0.01",
-            "GWP_MEMORY_GATE_INIT": str(MEMORY_GATE_INIT),
+            "GWP_MEMORY_INNER_LR": str(spec.memory_inner_lr),
+            "GWP_MEMORY_GATE_INIT": str(spec.memory_gate_init),
             "GWP_MEMORY_TBPTT_STEPS": str(TBPTT_STEPS),
             "GWP_MEMORY_PERSISTENT": "1" if spec.persistent else "0",
             "GWP_TRAIN_MEMORY_ONLY": "1" if spec.memory_only else "0",
@@ -246,6 +283,7 @@ def build_environment(
             "GWP_DEEPSPEED_CONFIG": "accelerate_configs/zero2.json",
             "GWP_LOG_INTERVAL": "1",
             "HF_DATASETS_CACHE": str(RUNTIME_ROOT / ".cache" / "huggingface"),
+            "TMPDIR": str(output_dir / "work_tmp"),
         }
     )
     return env
@@ -255,6 +293,7 @@ def start_run(args: argparse.Namespace, spec: RunSpec) -> dict[str, object]:
     record = experiment_record(args, spec)
     output_dir = Path(record["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=False)
+    (output_dir / "work_tmp").mkdir()
     record["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     write_json(output_dir / "experiment.json", record)
     env = build_environment(args, spec, output_dir, str(record["name"]))
@@ -263,7 +302,7 @@ def start_run(args: argparse.Namespace, spec: RunSpec) -> dict[str, object]:
         {
             key: env[key]
             for key in sorted(env)
-            if key.startswith(("GWP_", "GWP05_", "WANDB_"))
+            if key.startswith(("GWP_", "GWP05_", "WANDB_")) or key == "TMPDIR"
         },
     )
     log_handle = (output_dir / "launcher.log").open("a", encoding="utf-8")
@@ -291,7 +330,7 @@ def main() -> None:
     args.checkpoint = args.checkpoint.expanduser().resolve()
     args.output_root = args.output_root.expanduser().resolve()
     validate(args)
-    plan = [experiment_record(args, spec) for spec in RUNS]
+    plan = [experiment_record(args, spec) for spec in selected_runs(args)]
     if args.dry_run:
         print(json.dumps(plan, indent=2, ensure_ascii=False))
         return
@@ -299,7 +338,7 @@ def main() -> None:
     args.output_root.mkdir(parents=True, exist_ok=True)
     started = []
     try:
-        for spec in RUNS:
+        for spec in selected_runs(args):
             started.append(start_run(args, spec))
         time.sleep(args.startup_wait_seconds)
         failures = [
