@@ -220,6 +220,11 @@ def build_environment(
     env = dict(os.environ)
     configure_ppu_environment(env)
     mask = ",".join("true" if value else "false" for value in ACTION_DELTA_MASK)
+    runtime_tmp = (
+        args.output_root.parent
+        / ".robottt_runtime"
+        / f"{args.profile}_g{spec.gpu_id}"
+    )
     env.update(
         {
             "PYTHONUNBUFFERED": "1",
@@ -283,7 +288,9 @@ def build_environment(
             "GWP_DEEPSPEED_CONFIG": "accelerate_configs/zero2.json",
             "GWP_LOG_INTERVAL": "1",
             "HF_DATASETS_CACHE": str(RUNTIME_ROOT / ".cache" / "huggingface"),
-            "TMPDIR": str(output_dir / "work_tmp"),
+            # Python multiprocessing uses TMPDIR for an AF_UNIX socket.  Keep
+            # this path short while retaining it on the /workspace mount.
+            "TMPDIR": str(runtime_tmp),
         }
     )
     return env
@@ -293,10 +300,10 @@ def start_run(args: argparse.Namespace, spec: RunSpec) -> dict[str, object]:
     record = experiment_record(args, spec)
     output_dir = Path(record["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=False)
-    (output_dir / "work_tmp").mkdir()
     record["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     write_json(output_dir / "experiment.json", record)
     env = build_environment(args, spec, output_dir, str(record["name"]))
+    Path(env["TMPDIR"]).mkdir(parents=True, exist_ok=True)
     write_json(
         output_dir / "launch_environment.json",
         {
