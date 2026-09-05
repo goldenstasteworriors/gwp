@@ -80,11 +80,14 @@ class TTTKVBMemoryLayer(nn.Module):
         nn.init.xavier_uniform_(self.output_proj.weight, gain=0.1)
 
     def initial_state(self, batch_size: int) -> tuple[torch.Tensor, ...]:
+        # Fast-weight deltas are much smaller than one BF16 ULP at the default
+        # inner learning rate.  Keep recurrent state in FP32 so updates can
+        # accumulate across replans instead of being rounded away every step.
         return (
-            self.fast_w1_init.unsqueeze(0).expand(batch_size, -1, -1),
-            self.fast_b1_init.unsqueeze(0).expand(batch_size, -1),
-            self.fast_w2_init.unsqueeze(0).expand(batch_size, -1, -1),
-            self.fast_b2_init.unsqueeze(0).expand(batch_size, -1),
+            self.fast_w1_init.float().unsqueeze(0).expand(batch_size, -1, -1),
+            self.fast_b1_init.float().unsqueeze(0).expand(batch_size, -1),
+            self.fast_w2_init.float().unsqueeze(0).expand(batch_size, -1, -1),
+            self.fast_b2_init.float().unsqueeze(0).expand(batch_size, -1),
         )
 
     @staticmethod
@@ -185,13 +188,11 @@ class TTTKVBMemoryLayer(nn.Module):
                 )
                 for new_value, old_value in zip(candidate, state)
             )
-        new_state = tuple(
-            value.to(dtype=parameter.dtype)
-            for value, parameter in zip(
-                candidate,
-                (self.fast_w1_init, self.fast_b1_init, self.fast_w2_init, self.fast_b2_init),
-            )
-        )
+        # Do not cast recurrent fast weights back to the model-parameter dtype.
+        # In BF16 this made persistent and forced-reset inference identical for
+        # the joint Stage-A runs because each analytic update was quantized to
+        # zero before the next replan.
+        new_state = tuple(value.float() for value in candidate)
 
         new_w1, new_b1, new_w2, new_b2 = (value.float() for value in new_state)
         query_hidden = F.silu(
