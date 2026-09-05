@@ -489,8 +489,14 @@ def main() -> None:
     current_episode = None
     processed = 0
     selected_total = len(selected_keys)
+    last_selected_frame = {
+        episode: max(frame for selected_episode, frame in selected_keys if selected_episode == episode)
+        for episode in episodes
+    }
     try:
         for episode, frame, sequence_index in all_anchors:
+            if frame > last_selected_frame[episode]:
+                continue
             selected = (episode, frame) in selected_keys
             # A reset-only model has no state to warm between measured anchors.
             if not native_persistent and not selected:
