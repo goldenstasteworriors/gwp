@@ -52,6 +52,7 @@ class TTTKVBMemoryLayer(nn.Module):
         inner_lr: float = 0.05,
         gate_init: float = 0.001,
         context_half_life: int = 64,
+        history_residual_only: bool = False,
     ) -> None:
         super().__init__()
         self.norm = FP32LayerNorm(dim, 1e-6, elementwise_affine=False)
@@ -72,6 +73,7 @@ class TTTKVBMemoryLayer(nn.Module):
         )
         self.gate = nn.Parameter(torch.full((dim,), float(gate_init)))
         self.decay = float(0.5 ** (1.0 / max(int(context_half_life), 1)))
+        self.history_residual_only = bool(history_residual_only)
         nn.init.xavier_uniform_(self.fast_w1_init)
         nn.init.xavier_uniform_(self.fast_w2_init)
         nn.init.xavier_uniform_(self.query_proj.weight)
@@ -103,44 +105,25 @@ class TTTKVBMemoryLayer(nn.Module):
             for value, init in zip(state, initial)
         )
 
-    def forward_step(
+    def _adapt_state(
         self,
-        hidden_states: torch.Tensor,
-        state: tuple[torch.Tensor, ...] | None,
-        update_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
-        batch_size, token_count, _ = hidden_states.shape
-        if state is None:
-            state = self.initial_state(batch_size)
-        state = self._decay_to_initial(state)
-        w1, b1, w2, b2 = state
-
-        normalized = self.norm(hidden_states.float()).type_as(hidden_states)
-        query = F.normalize(
-            self.query_proj(normalized).float(), dim=-1, eps=1e-6
-        )
-        key = F.normalize(
-            self.key_proj(normalized).float(), dim=-1, eps=1e-6
-        )
-        value = F.normalize(
-            self.value_proj(normalized).float(), dim=-1, eps=1e-6
-        )
-        w1_f, b1_f, w2_f, b2_f = (
-            w1.float(),
-            b1.float(),
-            w2.float(),
-            b2.float(),
-        )
-        pre_activation = torch.einsum("bsd,bhd->bsh", key, w1_f) + b1_f[:, None]
+        state: tuple[torch.Tensor, ...],
+        key: torch.Tensor,
+        value: torch.Tensor,
+        update_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, ...]:
+        batch_size, token_count = key.shape[:2]
+        w1, b1, w2, b2 = (tensor.float() for tensor in state)
+        pre_activation = torch.einsum("bsd,bhd->bsh", key, w1) + b1[:, None]
         activation = F.silu(pre_activation)
-        prediction = torch.einsum("bsh,bdh->bsd", activation, w2_f) + b2_f[:, None]
+        prediction = torch.einsum("bsh,bdh->bsd", activation, w2) + b2[:, None]
 
         error_grad = 2.0 * (prediction - value) / max(
             token_count * value.shape[-1], 1
         )
         grad_w2 = torch.einsum("bsd,bsh->bdh", error_grad, activation)
         grad_b2 = error_grad.sum(dim=1)
-        grad_activation = torch.einsum("bsd,bdh->bsh", error_grad, w2_f)
+        grad_activation = torch.einsum("bsd,bdh->bsh", error_grad, w2)
         sigmoid = torch.sigmoid(pre_activation)
         silu_grad = sigmoid * (1.0 + pre_activation * (1.0 - sigmoid))
         grad_pre_activation = grad_activation * silu_grad
@@ -161,25 +144,22 @@ class TTTKVBMemoryLayer(nn.Module):
             )
             for gradient in gradients
         )
-        grad_w1, grad_b1, grad_w2, grad_b2 = gradients
 
         learning_rate = F.softplus(self.log_inner_lr.float()).clamp(
             min=1e-5, max=0.1
         )
-        candidate = (
-            w1_f - learning_rate * grad_w1,
-            b1_f - learning_rate * grad_b1,
-            w2_f - learning_rate * grad_w2,
-            b2_f - learning_rate * grad_b2,
+        candidate = tuple(
+            old.float() - learning_rate * gradient
+            for old, gradient in zip(state, gradients)
         )
         candidate = tuple(
-            torch.nan_to_num(value, nan=0.0, posinf=4.0, neginf=-4.0).clamp(
+            torch.nan_to_num(tensor, nan=0.0, posinf=4.0, neginf=-4.0).clamp(
                 -4.0, 4.0
             )
-            for value in candidate
+            for tensor in candidate
         )
         if update_mask is not None:
-            mask = update_mask.to(device=hidden_states.device, dtype=torch.bool)
+            mask = update_mask.to(device=key.device, dtype=torch.bool)
             candidate = tuple(
                 torch.where(
                     mask.reshape(batch_size, *([1] * (new_value.ndim - 1))),
@@ -188,21 +168,57 @@ class TTTKVBMemoryLayer(nn.Module):
                 )
                 for new_value, old_value in zip(candidate, state)
             )
-        # Do not cast recurrent fast weights back to the model-parameter dtype.
-        # In BF16 this made persistent and forced-reset inference identical for
-        # the joint Stage-A runs because each analytic update was quantized to
-        # zero before the next replan.
-        new_state = tuple(value.float() for value in candidate)
+        return tuple(tensor.float() for tensor in candidate)
 
-        new_w1, new_b1, new_w2, new_b2 = (value.float() for value in new_state)
+    @staticmethod
+    def _read_state(
+        query: torch.Tensor,
+        state: tuple[torch.Tensor, ...],
+    ) -> torch.Tensor:
+        w1, b1, w2, b2 = (tensor.float() for tensor in state)
         query_hidden = F.silu(
-            torch.einsum("bsd,bhd->bsh", query, new_w1) + new_b1[:, None]
+            torch.einsum("bsd,bhd->bsh", query, w1) + b1[:, None]
         )
-        memory_output = (
-            torch.einsum("bsh,bdh->bsd", query_hidden, new_w2)
-            + new_b2[:, None]
+        return torch.einsum("bsh,bdh->bsd", query_hidden, w2) + b2[:, None]
+
+    def forward_step(
+        self,
+        hidden_states: torch.Tensor,
+        state: tuple[torch.Tensor, ...] | None,
+        update_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        batch_size = hidden_states.shape[0]
+        had_history = state is not None
+        if state is None:
+            state = self.initial_state(batch_size)
+        state = self._decay_to_initial(state)
+
+        normalized = self.norm(hidden_states.float()).type_as(hidden_states)
+        query = F.normalize(
+            self.query_proj(normalized).float(), dim=-1, eps=1e-6
         )
+        key = F.normalize(
+            self.key_proj(normalized).float(), dim=-1, eps=1e-6
+        )
+        value = F.normalize(
+            self.value_proj(normalized).float(), dim=-1, eps=1e-6
+        )
+        new_state = self._adapt_state(state, key, value, update_mask)
+        memory_output = self._read_state(query, new_state)
         memory_output = F.layer_norm(memory_output, (memory_output.shape[-1],))
+        if self.history_residual_only:
+            if had_history:
+                reset_state = self.initial_state(batch_size)
+                reset_state = self._adapt_state(
+                    reset_state, key, value, update_mask
+                )
+                reset_output = self._read_state(query, reset_state)
+                reset_output = F.layer_norm(
+                    reset_output, (reset_output.shape[-1],)
+                )
+                memory_output = memory_output - reset_output
+            else:
+                memory_output = torch.zeros_like(memory_output)
         memory_output = self.output_proj(memory_output.to(hidden_states.dtype))
         gated_output = torch.tanh(self.gate).to(memory_output.dtype) * memory_output
         return hidden_states + gated_output, new_state
@@ -762,6 +778,7 @@ class CasualWorldActionTransformer_MoT(
         memory_inner_lr: float = 0.05,
         memory_gate_init: float = 0.001,
         memory_context_half_life: int = 64,
+        memory_history_residual_only: bool = False,
     ) -> None:
         super().__init__()
 
@@ -827,6 +844,7 @@ class CasualWorldActionTransformer_MoT(
                     inner_lr=memory_inner_lr,
                     gate_init=memory_gate_init,
                     context_half_life=memory_context_half_life,
+                    history_residual_only=memory_history_residual_only,
                 )
                 for index in memory_layer_indices
             }

@@ -291,6 +291,9 @@ config = dict(
                     str(max(memory_context_length, 1)),
                 )
             ),
+            memory_history_residual_only=(
+                _env("GWP_MEMORY_HISTORY_RESIDUAL_ONLY", "0") == "1"
+            ),
         ),
         visual_flow_shift=2.0,
         action_flow_shift=5.0,

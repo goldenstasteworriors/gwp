@@ -39,6 +39,7 @@ class RunSpec:
     memory_gate_init: float
     memory_inner_lr: float
     description: str
+    history_residual_only: bool = False
 
 
 STAGE_A_RUNS = (
@@ -107,6 +108,31 @@ STAGE_B_RUNS = (
     ),
 )
 
+STAGE_C_RUNS = (
+    RunSpec(
+        "m30_history_residual_memory_only_c32_gate005_inner005",
+        0,
+        True,
+        True,
+        0.0,
+        0.05,
+        0.05,
+        "Pure history-residual memory-only tuning without image dropout.",
+        True,
+    ),
+    RunSpec(
+        "m31_history_residual_memory_only_c32_gate005_inner005_imgdrop015",
+        1,
+        True,
+        True,
+        0.15,
+        0.05,
+        0.05,
+        "Pure history-residual memory-only tuning with light image dropout.",
+        True,
+    ),
+)
+
 CONTEXT_LENGTH = 32
 TBPTT_STEPS = 16
 MEMORY_OUTER_LR = 6e-5
@@ -123,14 +149,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-total-limit", type=int, default=2)
     parser.add_argument("--min-free-gib", type=float, default=100.0)
     parser.add_argument("--startup-wait-seconds", type=float, default=60.0)
-    parser.add_argument("--profile", choices=("stageA", "stageB"), default="stageA")
+    parser.add_argument(
+        "--profile", choices=("stageA", "stageB", "stageC"), default="stageA"
+    )
     parser.add_argument("--run-suffix", default="")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
 def selected_runs(args: argparse.Namespace) -> tuple[RunSpec, ...]:
-    return STAGE_A_RUNS if args.profile == "stageA" else STAGE_B_RUNS
+    return {
+        "stageA": STAGE_A_RUNS,
+        "stageB": STAGE_B_RUNS,
+        "stageC": STAGE_C_RUNS,
+    }[args.profile]
 
 
 def run_name(spec: RunSpec, suffix: str, profile: str) -> str:
@@ -193,6 +225,7 @@ def experiment_record(args: argparse.Namespace, spec: RunSpec) -> dict[str, obje
         "memory_context_half_life": CONTEXT_LENGTH,
         "tbptt_supervised_tail_steps": TBPTT_STEPS,
         "current_image_dropout_prob": spec.current_image_dropout_prob,
+        "memory_history_residual_only": spec.history_residual_only,
         "training_episode_spec": TRAIN_EPISODES,
         "evaluation_episodes": EVALUATION_EPISODES,
         "action_semantics": {
@@ -266,6 +299,9 @@ def build_environment(
             ),
             "GWP_MEMORY_CURRENT_IMAGE_DROPOUT_PROB": str(
                 spec.current_image_dropout_prob
+            ),
+            "GWP_MEMORY_HISTORY_RESIDUAL_ONLY": (
+                "1" if spec.history_residual_only else "0"
             ),
             "GWP_VISUAL_LOSS_WEIGHT": "0",
             "GWP_IMAGE_AUGMENTATION": "1",
