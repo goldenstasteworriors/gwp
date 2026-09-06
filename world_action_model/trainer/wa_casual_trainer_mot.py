@@ -488,6 +488,7 @@ class CasualWATrainerMoT(Trainer):
         transformer_pretrained = model_config.get("transformer_pretrained", os.path.join(pretrained, "transformer"))
         transformer_cfg = model_config.get("transformer")
         transformer = CasualWorldActionTransformer_MoT(**transformer_cfg)
+        self.transformer_patch_size = tuple(transformer.config.patch_size)
         transformer = load_pretrained_weights(
             transformer,
             transformer_pretrained,
@@ -969,7 +970,7 @@ class CasualWATrainerMoT(Trainer):
 
         num_state_tokens = state.shape[1]
         num_action_tokens = action.shape[1]
-        patch_t, patch_h, patch_w = self.model["transformer"].config.patch_size
+        patch_t, patch_h, patch_w = self.transformer_patch_size
         num_ref_tokens = (
             ref_latents.shape[2] // patch_t
             * (ref_latents.shape[3] // patch_h)
