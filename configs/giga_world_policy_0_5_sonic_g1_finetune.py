@@ -341,8 +341,12 @@ config = dict(
             _env("GWP_TRAIN_ACTION_HEAD_ONLY", "0") == "1"
         ),
         train_memory_only=_env("GWP_TRAIN_MEMORY_ONLY", "0") == "1",
+        trainable_profile=_env("GWP_TRAINABLE_PROFILE"),
         memory_sequence_training=memory_context_length > 0,
         memory_tbptt_steps=int(_env("GWP_MEMORY_TBPTT_STEPS", "8")),
+        memory_supervise_all_segments=(
+            _env("GWP_MEMORY_SUPERVISE_ALL_SEGMENTS", "0") == "1"
+        ),
         memory_persistent=_env("GWP_MEMORY_PERSISTENT", "1") == "1",
         action_head_learning_rate=(
             None

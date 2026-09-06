@@ -1,6 +1,7 @@
 import functools
 import json
 import os
+import re
 from pathlib import Path
 
 import torch
@@ -21,6 +22,57 @@ _ACTION_HEAD_PARAMETER_PREFIXES = (
     "action_encoder.",
     "action_decoder.",
 )
+
+_RESTRICTED_TRAINABLE_PROFILES = {
+    "memory_only",
+    "memory_action_io",
+    "memory_last4_action_blocks",
+    "action_head",
+}
+
+
+def _strip_model_parameter_prefix(name: str) -> str:
+    prefixes_to_strip = ("module.", "_orig_mod.", "transformer.")
+    stripped = name
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes_to_strip:
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix) :]
+                changed = True
+                break
+    return stripped
+
+
+def is_trainable_profile_parameter(
+    name: str,
+    profile: str,
+    *,
+    num_layers: int,
+) -> bool:
+    """Select the slow weights trained by a RoboTTT curriculum stage."""
+    stripped = _strip_model_parameter_prefix(name)
+    is_memory = stripped.startswith("memory_layers.")
+    if profile == "memory_only":
+        return is_memory
+    if profile == "action_head":
+        return is_action_head_parameter(stripped)
+
+    is_action_io = (
+        stripped == "action_scale_shift_table"
+        or stripped.startswith(_ACTION_HEAD_PARAMETER_PREFIXES)
+    )
+    if profile == "memory_action_io":
+        return is_memory or is_action_io
+    if profile == "memory_last4_action_blocks":
+        if is_memory or is_action_io:
+            return True
+        match = re.match(r"blocks\.(\d+)\.action_expert\.", stripped)
+        return bool(match and int(match.group(1)) >= max(0, num_layers - 4))
+    if profile == "all":
+        return True
+    raise ValueError(f"Unsupported trainable profile: {profile}")
 
 
 def _latent_jitter_score(jitter_score, latent_frames, device):
@@ -262,10 +314,41 @@ class CasualWATrainerMoT(Trainer):
         self.action_flow_shift = float(model_config.action_flow_shift)
         self.train_action_head_only = bool(model_config.get("train_action_head_only", False))
         self.train_memory_only = bool(model_config.get("train_memory_only", False))
+        trainable_profile = model_config.get("trainable_profile", None)
+        if trainable_profile is None:
+            if self.train_memory_only:
+                trainable_profile = "memory_only"
+            elif self.train_action_head_only:
+                trainable_profile = "action_head"
+            else:
+                trainable_profile = "all"
+        self.trainable_profile = str(trainable_profile)
+        valid_trainable_profiles = _RESTRICTED_TRAINABLE_PROFILES | {"all"}
+        if self.trainable_profile not in valid_trainable_profiles:
+            raise ValueError(
+                "trainable_profile must be one of "
+                f"{sorted(valid_trainable_profiles)}, got {self.trainable_profile!r}"
+            )
+        if self.train_memory_only and self.trainable_profile != "memory_only":
+            raise ValueError(
+                "train_memory_only is only compatible with trainable_profile=memory_only"
+            )
+        if self.train_action_head_only and self.trainable_profile not in {
+            "action_head",
+            "memory_action_io",
+            "memory_last4_action_blocks",
+        }:
+            raise ValueError(
+                "train_action_head_only is incompatible with "
+                f"trainable_profile={self.trainable_profile}"
+            )
         self.memory_sequence_training = bool(
             model_config.get("memory_sequence_training", False)
         )
         self.memory_tbptt_steps = int(model_config.get("memory_tbptt_steps", 8))
+        self.memory_supervise_all_segments = bool(
+            model_config.get("memory_supervise_all_segments", False)
+        )
         self.memory_persistent = bool(model_config.get("memory_persistent", True))
         self.action_head_learning_rate = model_config.get(
             "action_head_learning_rate", None
@@ -290,7 +373,7 @@ class CasualWATrainerMoT(Trainer):
         if checkpoint_export_mode == "auto":
             checkpoint_export_mode = (
                 "action_head_only"
-                if self.train_action_head_only or self.train_memory_only
+                if self.trainable_profile in _RESTRICTED_TRAINABLE_PROFILES
                 else "full"
             )
         valid_export_modes = {
@@ -303,9 +386,7 @@ class CasualWATrainerMoT(Trainer):
                 f"checkpoint_export_mode must be one of {sorted(valid_export_modes)}, "
                 f"got {checkpoint_export_mode!r}"
             )
-        if (
-            self.train_action_head_only or self.train_memory_only
-        ) and checkpoint_export_mode != "action_head_only":
+        if self.trainable_profile in _RESTRICTED_TRAINABLE_PROFILES and checkpoint_export_mode != "action_head_only":
             raise ValueError(
                 "action-head or memory-only training requires "
                 "checkpoint_export_mode=action_head_only"
@@ -439,34 +520,21 @@ class CasualWATrainerMoT(Trainer):
                 f"({overlay_load_report['loaded']} tensors)"
             )
         transformer.to(self.device)
-        if self.train_memory_only:
+        if self.trainable_profile in _RESTRICTED_TRAINABLE_PROFILES:
             transformer.requires_grad_(False)
             trainable_names = []
             for name, parameter in transformer.named_parameters():
-                if name.startswith("memory_layers."):
+                if is_trainable_profile_parameter(
+                    name,
+                    self.trainable_profile,
+                    num_layers=int(transformer.config.num_layers),
+                ):
                     parameter.requires_grad_(True)
                     trainable_names.append(name)
             if not trainable_names:
-                raise RuntimeError("Memory-only training found no memory parameters")
-            self.visual_loss_weight = 0.0
-            trainable_count = sum(
-                parameter.numel()
-                for parameter in transformer.parameters()
-                if parameter.requires_grad
-            )
-            print(
-                "Memory-only training enabled: "
-                f"{len(trainable_names)} tensors, {trainable_count:,} parameters trainable"
-            )
-        elif self.train_action_head_only:
-            transformer.requires_grad_(False)
-            trainable_names = []
-            for name, parameter in transformer.named_parameters():
-                if is_action_head_parameter(name):
-                    parameter.requires_grad_(True)
-                    trainable_names.append(name)
-            if not trainable_names:
-                raise RuntimeError("No action-head parameters matched the MoT model")
+                raise RuntimeError(
+                    f"Trainable profile {self.trainable_profile!r} matched no parameters"
+                )
             self.visual_loss_weight = 0.0
             trainable_count = sum(
                 parameter.numel()
@@ -475,8 +543,18 @@ class CasualWATrainerMoT(Trainer):
             )
             total_count = sum(parameter.numel() for parameter in transformer.parameters())
             print(
-                "Action-head-only training enabled: "
+                f"Trainable profile {self.trainable_profile!r} enabled: "
                 f"{len(trainable_names)} tensors, {trainable_count:,}/{total_count:,} parameters trainable"
+            )
+        if self.memory_sequence_training:
+            supervision = (
+                "all TBPTT segments"
+                if self.memory_supervise_all_segments
+                else "final TBPTT segment only"
+            )
+            print(
+                "Memory sequence supervision: "
+                f"{supervision}, segment_length={self.memory_tbptt_steps}"
             )
         if self.memory_current_image_dropout_prob > 0.0:
             if not self.memory_sequence_training or not self.memory_persistent:
@@ -500,7 +578,11 @@ class CasualWATrainerMoT(Trainer):
 
     def get_optimizers(self, optimizers):
         """Build separate outer-LR groups for joint action-and-memory tuning."""
-        if not self.train_action_head_only:
+        if self.trainable_profile not in {
+            "action_head",
+            "memory_action_io",
+            "memory_last4_action_blocks",
+        }:
             return super().get_optimizers(optimizers)
         if self.action_head_learning_rate is None and self.memory_learning_rate is None:
             return super().get_optimizers(optimizers)
@@ -948,8 +1030,84 @@ class CasualWATrainerMoT(Trainer):
         )
         return action_loss, memory_state
 
+    @staticmethod
+    def _memory_segment_loss_weight(batch_dict, start: int, stop: int):
+        """Count valid supervised action elements before running a segment."""
+        action = batch_dict["action"][:, start:stop]
+        batch_size, segment_length, action_steps, action_dim = action.shape
+        context_valid = batch_dict["memory_context_valid"][:, start:stop].bool()
+        action_dim_mask = batch_dict.get("action_dim_mask")
+        if action_dim_mask is None:
+            action_dim_mask = torch.ones(
+                batch_size,
+                segment_length,
+                action_dim,
+                dtype=torch.bool,
+                device=action.device,
+            )
+        else:
+            action_dim_mask = action_dim_mask[:, start:stop].bool()
+        action_time_mask = batch_dict.get("action_time_mask")
+        if action_time_mask is None:
+            action_time_mask = torch.ones(
+                batch_size,
+                segment_length,
+                action_steps,
+                dtype=torch.bool,
+                device=action.device,
+            )
+        else:
+            action_time_mask = action_time_mask[:, start:stop].bool()
+        weight = (
+            context_valid[:, :, None, None]
+            & action_time_mask[:, :, :, None]
+            & action_dim_mask[:, :, None, :]
+        )
+        return weight.sum(dtype=torch.float32)
+
     def forward_memory_sequence_step(self, batch_dict):
         context_length = int(batch_dict["action"].shape[1])
+        if self.memory_supervise_all_segments:
+            segments = [
+                (start, min(start + self.memory_tbptt_steps, context_length))
+                for start in range(0, context_length, self.memory_tbptt_steps)
+            ]
+            segment_weights = [
+                self._memory_segment_loss_weight(batch_dict, start, stop)
+                for start, stop in segments
+            ]
+            total_weight = torch.stack(segment_weights).sum().clamp_min(1.0)
+            memory_state = None
+            completed_loss = total_weight.new_zeros(())
+            final_loss = None
+            for index, ((start, stop), segment_weight) in enumerate(
+                zip(segments, segment_weights)
+            ):
+                segment_loss, memory_state = self._forward_memory_segment(
+                    batch_dict,
+                    start,
+                    stop,
+                    memory_state,
+                    apply_memory_forcing=True,
+                )
+                weighted_loss = segment_loss * (segment_weight / total_weight)
+                if index + 1 < len(segments):
+                    self.accelerator.backward(
+                        weighted_loss * self.action_loss_weight
+                    )
+                    completed_loss = completed_loss + weighted_loss.detach()
+                    memory_state = self._detach_memory_state(memory_state)
+                else:
+                    final_loss = weighted_loss + completed_loss
+            if final_loss is None:
+                raise RuntimeError("Memory sequence contained no TBPTT segments")
+            zero = final_loss.new_zeros(())
+            return {
+                "visual_loss": zero,
+                "action_loss": final_loss * self.action_loss_weight,
+                "action_jitter_consistency_loss": zero,
+            }
+
         supervised_start = max(0, context_length - self.memory_tbptt_steps)
         memory_state = None
         for start in range(0, supervised_start, self.memory_tbptt_steps):
