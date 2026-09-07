@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-interval", type=int, default=1000)
     parser.add_argument("--checkpoint-total-limit", type=int, default=2)
     parser.add_argument("--tbptt-steps", type=int, default=16)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--memory-learning-rate", type=float, default=3e-5)
     parser.add_argument("--action-learning-rate", type=float, default=2e-6)
     parser.add_argument("--min-free-gib", type=float, default=100.0)
@@ -84,8 +85,14 @@ def run_name(args: argparse.Namespace) -> str:
 def validate(args: argparse.Namespace) -> None:
     parsed_gpu_ids(args.gpu_ids)
     max_steps = args.max_steps or int(STAGES[args.stage]["max_steps"])
-    if max_steps < 1 or args.tbptt_steps < 1:
-        raise ValueError("max steps and TBPTT steps must be positive")
+    if (
+        max_steps < 1
+        or args.tbptt_steps < 1
+        or args.gradient_accumulation_steps < 1
+    ):
+        raise ValueError(
+            "max steps, TBPTT steps, and gradient accumulation steps must be positive"
+        )
     if args.checkpoint_interval < 1 or args.checkpoint_total_limit < 1:
         raise ValueError("checkpoint settings must be positive")
     if args.memory_learning_rate <= 0 or args.action_learning_rate <= 0:
@@ -127,6 +134,11 @@ def experiment_record(args: argparse.Namespace) -> dict[str, object]:
         "transformer_overlay_pretrained": str(args.overlay_checkpoint),
         "output_dir": str(args.output_root / run_name(args)),
         "gpu_ids": parsed_gpu_ids(args.gpu_ids),
+        "batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "effective_global_batch_size": (
+            len(parsed_gpu_ids(args.gpu_ids)) * args.gradient_accumulation_steps
+        ),
         "context_length_replans": context_length,
         "context_seconds": context_length * 8 / 50.0,
         "replan_stride_raw_frames": 8,
@@ -212,7 +224,7 @@ def build_environment(args: argparse.Namespace, output_dir: Path) -> dict[str, s
             "GWP_MAX_REF_FRAMES": "1",
             "GWP_MIN_REF_LATENTS": "1",
             "GWP_BATCH_SIZE_PER_GPU": "1",
-            "GWP_GRAD_ACCUM_STEPS": "1",
+            "GWP_GRAD_ACCUM_STEPS": str(args.gradient_accumulation_steps),
             "GWP_NUM_WORKERS": "2" if context_length > 64 else "4",
             "GWP_MAX_STEPS": str(record["max_steps"]),
             "GWP_CHECKPOINT_INTERVAL": str(args.checkpoint_interval),
