@@ -41,8 +41,10 @@ def rotate_camera_video(
     cy: float,
     reference_width: int,
     reference_height: int,
+    shift_x: float = 0.0,
+    shift_y: float = 0.0,
 ) -> torch.Tensor:
-    """Warp every frame with the same pure-rotation homography K R^-1 K^-1."""
+    """Warp a clip consistently; pixel shift approximates small mount translation."""
     if images.ndim != 4 or images.shape[1] != 3:
         raise ValueError(f"expected NCHW RGB video, got {tuple(images.shape)}")
     frames, _, height, width = images.shape
@@ -58,8 +60,8 @@ def rotate_camera_video(
     new_to_old = torch.as_tensor(old_to_new.T.copy(), dtype=torch.float32, device=images.device)
     old_rays = rays @ new_to_old.T
     z = old_rays[..., 2].clamp_min(1e-6)
-    old_x = fx * old_rays[..., 0] / z + cx
-    old_y = fy * old_rays[..., 1] / z + cy
+    old_x = fx * old_rays[..., 0] / z + cx + shift_x * sx
+    old_y = fy * old_rays[..., 1] / z + cy + shift_y * sy
     grid = torch.stack((2 * old_x / (width - 1) - 1, 2 * old_y / (height - 1) - 1), dim=-1)
     warped = torch_functional.grid_sample(
         images.float(), grid[None].expand(frames, -1, -1, -1),
@@ -90,6 +92,11 @@ class WACamVLATransforms(WALeRobotTransformsPretrain):
         limit = float(cfg["max_rotation_degrees"])
         angles_deg = np.asarray([random.uniform(-limit, limit) for _ in range(3)])
         old_to_new = Rotation.from_euler("xyz", angles_deg, degrees=True).as_matrix()
+        max_shift = float(cfg.get("max_pixel_shift", 0.0))
+        if max_shift < 0:
+            raise ValueError("max_pixel_shift must be non-negative")
+        shift_x = random.uniform(-max_shift, max_shift)
+        shift_y = random.uniform(-max_shift, max_shift)
         key = self.view_keys[0]
         images = self._to_nchw_uint8(torch.as_tensor(data_dict[key]))
         result = dict(data_dict)
@@ -98,6 +105,7 @@ class WACamVLATransforms(WALeRobotTransformsPretrain):
             fx=float(cfg["fx"]), fy=float(cfg["fy"]),
             cx=float(cfg["cx"]), cy=float(cfg["cy"]),
             reference_width=int(cfg["width"]), reference_height=int(cfg["height"]),
+            shift_x=shift_x, shift_y=shift_y,
         )
         result[self.action_key] = rotate_camera_action(
             np.asarray(data_dict[self.action_key]), old_to_new

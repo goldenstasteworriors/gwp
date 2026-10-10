@@ -277,6 +277,9 @@ class CasualWATrainerMoT(Trainer):
         self.camera_pose_loss_weight = float(model_config.get("camera_pose_loss_weight", 0.0))
         if self.camera_pose_loss_weight < 0:
             raise ValueError("camera_pose_loss_weight must be non-negative")
+        self.camera_lora_rank = int(model_config.get("camera_lora_rank", 0))
+        if self.camera_lora_rank < 0:
+            raise ValueError("camera_lora_rank must be non-negative")
         self.contact_loss_type = str(model_config.get("contact_loss_type", "bce"))
         self.contact_schema_version = str(
             model_config.get("contact_schema_version", "contact_transition_v1")
@@ -657,7 +660,24 @@ class CasualWATrainerMoT(Trainer):
             verify_artifact_tree_unchanged(
                 self._production_initial_weights_snapshot
             )
-        transformer.to(self.device)
+        if self.camera_lora_rank > 0:
+            from peft import LoraConfig
+
+            transformer.requires_grad_(False)
+            transformer.add_adapter(
+                LoraConfig(
+                    r=self.camera_lora_rank,
+                    lora_alpha=self.camera_lora_rank,
+                    target_modules=["to_q", "to_k", "to_v", "to_out.0"],
+                )
+            )
+            transformer.to(self.device, dtype=torch.bfloat16)
+            trainable = sum(p.numel() for p in transformer.parameters() if p.requires_grad)
+            if trainable == 0:
+                raise RuntimeError("camera LoRA did not create trainable parameters")
+            print(f"Camera WAM LoRA trainable transformer parameters: {trainable:,}")
+        else:
+            transformer.to(self.device)
         if model_config.get("enable_gradient_checkpointing", True):
             transformer.enable_gradient_checkpointing()
 
