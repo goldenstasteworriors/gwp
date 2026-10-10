@@ -1153,7 +1153,14 @@ def load_pretrained_weights(model, pretrained_path, skip_action_expert=False, st
             checkpoint = checkpoint["model"]
         if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
             checkpoint = checkpoint["state_dict"]
-        state_dicts.update(checkpoint)
+        for key, value in checkpoint.items():
+            # GigaWorld training checkpoints can wrap attention modules for
+            # activation checkpointing. The wrapper is not part of the model
+            # architecture used when loading pretrained weights.
+            canonical_key = key.replace("._checkpoint_wrapped_module.", ".")
+            if canonical_key in state_dicts:
+                raise ValueError(f"duplicate pretrained weight: {canonical_key}")
+            state_dicts[canonical_key] = value
 
     is_native_mot = any(".visual_expert." in key or ".action_expert." in key for key in state_dicts)
     if not strict_load and is_native_mot and hasattr(model, "load_from_mot_pretrained_state_dict"):
