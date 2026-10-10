@@ -6,7 +6,6 @@ The camera-to-base rotation in that dataset is an explicit calibration input.
 
 import copy
 import os
-import torch
 
 from configs.giga_world_policy_0_5_sonic_g1_finetune import config as base_config
 
@@ -39,6 +38,6 @@ config["models"]["camera_pose_loss_weight"] = float(
     os.environ.get("GWP_CAM_POSE_LOSS_WEIGHT", "0.05")
 )
 config["models"]["camera_lora_rank"] = int(os.environ.get("GWP_CAM_LORA_RANK", "8"))
-config["models"]["vae_dtype"] = torch.bfloat16
+config["models"]["vae_dtype"] = "bf16"
 config["models"]["enable_gradient_checkpointing"] = True
 config["train"]["with_ema"] = False

@@ -606,6 +606,8 @@ class CasualWATrainerMoT(Trainer):
 
         vae_pretrained = model_config.get("vae_pretrained", os.path.join(pretrained, "vae"))
         vae_dtype = model_config.get("vae_dtype", torch.float32)
+        if isinstance(vae_dtype, str):
+            vae_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[vae_dtype]
         vae = AutoencoderKLWan.from_pretrained(vae_pretrained)
         vae.requires_grad_(False)
         vae.to(self.device, dtype=vae_dtype)
