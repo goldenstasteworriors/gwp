@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import torch
+from torch import nn
 import torch.nn.functional as F
 from diffusers.models import AutoencoderKLWan
 from diffusers.video_processor import VideoProcessor
@@ -273,6 +274,9 @@ class CasualWATrainerMoT(Trainer):
         self.action_dim = int(model_config.get("action_dim", 14))
         self.num_embodiments = int(model_config.get("num_embodiments", 1))
         self.contact_loss_weight = float(model_config.get("contact_loss_weight", 0.0))
+        self.camera_pose_loss_weight = float(model_config.get("camera_pose_loss_weight", 0.0))
+        if self.camera_pose_loss_weight < 0:
+            raise ValueError("camera_pose_loss_weight must be non-negative")
         self.contact_loss_type = str(model_config.get("contact_loss_type", "bce"))
         self.contact_schema_version = str(
             model_config.get("contact_schema_version", "contact_transition_v1")
@@ -658,6 +662,16 @@ class CasualWATrainerMoT(Trainer):
             transformer.enable_gradient_checkpointing()
 
         model = dict(transformer=transformer)
+        if self.camera_pose_loss_weight > 0:
+            # Only the observed reference latent enters this head.  Future
+            # noisy/target frames must not leak into camera-pose prediction.
+            model["camera_pose_head"] = nn.Sequential(
+                nn.Conv3d(int(self.vae.config.z_dim), 128, kernel_size=3, padding=1),
+                nn.SiLU(),
+                nn.AdaptiveAvgPool3d(1),
+                nn.Flatten(),
+                nn.Linear(128, 3),
+            ).to(self.device)
         checkpoint = model_config.get("checkpoint", None)
         strict = model_config.get("strict", True)
         self.load_checkpoint(checkpoint, list(model.values()), strict=strict)
@@ -1033,6 +1047,22 @@ class CasualWATrainerMoT(Trainer):
             "visual_loss": visual_loss,
             "action_loss": action_loss,
         }
+        if self.camera_pose_loss_weight > 0:
+            if "camera_view_delta" not in batch_dict:
+                raise ValueError("camera pose head requires camera_view_delta targets")
+            target = batch_dict["camera_view_delta"].to(
+                device=ref_latents.device, dtype=torch.float32
+            )
+            pose_prediction = self.model(
+                "camera_pose_head", ref_latents.to(self.dtype)
+            ).float()
+            if pose_prediction.shape != target.shape:
+                raise ValueError(
+                    f"camera pose shape mismatch: {pose_prediction.shape} vs {target.shape}"
+                )
+            losses["camera_pose_loss"] = self.camera_pose_loss_weight * F.mse_loss(
+                pose_prediction, target
+            )
         if contact_pred is not None and contact_target is not None:
             if self.contact_schema_version == SEGMENT_SCHEMA_VERSION:
                 contact_loss = grouped_contact_segment_loss(
