@@ -671,6 +671,11 @@ class CasualWATrainerMoT(Trainer):
                     target_modules=["to_q", "to_k", "to_v", "to_out.0"],
                 )
             )
+            # The 16-D pretrained action projectors were expanded to 32-D for
+            # SONIC.  Their new channels and camera-frame targets need updates
+            # even when the 5B backbone is trained through LoRA only.
+            for module_name in ("state_encoder", "action_encoder", "action_decoder"):
+                getattr(transformer, module_name).requires_grad_(True)
             transformer.to(self.device, dtype=torch.bfloat16)
             trainable = sum(p.numel() for p in transformer.parameters() if p.requires_grad)
             if trainable == 0:
