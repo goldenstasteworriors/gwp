@@ -1,3 +1,4 @@
 from .wa_transforms_hot3d import WAHot3DTransforms
 from .wa_transforms import WATransforms
 from .wa_transforms_lerobot_pretrain import WALeRobotTransformsPretrain
+from .wa_transforms_short_memory import WALeRobotShortMemoryTransforms

@@ -940,9 +940,16 @@ class CasualWATrainerMoT(Trainer):
         state = state.to(self.dtype)
         ref_latents = insert_noisy_latents[:, :, :1]
         noisy_latents = insert_noisy_latents[:, :, 1:]
+        memory_latent_frames = 0
+        if "memory_images" in batch_dict:
+            if not self.expand_timesteps:
+                raise ValueError("Short visual memory requires expand_timesteps=True")
+            memory_latents = self.forward_vae(batch_dict["memory_images"]).to(self.dtype)
+            memory_latent_frames = memory_latents.shape[2]
+            ref_latents = torch.cat([memory_latents, ref_latents], dim=2)
         frame_per_tokens = first_frame_mask.shape[-1] * first_frame_mask.shape[-2] // 4
-        num_latent_tokens = frame_per_tokens * first_frame_mask.shape[2]
-        num_clean_latent_tokens = frame_per_tokens
+        num_latent_tokens = frame_per_tokens * (first_frame_mask.shape[2] + memory_latent_frames)
+        num_clean_latent_tokens = frame_per_tokens * (1 + memory_latent_frames)
         timestep = torch.zeros(
             bs,
             num_state_tokens + num_action_tokens + num_latent_tokens,
@@ -1004,6 +1011,9 @@ class CasualWATrainerMoT(Trainer):
             visual_pred, action_pred = model_output
             contact_pred = None
 
+        if memory_latent_frames:
+            # History is a clean condition, never a future denoising target.
+            visual_pred = visual_pred[:, :, memory_latent_frames:]
         visual_loss = ((visual_pred.float() - visual_target.float()) * first_frame_mask).pow(2).mean()
 
         time_mask = None
