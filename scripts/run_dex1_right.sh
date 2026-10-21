@@ -15,6 +15,8 @@ project_root="${GWP_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pw
 cd "$project_root"
 python_bin="${GWP_PYTHON:-/nix/conda_envs/gigaworld-policy/bin/python}"
 data_root="${GWP_DEX1_DATA_ROOT:-$project_root/data/dex1_right_measured_20261021}"
+asset_root="${GWP_ASSET_ROOT:-$project_root/../giga-world-policy-assets}"
+runtime_cache="${GWP_RUNTIME_CACHE:-/nix/gigaworld-policy-cache}"
 run_date="$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)"
 export CUDA_VISIBLE_DEVICES="$gpu"
 export GWP_GPU_IDS=0
@@ -24,14 +26,15 @@ export GWP_SONIC_DATA_PATH="$data_root/$dataset"
 export GWP_NORM_STATS_PATH="$GWP_SONIC_DATA_PATH/norm.json"
 export GWP_T5_LOAD_FROM=dir
 export GWP_T5_EMBEDDING_DIR="$GWP_SONIC_DATA_PATH/t5_embedding"
-export GWP_WAN_PRETRAINED="${GWP_WAN_PRETRAINED:-$project_root/weights/Wan2.2-TI2V-5B-Diffusers}"
-export GWP05_TRANSFORMER_PRETRAINED="${GWP05_TRANSFORMER_PRETRAINED:-$project_root/weights/Giga-World-Policy-0.5}"
+export GWP_WAN_PRETRAINED="${GWP_WAN_PRETRAINED:-$asset_root/Wan2.2-TI2V-5B-Diffusers}"
+export GWP05_TRANSFORMER_PRETRAINED="${GWP05_TRANSFORMER_PRETRAINED:-$asset_root/Giga-World-Policy-0.5}"
 export GWP05_PROJECT_DIR="${GWP05_PROJECT_DIR:-$project_root/outputs/dex1_right_${variant}_${run_date}}"
-export TMPDIR="$project_root/.cache/tmp"
-export HF_HOME="$project_root/.cache/huggingface"
-export XDG_CACHE_HOME="$project_root/.cache/xdg"
-export TORCH_HOME="$project_root/.cache/torch"
-export TORCH_EXTENSIONS_DIR="$project_root/.cache/torch_extensions"
+export TMPDIR="$runtime_cache/tmp"
+export HF_HOME="$runtime_cache/huggingface"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+export XDG_CACHE_HOME="$runtime_cache/xdg"
+export TORCH_HOME="$runtime_cache/torch"
+export TORCH_EXTENSIONS_DIR="$runtime_cache/torch_extensions"
 export PYTHONUNBUFFERED=1
 if [[ "$mode" == --dry-run ]]; then
   "$python_bin" -c 'import json; from configs.giga_world_policy_0_5_dex1_right_measured import config; print(json.dumps(config,indent=2))'
