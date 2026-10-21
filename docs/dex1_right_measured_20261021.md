@@ -58,6 +58,6 @@ bash scripts/run_dex1_right.sh episode0_mem
 | 1 | `outputs/dex1_right_episode0_20261021_224712` | 52 |
 | 2 | `outputs/dex1_right_episode0_mem_20261021_224712` | 40 |
 
-三组由服务器上的 tmux 会话 `dex1_right_20261021` 管理，窗口分别为 `all`、`episode0`、`episode0_mem`；GPU 3 未用于训练。实际显存约 77.0 / 77.0 / 77.8 GB。运行中的对象文件系统日志可能暂时不可读取，可通过 tmux 窗口查看实时输出。
+三组由服务器上的 tmux 会话 `dex1_right_20261021` 管理，窗口分别为 `all`、`episode0`、`episode0_mem`；GPU 3 未用于训练。观察到的显存为 76,996 / 76,996 / 77,838 MiB，约 75.2 / 75.2 / 76.0 GiB。运行中的对象文件系统日志可能暂时不可读取，可通过 tmux 窗口查看实时输出。
 
 服务器还验证了实际 WAM 数据读取、右腕非空像素、T5 缓存及记忆 transform：当前/未来图像 5×3×384×320，历史/当前记忆 9×3×384×320，动作 48×32，仅 8 个物理维度有效。GWP 三个权重分片与 UMT5 权重均通过官方 SHA256 校验。完整启动核验记录保存于 `outputs/setup_dex1_20261021/verification.json`，各运行目录保存训练代码提交号。
