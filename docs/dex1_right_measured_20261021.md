@@ -12,6 +12,8 @@
 
 前两组继承 `giga_world_policy_0_5_sonic_g1_finetune` 的训练超参数：batch size 4、学习率 6e-5、CAME8Bit、BF16、EMA、50,000 步、48 帧动作窗口、每 5000 步保存。各数据集独立计算归一化统计，episode0 两组共享 episode0 统计。
 
+服务器实测原配置在单卡 A800 80GB 上显存溢出，因此三组均开启模型激活重算与 `expandable_segments` 显存分配；以上训练超参数和损失不变。日志频率调整为每步，便于验证实际更新。
+
 ## 短时记忆适配
 
 参考 [Cortex 附录 A.5.2](https://arxiv.org/html/2607.05377v1#A5.SS2) 的数秒短时记忆执行器，以及 [MEM III-C](https://arxiv.org/html/2603.03596v2#S3.SS3) 的历史视频压缩思路。本实验是对 GWP/WAN 的适配，不是对论文中 PaliGemma/ViT 结构的逐层复现。
@@ -43,3 +45,5 @@ bash scripts/run_dex1_right.sh episode0_mem
 - 三组启动配置解析通过，训练超参数一致；临时测试脚本已删除。
 
 环境安装保留项目指定的 Diffusers 0.36.0 与 LeRobot 0.4.4。两者的 PyPI 依赖声明冲突，因此 LeRobot 采用 `--no-deps` 安装，并单独安装实际数据读取路径所需的依赖；服务器已验证相关类能够导入。
+
+无图形界面的服务器使用同版本 `opencv-python-headless==4.11.0.86`，并补充数据模块需要的 `h5py`。完整实际依赖记录在服务器 `outputs/setup_dex1_20261021/pip-freeze.txt`。
