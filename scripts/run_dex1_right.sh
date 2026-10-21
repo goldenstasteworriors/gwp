@@ -18,6 +18,7 @@ data_root="${GWP_DEX1_DATA_ROOT:-$project_root/data/dex1_right_measured_20261021
 asset_root="${GWP_ASSET_ROOT:-$project_root/../giga-world-policy-assets}"
 runtime_cache="${GWP_RUNTIME_CACHE:-/nix/gigaworld-policy-cache}"
 run_date="$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)"
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES="$gpu"
 export GWP_GPU_IDS=0
 export GWP_PHYSICAL_ACTION_DIM=8
