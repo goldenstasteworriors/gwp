@@ -58,6 +58,10 @@ bash scripts/run_dex1_right.sh episode0_mem
 
 修复在完整保存返回后再调用 `release_memory()`，保留 batch size、梯度累积、优化器、EMA 和模型配置。新增 `GWP_RESUME_CHECKPOINT` 显式恢复完整模型、EMA、优化器、调度器和训练步数；启动仍生成新输出目录，保留原检查点。
 
+三组实际大模型验证均通过：从原 step 5000 恢复，在 step 5010 再次完整保存，并持续更新到 step 5020，无 OOM。保存前后 `memory_allocated` 相同：baseline 为 56367218176 bytes，memory 为 56420302336 bytes；缓存预留量由约 74.6/75.4 GiB 降至约 58.1/57.5 GiB。验证日志在 `outputs/setup_dex1_20261021/verify_{all,episode0,episode0_mem}_20261022.log`，临时测试脚本已删除。
+
+2026-10-22 12:19 以提交 `7fdb7c0` 从各自 step 5010 恢复正式训练，GPU 仍为 0/1/2，max_steps 恢复为 50,000，checkpoint_interval 恢复为 5,000。新输出分别为 `outputs/dex1_right_{all,episode0,episode0_mem}_20261022_121918`。恢复来源及代码版本记录在 `outputs/setup_dex1_20261021/resumed_runs_20261022.json`。原始 step 5000 和验证 step 5010 检查点均保留。
+
 2026-10-21 22:51（北京时间），三组均已完成实际优化器更新，动作与视觉损失均为有限值。训练代码提交为 `9f7ac8f`。
 
 | GPU | 输出目录（相对服务器项目根目录） | 已观察步数 |
