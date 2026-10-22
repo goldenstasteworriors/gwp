@@ -50,6 +50,14 @@ bash scripts/run_dex1_right.sh episode0_mem
 
 ## 服务器运行验证
 
+### 2026-10-22 检查点保存后的 OOM
+
+初次三组均成功保存 step 5000，并完成 step 5001；随后 baseline 两组在 CAME8Bit 更新时 OOM，memory 组在反向传播时 OOM。不是已完成 50,000 步。
+
+在服务器的 PyTorch 2.7.1 上复现了 `torch.save` 的序列化引用残留：关闭自动 GC 的受控小实验中，保存一个 256 MiB CUDA 张量并删除调用方引用后，`memory_allocated` 仍为 268435456；显式 `gc.collect()` 后降为 0。临时序列化对象的循环引用会延长 CUDA storage 的生命周期，优化器替换动量状态时会叠加新旧副本。原实现只在保存前调用 `release_memory()`。
+
+修复在完整保存返回后再调用 `release_memory()`，保留 batch size、梯度累积、优化器、EMA 和模型配置。新增 `GWP_RESUME_CHECKPOINT` 显式恢复完整模型、EMA、优化器、调度器和训练步数；启动仍生成新输出目录，保留原检查点。
+
 2026-10-21 22:51（北京时间），三组均已完成实际优化器更新，动作与视觉损失均为有限值。训练代码提交为 `9f7ac8f`。
 
 | GPU | 输出目录（相对服务器项目根目录） | 已观察步数 |
