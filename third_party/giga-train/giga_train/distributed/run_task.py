@@ -37,7 +37,7 @@ def run_tasks(config: str | Any, runners: str | Iterable[str] | None = None) -> 
         if isinstance(runner, Trainer):
             runner.save_config(config)
             if config.train.get('resume', False):
-                runner.resume()
+                runner.resume(config.train.get('resume_checkpoint'))
             runner.train()
         elif isinstance(runner, Tester):
             runner.test()

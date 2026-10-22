@@ -740,6 +740,11 @@ class Trainer:
                 self.accelerator.save_state(output_dir, exclude_frozen_parameters=True)
             else:
                 self.accelerator.save_state(output_dir)
+            # torch.save's temporary pickler classes can retain CUDA storages in
+            # Python cycles. Optimizers replacing their state next step would
+            # otherwise keep both old and new momentum buffers alive until GC.
+            # Collect only after all save hooks and serialization have returned.
+            release_memory()
 
     def save_model_hook(self, models: list[Module], weights: list[dict[str, Tensor]], output_dir: str) -> None:
         """Customize how model weights are saved by Accelerate.

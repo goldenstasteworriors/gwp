@@ -48,6 +48,9 @@ for path in "$python_bin" "$GWP_NORM_STATS_PATH" "$GWP_T5_EMBEDDING_DIR/episode_
   [[ -f "$path" ]] || { echo "Required file missing: $path" >&2; exit 1; }
 done
 [[ -d "$GWP05_TRANSFORMER_PRETRAINED" ]] || { echo "Missing GWP transformer weights" >&2; exit 1; }
+if [[ -n "${GWP_RESUME_CHECKPOINT:-}" ]]; then
+  [[ -f "$GWP_RESUME_CHECKPOINT/custom_checkpoint_0.pkl" && -f "$GWP_RESUME_CHECKPOINT/optimizer.bin" ]] || { echo "Incomplete resume checkpoint: $GWP_RESUME_CHECKPOINT" >&2; exit 1; }
+fi
 mkdir -p "$TMPDIR" "$HF_HOME" "$XDG_CACHE_HOME" "$TORCH_HOME" "$TORCH_EXTENSIONS_DIR" "$GWP05_PROJECT_DIR"
 "$python_bin" -c 'import json,os; from configs.giga_world_policy_0_5_dex1_right_measured import config; p=os.path.join(os.environ["GWP05_PROJECT_DIR"],"launch_config.json"); json.dump(config,open(p,"x"),indent=2)'
 echo "variant=$variant physical_gpu=$gpu output=$GWP05_PROJECT_DIR"

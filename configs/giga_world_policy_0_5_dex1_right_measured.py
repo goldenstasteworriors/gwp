@@ -4,6 +4,9 @@ import os
 from configs.giga_world_policy_0_5_sonic_g1_finetune import config as base_config
 
 config = copy.deepcopy(base_config)
+resume_checkpoint = os.environ.get("GWP_RESUME_CHECKPOINT")
+if resume_checkpoint:
+    config["train"].update(resume=True, resume_checkpoint=resume_checkpoint)
 view = "observation.images.right_wrist"
 memory = os.environ.get("GWP_SHORT_MEMORY", "0") == "1"
 history = list(range(-120, 0, 15))  # Four seconds at 2 Hz; current frame follows.
