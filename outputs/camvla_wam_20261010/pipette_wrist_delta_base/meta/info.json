@@ -1,0 +1,285 @@
+{
+    "codebase_version": "v3.1",
+    "robot_type": "sonic_g1",
+    "total_episodes": 58,
+    "total_frames": 81277,
+    "total_tasks": 1,
+    "total_videos": 58,
+    "total_chunks": 1,
+    "chunks_size": 58,
+    "fps": 50,
+    "splits": {
+        "train": "0:58"
+    },
+    "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+    "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
+    "features": {
+        "observation.images.ego_view": {
+            "dtype": "video",
+            "shape": [
+                480,
+                640,
+                3
+            ],
+            "names": [
+                "height",
+                "width",
+                "channel"
+            ],
+            "info": {
+                "video.height": 480,
+                "video.width": 640,
+                "video.codec": "h264",
+                "video.pix_fmt": "yuv420p",
+                "video.is_depth_map": false,
+                "video.fps": 50,
+                "video.channels": 3,
+                "has_audio": false
+            }
+        },
+        "observation.state": {
+            "dtype": "float32",
+            "shape": [
+                30
+            ],
+            "names": [
+                "left_wrist_x",
+                "left_wrist_y",
+                "left_wrist_z",
+                "left_wrist_r00",
+                "left_wrist_r10",
+                "left_wrist_r20",
+                "left_wrist_r01",
+                "left_wrist_r11",
+                "left_wrist_r21",
+                "right_wrist_x",
+                "right_wrist_y",
+                "right_wrist_z",
+                "right_wrist_r00",
+                "right_wrist_r10",
+                "right_wrist_r20",
+                "right_wrist_r01",
+                "right_wrist_r11",
+                "right_wrist_r21",
+                "left_hand_little",
+                "left_hand_ring",
+                "left_hand_middle",
+                "left_hand_index",
+                "left_hand_thumb_bend",
+                "left_hand_thumb_rotate",
+                "right_hand_little",
+                "right_hand_ring",
+                "right_hand_middle",
+                "right_hand_index",
+                "right_hand_thumb_bend",
+                "right_hand_thumb_rotate"
+            ]
+        },
+        "action": {
+            "dtype": "float32",
+            "shape": [
+                30
+            ],
+            "names": [
+                "left_wrist_delta_x",
+                "left_wrist_delta_y",
+                "left_wrist_delta_z",
+                "left_wrist_delta_r00",
+                "left_wrist_delta_r10",
+                "left_wrist_delta_r20",
+                "left_wrist_delta_r01",
+                "left_wrist_delta_r11",
+                "left_wrist_delta_r21",
+                "right_wrist_delta_x",
+                "right_wrist_delta_y",
+                "right_wrist_delta_z",
+                "right_wrist_delta_r00",
+                "right_wrist_delta_r10",
+                "right_wrist_delta_r20",
+                "right_wrist_delta_r01",
+                "right_wrist_delta_r11",
+                "right_wrist_delta_r21",
+                "left_hand_little_delta",
+                "left_hand_ring_delta",
+                "left_hand_middle_delta",
+                "left_hand_index_delta",
+                "left_hand_thumb_bend_delta",
+                "left_hand_thumb_rotate_delta",
+                "right_hand_little_delta",
+                "right_hand_ring_delta",
+                "right_hand_middle_delta",
+                "right_hand_index_delta",
+                "right_hand_thumb_bend_delta",
+                "right_hand_thumb_rotate_delta"
+            ]
+        },
+        "timestamp": {
+            "dtype": "float32",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "frame_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "episode_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "task_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        }
+    },
+    "script_config": {
+        "wbc_version": "gear_wbc",
+        "wbc_model_path": "policy/GR00T-WholeBodyControl-Balance.onnx,policy/GR00T-WholeBodyControl-Walk.onnx",
+        "wbc_policy_class": "G1DecoupledWholeBodyPolicy",
+        "lower_body_controller": "unitree_loco",
+        "unitree_loco_start_fsm_id": 501,
+        "unitree_loco_damp_fsm_id": 1,
+        "unitree_loco_stand_fsm_id": 4,
+        "unitree_loco_service_name": "sport",
+        "unitree_loco_system_service_name": "ai_sport",
+        "unitree_loco_service_start_timeout": 15.0,
+        "unitree_loco_damp_duration": 1.0,
+        "unitree_loco_stand_duration": 5.0,
+        "unitree_loco_stability_duration": 0.5,
+        "unitree_loco_start_retry_interval": 1.0,
+        "unitree_loco_activation_timeout": 25.0,
+        "unitree_loco_state_timeout": 0.5,
+        "unitree_loco_max_leg_velocity": 0.35,
+        "unitree_loco_max_torso_tilt": 0.35,
+        "unitree_loco_command_frequency": 10.0,
+        "unitree_loco_navigation_enabled": true,
+        "unitree_loco_arm_control_enabled": true,
+        "unitree_loco_max_linear_velocity": 1.0,
+        "unitree_loco_max_angular_velocity": 1.0,
+        "unitree_arm_weight_ramp_duration": 2.0,
+        "unitree_arm_handoff_max_velocity": 0.5,
+        "interface": "eth0",
+        "simulator": "mujoco",
+        "sim_sync_mode": false,
+        "control_frequency": 50,
+        "sim_frequency": 200,
+        "enable_waist": false,
+        "with_hands": true,
+        "high_elbow_pose": false,
+        "verbose": true,
+        "enable_offscreen": false,
+        "enable_onscreen": true,
+        "upper_body_joint_speed": 1000.0,
+        "startup_t_pose": false,
+        "startup_t_pose_duration": 4.0,
+        "startup_elbow_pose_duration": 4.0,
+        "startup_final_pose_duration": 4.0,
+        "startup_final_elbow_angle": -0.2617993877991494,
+        "env_name": "default",
+        "ik_indicator": false,
+        "verbose_timing": false,
+        "keyboard_dispatcher_type": "raw",
+        "keyboard_lower_body_control": false,
+        "keyboard_loco_command_timeout": 0.5,
+        "enable_gravity_compensation": false,
+        "gravity_compensation_joints": null,
+        "body_control_device": "dummy",
+        "hand_control_device": "dummy",
+        "body_streamer_ip": "10.112.210.229",
+        "body_streamer_keyword": "knee",
+        "enable_visualization": false,
+        "pico_vis_smpl": false,
+        "pico_navigation_range": 1.0,
+        "pico_fixed_side": "right",
+        "enable_real_device": true,
+        "teleop_frequency": 20,
+        "teleop_replay_path": null,
+        "robot_ip": "192.168.123.164",
+        "data_collection": true,
+        "data_collection_frequency": 20,
+        "root_output_dir": "outputs",
+        "enable_upper_body_operation": true,
+        "upper_body_operation_mode": "teleop",
+        "decoupled_vla_exporter": {
+            "dataset_name": "8_18_use_pipette_1",
+            "task_prompt": "Pick up the pipette, hold it securely, and use it to transfer liquid from the left beaker to the right beaker.",
+            "root_output_dir": "/home/unitree/data_collection/GR00T-WholeBodyControl/outputs/onboard",
+            "data_collection_frequency": 50,
+            "overwrite_existing_dataset": false,
+            "camera_host": "192.168.123.164",
+            "camera_port": 5555,
+            "state_topic_name": "G1Env/env_state_act",
+            "robot_config_service_name": "WBCPolicy/robot_config",
+            "robot_config_timeout": 30.0,
+            "sonic_zmq_host": "localhost",
+            "sonic_zmq_port": 5556,
+            "sonic_pose_max_age": 0.2,
+            "planner_max_age": 0.2,
+            "use_sonic_pose_when_stream_off": true,
+            "default_stream_mode_when_pose_available": 1,
+            "require_sonic_pose": false,
+            "record_wrist_cameras": false,
+            "with_hands": true,
+            "left_hand_only": true,
+            "collect_tactile": false,
+            "tactile_zmq_host": "127.0.0.1",
+            "tactile_zmq_port": 5558,
+            "tactile_full_refresh_hz": 5.0,
+            "tactile_metrics_log": "logs/tactile_modbus_8_18_use_pipette_1.jsonl",
+            "text_to_speech": false,
+            "audio_cues": true,
+            "audio_cue_backend": "unitree_tts",
+            "unitree_audio_network": "real",
+            "unitree_audio_volume": 85,
+            "audio_cue_volume": 0.35,
+            "audio_cue_cache_dir": "logs/audio_cues",
+            "discard_audio_cue_volume": 0.9,
+            "quiet_console": true,
+            "runtime_log_file": "logs/decoupled_vla_exporter_8_18_use_pipette_1.log",
+            "profile_timing": false,
+            "profile_interval": 1.0
+        },
+        "data_source": {
+            "robot_state": "decoupled_ros",
+            "pico_pose": "optional_sonic_zmq",
+            "camera": "gear_sonic_composed_camera",
+            "left_tactile": "disabled"
+        },
+        "schema_compatibility": "g1_inspire_41dof",
+        "hand_data_mode": "left_only",
+        "active_hands": [
+            "left"
+        ],
+        "right_hand_data": {
+            "source": "synthetic",
+            "default_pose": "open",
+            "default_inspire_6d": [
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0
+            ]
+        }
+    },
+    "discarded_episode_indices": [],
+    "action_schema_id": "sonic_g1_inspire6x2_wrist_delta_v1"
+}

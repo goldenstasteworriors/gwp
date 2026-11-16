@@ -1,0 +1,24 @@
+{
+    "state": {
+        "wrist_hand_state": {
+            "start": 0,
+            "end": 30
+        }
+    },
+    "action": {
+        "wrist_hand_delta": {
+            "start": 0,
+            "end": 30
+        }
+    },
+    "video": {
+        "ego_view": {
+            "original_key": "observation.images.ego_view"
+        }
+    },
+    "annotation": {
+        "human.task_description": {
+            "original_key": "task_index"
+        }
+    }
+}
