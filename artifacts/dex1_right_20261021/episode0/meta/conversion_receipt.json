@@ -1,0 +1,45 @@
+{
+  "source": "/home/ykj/project/SONICMJ/GR00T-WholeBodyControl/.worktrees/thinkpad-wired-pico-onboard/outputs/dex1_three_camera_20261021_180822",
+  "state_source": "observation.state",
+  "action_source": "observation.state",
+  "units": "rad",
+  "joints": [
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint",
+    "right_hand_dex1_motor"
+  ],
+  "video": "observation.images.right_wrist",
+  "episodes": [
+    {
+      "source_episode": 0,
+      "frames": 1600,
+      "source_parquet_sha256": "dbbdd9122c65075718572f064af26ae3dc23d13749d52ed1d472d526133d047e",
+      "right_wrist_video_sha256": "ff15a75736345353a9719e64421ff853ebf552da296b4c455887bfe87ff1c279",
+      "angle_min": [
+        -0.35001128911972046,
+        -0.5007728338241577,
+        -0.7354958653450012,
+        -0.633006751537323,
+        -1.1772223711013794,
+        -0.32942238450050354,
+        -0.09242234379053116,
+        1.8314579725265503
+      ],
+      "angle_max": [
+        0.47348475456237793,
+        -0.16749152541160583,
+        0.18364626169204712,
+        0.10905645042657852,
+        0.40390434861183167,
+        0.33560624718666077,
+        0.5916971564292908,
+        5.263402938842773
+      ]
+    }
+  ]
+}

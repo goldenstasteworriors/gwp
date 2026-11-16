@@ -1,0 +1,24 @@
+{
+  "state": {
+    "right_joint_angles": {
+      "start": 0,
+      "end": 8
+    }
+  },
+  "action": {
+    "right_joint_angles": {
+      "start": 0,
+      "end": 8
+    }
+  },
+  "video": {
+    "right_wrist": {
+      "original_key": "observation.images.right_wrist"
+    }
+  },
+  "annotation": {
+    "human.task_description": {
+      "original_key": "task_index"
+    }
+  }
+}

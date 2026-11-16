@@ -1,0 +1,227 @@
+{
+  "codebase_version": "v3.1",
+  "robot_type": "sonic_g1",
+  "total_episodes": 5,
+  "total_frames": 6413,
+  "total_tasks": 1,
+  "total_videos": 5,
+  "total_chunks": 1,
+  "chunks_size": 5,
+  "fps": 30,
+  "splits": {
+    "train": "0:5"
+  },
+  "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+  "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
+  "features": {
+    "observation.images.right_wrist": {
+      "dtype": "video",
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "names": [
+        "height",
+        "width",
+        "channel"
+      ],
+      "info": {
+        "video.height": 480,
+        "video.width": 640,
+        "video.codec": "h264",
+        "video.pix_fmt": "yuv420p",
+        "video.is_depth_map": false,
+        "video.fps": 30,
+        "video.channels": 3,
+        "has_audio": false
+      }
+    },
+    "observation.state": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ],
+      "names": [
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_roll_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_yaw_joint",
+        "right_hand_dex1_motor"
+      ]
+    },
+    "action": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ],
+      "names": [
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_roll_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_yaw_joint",
+        "right_hand_dex1_motor"
+      ]
+    },
+    "timestamp": {
+      "dtype": "float32",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "frame_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "episode_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "task_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    }
+  },
+  "script_config": {
+    "wbc_version": "gear_wbc",
+    "wbc_model_path": "policy/GR00T-WholeBodyControl-Balance.onnx,policy/GR00T-WholeBodyControl-Walk.onnx",
+    "wbc_policy_class": "G1DecoupledWholeBodyPolicy",
+    "interface": "enx00e04c36c4e8",
+    "simulator": "mujoco",
+    "sim_sync_mode": false,
+    "control_frequency": 50,
+    "sim_frequency": 200,
+    "diagnostic_read_only": false,
+    "enable_waist": false,
+    "with_hands": true,
+    "hand_type": "dex1",
+    "dex1_released_q": [
+      5.4,
+      5.4
+    ],
+    "dex1_pressed_q": [
+      1.5,
+      1.5
+    ],
+    "high_elbow_pose": false,
+    "verbose": true,
+    "enable_offscreen": false,
+    "enable_onscreen": true,
+    "upper_body_joint_speed": 1000.0,
+    "startup_t_pose": false,
+    "startup_t_pose_duration": 4.0,
+    "startup_elbow_pose_duration": 4.0,
+    "startup_final_pose_duration": 4.0,
+    "startup_final_elbow_angle": -0.34906585,
+    "env_name": "default",
+    "ik_indicator": false,
+    "verbose_timing": false,
+    "keyboard_dispatcher_type": "raw",
+    "enable_gravity_compensation": false,
+    "gravity_compensation_joints": null,
+    "body_control_device": "dummy",
+    "hand_control_device": "dummy",
+    "body_streamer_ip": "10.112.210.229",
+    "body_streamer_keyword": "knee",
+    "enable_visualization": false,
+    "pico_vis_smpl": false,
+    "enable_real_device": true,
+    "teleop_frequency": 20,
+    "teleop_replay_path": null,
+    "robot_ip": "192.168.123.164",
+    "data_collection": true,
+    "data_collection_frequency": 20,
+    "root_output_dir": "outputs",
+    "enable_upper_body_operation": true,
+    "upper_body_operation_mode": "teleop",
+    "decoupled_vla_exporter": {
+      "dataset_name": "dex1_three_camera_20261021_180822",
+      "hand_type": "dex1",
+      "dex1_preset": "default",
+      "dex1_profile": "/home/data-collection/GR00T-WholeBodyControl-worktrees/thinkpad-wired-pico-onboard/.runtime/dex1_profiles/default.json",
+      "task_prompt": "grab the red bottle",
+      "root_output_dir": "/home/data-collection/GR00T-WholeBodyControl-worktrees/thinkpad-wired-pico-onboard/outputs",
+      "data_collection_frequency": 30,
+      "overwrite_existing_dataset": false,
+      "left_hand_only": false,
+      "inspire_hand_pose_config": "/home/data-collection/GR00T-WholeBodyControl-worktrees/thinkpad-wired-pico-onboard/gear_sonic/config/data_collection/inspire_hand_pose.json",
+      "camera_host": "127.0.0.1",
+      "camera_port": 5558,
+      "state_topic_name": "G1Env/env_state_act",
+      "robot_config_service_name": "WBCPolicy/robot_config",
+      "robot_config_timeout": 30.0,
+      "sonic_zmq_host": "localhost",
+      "sonic_zmq_port": 5556,
+      "sonic_pose_max_age": 0.2,
+      "planner_max_age": 0.2,
+      "use_sonic_pose_when_stream_off": true,
+      "default_stream_mode_when_pose_available": 1,
+      "require_sonic_pose": false,
+      "record_wrist_cameras": true,
+      "camera_sync_tolerance_ms": 30.0,
+      "camera_max_hold_ms": 250.0,
+      "text_to_speech": false,
+      "audio_cues": true,
+      "audio_cue_volume": 0.35,
+      "discard_audio_cue_volume": 0.9,
+      "profile_timing": true,
+      "profile_interval": 1.0
+    },
+    "data_source": {
+      "robot_state": "decoupled_ros",
+      "pico_pose": "optional_sonic_zmq",
+      "camera": "gear_sonic_composed_camera"
+    },
+    "schema_compatibility": "g1_dex1_31dof",
+    "camera_sync": {
+      "views": [
+        "ego_view",
+        "left_wrist",
+        "right_wrist"
+      ],
+      "timestamp_clock": "capture_host_wall_time",
+      "max_skew_ms": 30.0,
+      "max_receive_hold_ms": 250.0,
+      "method": "bounded_software_timestamp_grouping",
+      "usb_timestamp_semantics": "host_read_completion_not_exposure"
+    },
+    "hand_position_unit": "rad",
+    "hand_data_mode": "both",
+    "active_hands": [
+      "left",
+      "right"
+    ],
+    "right_hand_data": {
+      "source": "hardware",
+      "default_pose": null,
+      "default_inspire_6d": null
+    }
+  },
+  "discarded_episode_indices": [],
+  "controlled_side": "right",
+  "action_semantics": "measured_absolute_joint_angle",
+  "action_schema_id": "g1_right_arm7_dex1_measured_absolute_v1"
+}

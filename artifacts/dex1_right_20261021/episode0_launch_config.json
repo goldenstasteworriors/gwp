@@ -1,0 +1,175 @@
+{
+  "runners": [
+    "world_action_model.CasualWATrainerMoT"
+  ],
+  "project_dir": "/home/ykj/project/WM/giga-world-policy/.worktrees/dex1-right-measured-mem-20261021/outputs/dex1_right_episode0_20261021_222313",
+  "launch": {
+    "gpu_ids": [
+      0
+    ],
+    "distributed_type": "DEEPSPEED",
+    "executable": "/home/ykj/miniconda3/envs/gigaworld-policy/bin/accelerate",
+    "deepspeed_config": {
+      "deepspeed_config_file": "accelerate_configs/zero2.json"
+    },
+    "until_completion": false
+  },
+  "dataloaders": {
+    "train": {
+      "data_or_config": [
+        {
+          "_class_name": "WAMLeRobotDataset",
+          "data_path": "/home/ykj/project/WM/giga-world-policy/.worktrees/dex1-right-measured-mem-20261021/artifacts/dex1_right_20261021/episode0",
+          "data_size": null,
+          "delta_info": {
+            "action": 48
+          },
+          "delta_frames": {
+            "observation.images.right_wrist": [
+              0,
+              12,
+              24,
+              36,
+              48
+            ]
+          },
+          "video_backend": "pyav",
+          "t5_load_from": "dir",
+          "t5_cfg": {
+            "t5_embedding_dir": "/home/ykj/project/WM/giga-world-policy/.worktrees/dex1-right-measured-mem-20261021/artifacts/dex1_right_20261021/episode0/t5_embedding",
+            "t5_embedding_pattern": "episode_{episode_index:06d}.pt",
+            "t5_embedding_key": "t5_embedding"
+          },
+          "t5_cache_size": 4096,
+          "robotype": "sonic_g1"
+        }
+      ],
+      "batch_size_per_gpu": 4,
+      "num_workers": 8,
+      "pin_memory": true,
+      "transform": {
+        "type": "WALeRobotTransformsPretrain",
+        "dst_size": [
+          320,
+          384
+        ],
+        "num_frames": 48,
+        "is_train": true,
+        "norm_path": [
+          {
+            "path": "/home/ykj/project/WM/giga-world-policy/.worktrees/dex1-right-measured-mem-20261021/artifacts/dex1_right_20261021/episode0/norm.json",
+            "data_paths": [
+              "/home/ykj/project/WM/giga-world-policy/.worktrees/dex1-right-measured-mem-20261021/artifacts/dex1_right_20261021/episode0"
+            ]
+          }
+        ],
+        "robotype_to_embodiment_id": {
+          "sonic_g1": 0
+        },
+        "robotype_default_embodiment_id": 0,
+        "model_action_dim": 32,
+        "delta_mask_by_embodiment_id": {
+          "0": [
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ]
+        },
+        "norm_use_quantiles": true,
+        "norm_enable_clamp": true,
+        "num_views": 1,
+        "view_keys": [
+          "observation.images.right_wrist"
+        ],
+        "image_cfg": {
+          "mask_generator": {
+            "max_ref_frames": 1,
+            "start": 1,
+            "factor": 4
+          }
+        },
+        "image_augmentation": {
+          "enabled": true,
+          "crop_scale": 0.95,
+          "rotation_degrees": 5.0,
+          "brightness": 0.3,
+          "contrast": 0.4,
+          "saturation": 0.5
+        },
+        "max_prompt_len": 64,
+        "subtask_prob": 0
+      }
+    },
+    "test": {}
+  },
+  "models": {
+    "pretrained": "/home/ykj/project/WM/giga-world-policy/.worktrees/dex1-right-measured-mem-20261021/../giga-world-policy-assets/Wan2.2-TI2V-5B-Diffusers",
+    "transformer_pretrained": "/home/ykj/project/WM/giga-world-policy/.worktrees/dex1-right-measured-mem-20261021/../giga-world-policy-assets/Giga-World-Policy-0.5",
+    "strict_load": false,
+    "transformer": {
+      "added_kv_proj_dim": null,
+      "attention_head_dim": 128,
+      "cross_attn_norm": true,
+      "eps": 1e-06,
+      "ffn_dim": 14336,
+      "freq_dim": 256,
+      "image_dim": null,
+      "in_channels": 48,
+      "num_attention_heads": 24,
+      "num_layers": 30,
+      "out_channels": 48,
+      "patch_size": [
+        1,
+        2,
+        2
+      ],
+      "pos_embed_seq_len": null,
+      "qk_norm": "rms_norm_across_heads",
+      "rope_max_seq_len": 1024,
+      "text_dim": 4096,
+      "action_expert_dim": 1024,
+      "action_ffn_dim": 4096,
+      "in_action_channels": 32,
+      "out_action_channels": 32,
+      "num_embodiments": 2
+    },
+    "visual_flow_shift": 2.0,
+    "action_flow_shift": 5.0,
+    "expand_timesteps": true,
+    "enable_gradient_checkpointing": false,
+    "skip_action_expert": false
+  },
+  "optimizers": {
+    "type": "CAME8Bit",
+    "lr": 6e-05,
+    "weight_decay": 0.01
+  },
+  "schedulers": {
+    "type": "ConstantScheduler"
+  },
+  "train": {
+    "resume": false,
+    "max_epochs": 0,
+    "max_steps": 50000,
+    "gradient_accumulation_steps": 1,
+    "mixed_precision": "bf16",
+    "checkpoint_interval": 5000,
+    "checkpoint_total_limit": -1,
+    "checkpoint_weights_only": false,
+    "checkpoint_safe_serialization": false,
+    "checkpoint_strict": false,
+    "log_with": null,
+    "log_interval": 20,
+    "with_ema": true,
+    "activation_checkpointing": false,
+    "activation_class_names": [
+      "WanAttention"
+    ]
+  },
+  "test": {}
+}
