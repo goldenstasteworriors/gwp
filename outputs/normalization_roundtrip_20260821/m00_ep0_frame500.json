@@ -1,0 +1,70 @@
+{
+  "audit": "training_transform_to_deployment_decoder_model_bypass",
+  "training_config": "/workspace/WM/giga-world-policy/outputs/sonic_cylinder_pour_m00_m12_motfix_armdelta_handabs_20260820/m00_baseline/config.json",
+  "dataset": "/workspace/WM/datasets/8_18_8_19_use_cylinder_1_left13_armdelta_handabs_v2",
+  "norm_stats": "/workspace/WM/datasets/8_18_8_19_use_cylinder_1_left13_armdelta_handabs_v2/norm_stats.json",
+  "episode": 0,
+  "frame": 500,
+  "sample_index_in_training_split": 500,
+  "action_horizon": 48,
+  "delta_mask": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "training_normalized_action_vs_formula": {
+    "rmse": 0.0,
+    "mean_abs": 0.0,
+    "max_abs": 0.0
+  },
+  "training_state_vs_deployment_state_tokens": {
+    "rmse": 0.0,
+    "mean_abs": 0.0,
+    "max_abs": 0.0
+  },
+  "decoded_vs_raw_action_all": {
+    "rmse": 1.232402890849471e-08,
+    "mean_abs": 3.620441946239339e-09,
+    "max_abs": 5.960464477539063e-08
+  },
+  "decoded_vs_raw_action_arm": {
+    "rmse": 1.6778660238969678e-08,
+    "mean_abs": 6.605183511254609e-09,
+    "max_abs": 5.960464477539063e-08
+  },
+  "decoded_vs_raw_action_hand": {
+    "rmse": 7.956230119177121e-10,
+    "mean_abs": 1.382431946694851e-10,
+    "max_abs": 5.587935447692871e-09
+  },
+  "normalization_clipped_entry_count": 0,
+  "normalization_total_physical_entries": 624,
+  "normalization_clipped_fraction": 0.0,
+  "per_dimension_max_abs_roundtrip_error": [
+    2.9802322387695312e-08,
+    0.0,
+    1.4901161193847656e-08,
+    0.0,
+    5.960464477539063e-08,
+    4.0978193283081055e-08,
+    2.9802322387695312e-08,
+    3.725290298461914e-09,
+    5.587935447692871e-09,
+    3.958120942115784e-09,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "roundtrip_is_exact_without_clipping": true,
+  "rollout": "/workspace/WM/giga-world-policy/outputs/normalization_roundtrip_20260821/m00_ep0_frame500.npz"
+}

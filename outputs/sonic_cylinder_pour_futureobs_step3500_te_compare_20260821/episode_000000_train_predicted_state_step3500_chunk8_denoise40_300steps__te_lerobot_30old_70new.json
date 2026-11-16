@@ -1,0 +1,16 @@
+{
+  "rollout": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_futureobs_step3500_te_compare_20260821/episode_000000_train_predicted_state_step3500_chunk8_denoise40_300steps__te_lerobot_30old_70new.npz",
+  "method": "lerobot_30old_70new",
+  "metrics": {
+    "steps": 300,
+    "boundaries": 37,
+    "step_l2_mean": 0.08290734887123108,
+    "step_l2_max": 0.5658118724822998,
+    "interior_step_l2_mean": 0.06969606131315231,
+    "boundary_step_l2_mean": 0.17681457102298737,
+    "boundary_step_l2_max": 0.5658118724822998,
+    "reference_rmse": 0.6079245209693909,
+    "arm_step_abs_mean": 0.01357398834079504,
+    "hand_step_abs_mean": 0.01952337473630905
+  }
+}

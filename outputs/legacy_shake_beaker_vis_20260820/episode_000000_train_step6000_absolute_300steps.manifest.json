@@ -1,0 +1,61 @@
+{
+  "format_version": 1,
+  "experiment": "legacy_absolute_48",
+  "transformer": "/workspace/WM/giga-world-policy/outputs/gwp0_5_sonic_g1_shake_beaker_success_left13_all_aug_gpu01_20260816_zero3_retry1/models/checkpoint_epoch_2_step_6000/transformer",
+  "base_model": "/workspace/WM/giga-world-policy/weights/Wan2.2-TI2V-5B-Diffusers",
+  "norm_stats": "/workspace/WM/datasets/8_14_shake_beaker_1_success_left13_all_v1/norm_stats.json",
+  "prompt_embedding": "/workspace/WM/datasets/8_14_shake_beaker_1_success_left13_all_v1/t5_embedding/episode_000000.pt",
+  "prompt": "shake the beaker",
+  "evaluation_dataset": "/workspace/WM/datasets/8_14_shake_beaker_1_success_left13_all_v1",
+  "evaluation_episodes": [
+    0
+  ],
+  "image_key": "observation.images.ego_view",
+  "image_frame_offsets": [
+    0,
+    12,
+    24,
+    36,
+    48
+  ],
+  "state_history_offsets": [
+    0
+  ],
+  "state_history_tokens": 1,
+  "visual_history_frames": 1,
+  "append_state_velocity_token": false,
+  "append_episode_progress_token": false,
+  "action_horizon": 48,
+  "model_image_frames": 5,
+  "physical_action_dim": 13,
+  "model_action_dim": 32,
+  "delta_mask": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "fps": 50,
+  "image_size": [
+    320,
+    384
+  ],
+  "num_inference_steps": 10,
+  "model_dtype": "bf16",
+  "action_flow_shift": 5.0,
+  "rollout_semantics": {
+    "reference_state_used_only_at_initialization": true,
+    "reference_images_used_at_every_step": true,
+    "left_arm_channels_0_7": "absolute_joint_target",
+    "left_inspire_channels_7_13": "absolute_command"
+  }
+}

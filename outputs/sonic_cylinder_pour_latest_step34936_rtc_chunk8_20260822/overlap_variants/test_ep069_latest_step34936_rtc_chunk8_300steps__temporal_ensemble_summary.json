@@ -1,0 +1,92 @@
+{
+  "baseline_direct_switch": {
+    "output": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_latest_step34936_rtc_chunk8_20260822/test_ep069_latest_step34936_rtc_chunk8_300steps.npz",
+    "metrics": {
+      "steps": 300,
+      "boundaries": 37,
+      "step_l2_mean": 0.04081171751022339,
+      "step_l2_max": 0.23709391057491302,
+      "interior_step_l2_mean": 0.03337620943784714,
+      "boundary_step_l2_mean": 0.09366414695978165,
+      "boundary_step_l2_max": 0.23709391057491302,
+      "reference_rmse": 0.15216125547885895,
+      "arm_step_abs_mean": 0.006985118612647057,
+      "hand_step_abs_mean": 0.008974521420896053
+    }
+  },
+  "lerobot_30old_70new": {
+    "output": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_latest_step34936_rtc_chunk8_20260822/overlap_variants/test_ep069_latest_step34936_rtc_chunk8_300steps__te_lerobot_30old_70new.npz",
+    "metrics": {
+      "steps": 300,
+      "boundaries": 37,
+      "step_l2_mean": 0.034692466259002686,
+      "step_l2_max": 0.20282667875289917,
+      "interior_step_l2_mean": 0.028200842440128326,
+      "boundary_step_l2_mean": 0.08083562552928925,
+      "boundary_step_l2_max": 0.20282667875289917,
+      "reference_rmse": 0.15576773881912231,
+      "arm_step_abs_mean": 0.005934033077210188,
+      "hand_step_abs_mean": 0.007441352121531963
+    }
+  },
+  "linear_ramp": {
+    "output": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_latest_step34936_rtc_chunk8_20260822/overlap_variants/test_ep069_latest_step34936_rtc_chunk8_300steps__te_linear_ramp.npz",
+    "metrics": {
+      "steps": 300,
+      "boundaries": 37,
+      "step_l2_mean": 0.03149218484759331,
+      "step_l2_max": 0.14485549926757812,
+      "interior_step_l2_mean": 0.0304823387414217,
+      "boundary_step_l2_mean": 0.03867030888795853,
+      "boundary_step_l2_max": 0.10952316224575043,
+      "reference_rmse": 0.15783171355724335,
+      "arm_step_abs_mean": 0.004974489565938711,
+      "hand_step_abs_mean": 0.007204624358564615
+    }
+  },
+  "cosine_ramp": {
+    "output": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_latest_step34936_rtc_chunk8_20260822/overlap_variants/test_ep069_latest_step34936_rtc_chunk8_300steps__te_cosine_ramp.npz",
+    "metrics": {
+      "steps": 300,
+      "boundaries": 37,
+      "step_l2_mean": 0.032319821417331696,
+      "step_l2_max": 0.157398983836174,
+      "interior_step_l2_mean": 0.031426407396793365,
+      "boundary_step_l2_mean": 0.03867030888795853,
+      "boundary_step_l2_max": 0.10952316224575043,
+      "reference_rmse": 0.15792079269886017,
+      "arm_step_abs_mean": 0.005069931037724018,
+      "hand_step_abs_mean": 0.007410384248942137
+    }
+  },
+  "act_exp": {
+    "output": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_latest_step34936_rtc_chunk8_20260822/overlap_variants/test_ep069_latest_step34936_rtc_chunk8_300steps__te_act_exp.npz",
+    "metrics": {
+      "steps": 300,
+      "boundaries": 37,
+      "step_l2_mean": 0.025061432272195816,
+      "step_l2_max": 0.22437390685081482,
+      "interior_step_l2_mean": 0.019790085032582283,
+      "boundary_step_l2_mean": 0.06253071874380112,
+      "boundary_step_l2_max": 0.22437390685081482,
+      "reference_rmse": 0.16849498450756073,
+      "arm_step_abs_mean": 0.004352211020886898,
+      "hand_step_abs_mean": 0.005204735789448023
+    }
+  },
+  "cogact_adaptive": {
+    "output": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_latest_step34936_rtc_chunk8_20260822/overlap_variants/test_ep069_latest_step34936_rtc_chunk8_300steps__te_cogact_adaptive.npz",
+    "metrics": {
+      "steps": 300,
+      "boundaries": 37,
+      "step_l2_mean": 0.024999599903821945,
+      "step_l2_max": 0.21901221573352814,
+      "interior_step_l2_mean": 0.019790533930063248,
+      "boundary_step_l2_mean": 0.062026217579841614,
+      "boundary_step_l2_max": 0.21901221573352814,
+      "reference_rmse": 0.16836892068386078,
+      "arm_step_abs_mean": 0.004341880325227976,
+      "hand_step_abs_mean": 0.005188950337469578
+    }
+  }
+}

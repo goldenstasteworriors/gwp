@@ -1,0 +1,16 @@
+{
+  "rollout": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_latest_step34936_rtc_chunk8_20260822/overlap_variants/train_ep000_latest_step34936_no_rtc_chunk8_300steps__te_lerobot_30old_70new.npz",
+  "method": "lerobot_30old_70new",
+  "metrics": {
+    "steps": 300,
+    "boundaries": 37,
+    "step_l2_mean": 0.03487437590956688,
+    "step_l2_max": 0.9931025505065918,
+    "interior_step_l2_mean": 0.021498190239071846,
+    "boundary_step_l2_mean": 0.12995374202728271,
+    "boundary_step_l2_max": 0.9931025505065918,
+    "reference_rmse": 0.06496105343103409,
+    "arm_step_abs_mean": 0.004552417900413275,
+    "hand_step_abs_mean": 0.009090774692595005
+  }
+}

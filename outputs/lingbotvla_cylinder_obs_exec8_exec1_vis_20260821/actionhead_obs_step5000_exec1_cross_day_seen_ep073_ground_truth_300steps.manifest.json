@@ -1,0 +1,47 @@
+{
+  "format_version": 1,
+  "experiment": "actionhead_obs_step5000_exec1",
+  "model": "/workspace/WM/lingbot-vla-v2/models/lingbot-vla-v2-6b",
+  "compact_checkpoint": "/workspace/WM/lingbot-vla-v2/output/cylinder_left_joint_8_18_8_19/action_head_only_obs_target_50000/checkpoints/global_step_5000/trainable_model.pt",
+  "non_action_checkpoint": null,
+  "prompt": "grab graduated cylinder and pour water into beaker",
+  "evaluation_dataset": "/workspace/WM/datasets/8_18_8_19_use_cylinder_1_left13_cylinder_v1",
+  "evaluation_episodes": [
+    73
+  ],
+  "split_label": "cross_day_seen",
+  "split_note": "cross-day episode seen during training; not a held-out test set",
+  "image_key": "observation.images.ego_view",
+  "action_horizon": 50,
+  "executed_steps_per_chunk": 1,
+  "physical_action_dim": 13,
+  "model_action_dim": 55,
+  "delta_mask": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "fps": 50.0,
+  "model_dtype": "bf16",
+  "rollout_semantics": {
+    "state_feedback": "ground_truth",
+    "reference_state_used_only_at_initialization": false,
+    "reference_state_used_at_every_replan": true,
+    "reference_images_used_at_every_replan": true,
+    "predicted_action_chunk_length": 50,
+    "executed_prefix_length": 1,
+    "left_arm_channels_0_7": "absolute_joint_target",
+    "left_inspire_channels_7_13": "absolute_joint_target",
+    "supervision_source": "future observation.state"
+  }
+}

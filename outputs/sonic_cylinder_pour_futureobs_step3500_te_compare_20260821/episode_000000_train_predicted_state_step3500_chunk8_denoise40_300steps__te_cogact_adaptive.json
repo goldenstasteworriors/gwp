@@ -1,0 +1,16 @@
+{
+  "rollout": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_futureobs_step3500_te_compare_20260821/episode_000000_train_predicted_state_step3500_chunk8_denoise40_300steps__te_cogact_adaptive.npz",
+  "method": "cogact_adaptive",
+  "metrics": {
+    "steps": 300,
+    "boundaries": 37,
+    "step_l2_mean": 0.05648403242230415,
+    "step_l2_max": 0.26610779762268066,
+    "interior_step_l2_mean": 0.04504213482141495,
+    "boundary_step_l2_mean": 0.13781426846981049,
+    "boundary_step_l2_max": 0.26610779762268066,
+    "reference_rmse": 0.5553974509239197,
+    "arm_step_abs_mean": 0.010270431637763977,
+    "hand_step_abs_mean": 0.012417095713317394
+  }
+}

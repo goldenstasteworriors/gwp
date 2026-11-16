@@ -1,0 +1,16 @@
+{
+  "rollout": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_latest_step34936_rtc_chunk8_20260822/overlap_variants/test_ep069_latest_step34936_no_rtc_chunk8_300steps__te_linear_ramp.npz",
+  "method": "linear_ramp",
+  "metrics": {
+    "steps": 300,
+    "boundaries": 37,
+    "step_l2_mean": 0.03440079838037491,
+    "step_l2_max": 0.19881296157836914,
+    "interior_step_l2_mean": 0.03330447897315025,
+    "boundary_step_l2_mean": 0.042193591594696045,
+    "boundary_step_l2_max": 0.18691962957382202,
+    "reference_rmse": 0.05551576614379883,
+    "arm_step_abs_mean": 0.00502963550388813,
+    "hand_step_abs_mean": 0.008127515204250813
+  }
+}

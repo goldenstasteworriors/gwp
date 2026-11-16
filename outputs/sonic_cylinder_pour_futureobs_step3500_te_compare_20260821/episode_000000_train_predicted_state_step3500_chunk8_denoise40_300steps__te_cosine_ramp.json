@@ -1,0 +1,16 @@
+{
+  "rollout": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_futureobs_step3500_te_compare_20260821/episode_000000_train_predicted_state_step3500_chunk8_denoise40_300steps__te_cosine_ramp.npz",
+  "method": "cosine_ramp",
+  "metrics": {
+    "steps": 300,
+    "boundaries": 37,
+    "step_l2_mean": 0.07534985989332199,
+    "step_l2_max": 0.23098064959049225,
+    "interior_step_l2_mean": 0.07377903908491135,
+    "boundary_step_l2_mean": 0.08651544153690338,
+    "boundary_step_l2_max": 0.23051393032073975,
+    "reference_rmse": 0.6059160232543945,
+    "arm_step_abs_mean": 0.01218214351683855,
+    "hand_step_abs_mean": 0.017258262261748314
+  }
+}

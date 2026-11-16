@@ -1,0 +1,27 @@
+{
+  "rollout": "/workspace/WM/giga-world-policy/outputs/sonic_cylinder_pour_futureobs_step3500_rollouts_20260821/episode_000069_test_predicted_state_step3500_chunk8_300steps.npz",
+  "manifest": "/workspace/WM/giga-world-policy/outputs/sonic_cylinder_pour_futureobs_step3500_rollouts_20260821/episode_000069_test_predicted_state_step3500_chunk8_300steps.manifest.json",
+  "checkpoint": "/workspace/WM/giga-world-policy/outputs/sonic_cylinder_pour_futureobs_step3500_rollouts_20260821/checkpoint_step3500_snapshot/transformer",
+  "experiment": "m00_baseline",
+  "dataset": "/workspace/WM/datasets/8_18_8_19_use_cylinder_1_left13_futureobs_armdelta_handabs_v3",
+  "episode": 69,
+  "start_frame": 0,
+  "end_frame_inclusive": 300,
+  "steps": 300,
+  "replans": 38,
+  "execution_steps": 8,
+  "replan_interval_seconds": 0.16,
+  "reference_fps": 50.000047683761295,
+  "state_feedback": "predicted",
+  "visual_input": "reference RGB at each chunk replan",
+  "left_arm": "relative delta integrated to absolute target by policy wrapper",
+  "left_inspire_hand": "predicted absolute command",
+  "mean_latency_seconds": 0.6323275053383488,
+  "arm_rmse_vs_reference": 0.6573978662490845,
+  "hand_rmse_vs_reference": 0.44615861773490906,
+  "max_abs_arm_delta": 0.21345561742782593,
+  "predicted_hand_range": [
+    -0.1364453136920929,
+    1.146140694618225
+  ]
+}

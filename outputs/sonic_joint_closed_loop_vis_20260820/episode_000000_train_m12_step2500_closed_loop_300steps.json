@@ -1,0 +1,24 @@
+{
+  "rollout": "/workspace/WM/giga-world-policy/outputs/sonic_cylinder_pour_m00_m12_motfix_armdelta_handabs_20260820/m12_short_horizon/simulation_rollouts/episode_000000_train_m12_step2500_closed_loop_300steps.npz",
+  "manifest": "/workspace/WM/giga-world-policy/outputs/sonic_cylinder_pour_m00_m12_motfix_armdelta_handabs_20260820/m12_short_horizon/simulation_rollouts/episode_000000_train_m12_step2500_closed_loop_300steps.manifest.json",
+  "checkpoint": "/workspace/WM/giga-world-policy/outputs/sonic_cylinder_pour_m00_m12_motfix_armdelta_handabs_20260820/m12_short_horizon/models/checkpoint_epoch_1_step_2500",
+  "experiment": "m12_short_horizon",
+  "dataset": "/workspace/WM/datasets/8_18_8_19_use_cylinder_1_left13_armdelta_handabs_v2",
+  "episode": 0,
+  "start_frame": 0,
+  "end_frame_inclusive": 300,
+  "steps": 300,
+  "reference_fps": 50.000047683761295,
+  "state_feedback": "predicted after initialization",
+  "visual_input": "reference RGB at every replan",
+  "left_arm": "predicted relative delta recursively integrated",
+  "left_inspire_hand": "predicted absolute command",
+  "mean_latency_seconds": 0.5519690213818103,
+  "arm_rmse_vs_reference": 6.891179084777832,
+  "hand_rmse_vs_reference": 0.5901184678077698,
+  "max_abs_arm_delta": 0.234130859375,
+  "predicted_hand_range": [
+    -0.16796875,
+    1.125
+  ]
+}

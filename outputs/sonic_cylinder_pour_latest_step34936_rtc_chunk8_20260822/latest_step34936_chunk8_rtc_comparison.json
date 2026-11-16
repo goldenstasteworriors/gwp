@@ -1,0 +1,102 @@
+{
+  "checkpoint": "step34936 inference_model",
+  "execution_steps": 8,
+  "state_feedback": "ground_truth",
+  "num_steps": 300,
+  "comparisons": {
+    "train": {
+      "no_rtc": {
+        "arm_rmse": 0.015379947610199451,
+        "hand_rmse": 0.08003988116979599,
+        "latency_seconds": 0.6021221085132933,
+        "chunk_internal_velocity_l2_mean": 0.028944707724458677,
+        "chunk_internal_acceleration_l2_mean": 0.04559936782586629,
+        "chunk_overlap_disagreement_l2_mean": 0.2936017895258955,
+        "chunk_boundary_plan_disagreement_l2_mean": 0.15965271653287416,
+        "executed_velocity_l2_mean": 0.04286052128438227,
+        "executed_acceleration_l2_mean": 0.0722000181928679,
+        "hand_range": {
+          "min": -0.02734375,
+          "max": 0.9990392923355103,
+          "outside_0_1_values": 24,
+          "outside_0_1_frames": 14
+        }
+      },
+      "rtc": {
+        "arm_rmse": 0.01974964514374733,
+        "hand_rmse": 0.17455260455608368,
+        "latency_seconds": 1.2314844526178939,
+        "chunk_internal_velocity_l2_mean": 0.028984636838892863,
+        "chunk_internal_acceleration_l2_mean": 0.04410512980460879,
+        "chunk_overlap_disagreement_l2_mean": 0.18635890615272266,
+        "chunk_boundary_plan_disagreement_l2_mean": 0.11398920279110077,
+        "executed_velocity_l2_mean": 0.033869543471758176,
+        "executed_acceleration_l2_mean": 0.05396167885610032,
+        "hand_range": {
+          "min": 0.0,
+          "max": 1.01953125,
+          "outside_0_1_values": 69,
+          "outside_0_1_frames": 55
+        }
+      },
+      "rtc_reduction_percent_positive_is_improvement": {
+        "arm_rmse": -28.411654215584228,
+        "hand_rmse": -118.08203860996386,
+        "latency_seconds": -104.52403843110271,
+        "chunk_internal_velocity_l2_mean": -0.13794962040830955,
+        "chunk_internal_acceleration_l2_mean": 3.2768831948803676,
+        "chunk_overlap_disagreement_l2_mean": 36.526644999796254,
+        "chunk_boundary_plan_disagreement_l2_mean": 28.60177686508128,
+        "executed_velocity_l2_mean": 20.977294589975678,
+        "executed_acceleration_l2_mean": 25.260851441958796
+      }
+    },
+    "test": {
+      "no_rtc": {
+        "arm_rmse": 0.02199407108128071,
+        "hand_rmse": 0.06315729022026062,
+        "latency_seconds": 0.5937866100698317,
+        "chunk_internal_velocity_l2_mean": 0.039643661941238376,
+        "chunk_internal_acceleration_l2_mean": 0.061280329968747306,
+        "chunk_overlap_disagreement_l2_mean": 0.2510008938609312,
+        "chunk_boundary_plan_disagreement_l2_mean": 0.15165913527123448,
+        "executed_velocity_l2_mean": 0.04915985174752629,
+        "executed_acceleration_l2_mean": 0.07776606819411212,
+        "hand_range": {
+          "min": -0.04296875,
+          "max": 1.0000859498977661,
+          "outside_0_1_values": 183,
+          "outside_0_1_frames": 124
+        }
+      },
+      "rtc": {
+        "arm_rmse": 0.026071328669786453,
+        "hand_rmse": 0.22219796478748322,
+        "latency_seconds": 1.2218318425216956,
+        "chunk_internal_velocity_l2_mean": 0.036421319348809114,
+        "chunk_internal_acceleration_l2_mean": 0.05763374845783959,
+        "chunk_overlap_disagreement_l2_mean": 0.140234227644951,
+        "chunk_boundary_plan_disagreement_l2_mean": 0.09781062698137592,
+        "executed_velocity_l2_mean": 0.04081171904945809,
+        "executed_acceleration_l2_mean": 0.06453113535389322,
+        "hand_range": {
+          "min": -0.05078125,
+          "max": 1.021390676498413,
+          "outside_0_1_values": 311,
+          "outside_0_1_frames": 173
+        }
+      },
+      "rtc_reduction_percent_positive_is_improvement": {
+        "arm_rmse": -18.537984957118397,
+        "hand_rmse": -251.81681166587313,
+        "latency_seconds": -105.7695175002352,
+        "chunk_internal_velocity_l2_mean": 8.12826675095142,
+        "chunk_internal_acceleration_l2_mean": 5.950655802224719,
+        "chunk_overlap_disagreement_l2_mean": 44.12998874711229,
+        "chunk_boundary_plan_disagreement_l2_mean": 35.50627411501015,
+        "executed_velocity_l2_mean": 16.981606740684033,
+        "executed_acceleration_l2_mean": 17.0189044496671
+      }
+    }
+  }
+}

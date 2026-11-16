@@ -1,0 +1,24 @@
+{
+  "rollout": "/workspace/WM/giga-world-policy/outputs/legacy_shake_beaker_simulation_rollouts_20260820/episode_000000_train_step6000_absolute_300steps.npz",
+  "manifest": "/workspace/WM/giga-world-policy/outputs/legacy_shake_beaker_simulation_rollouts_20260820/episode_000000_train_step6000_absolute_300steps.manifest.json",
+  "checkpoint": "/workspace/WM/giga-world-policy/outputs/gwp0_5_sonic_g1_shake_beaker_success_left13_all_aug_gpu01_20260816_zero3_retry1/models/checkpoint_epoch_2_step_6000",
+  "experiment": "legacy_absolute_48",
+  "dataset": "/workspace/WM/datasets/8_14_shake_beaker_1_success_left13_all_v1",
+  "episode": 0,
+  "start_frame": 0,
+  "end_frame_inclusive": 300,
+  "steps": 300,
+  "reference_fps": 49.99885561701316,
+  "state_feedback": "predicted after initialization",
+  "visual_input": "reference RGB at every replan",
+  "left_arm": "absolute_joint_target",
+  "left_inspire_hand": "predicted absolute command",
+  "mean_latency_seconds": 0.5535976239216204,
+  "arm_rmse_vs_reference": 0.18769250810146332,
+  "hand_rmse_vs_reference": 0.06716164201498032,
+  "max_abs_arm_delta": 0.22928261756896973,
+  "predicted_hand_range": [
+    0.6953125,
+    1.078125
+  ]
+}

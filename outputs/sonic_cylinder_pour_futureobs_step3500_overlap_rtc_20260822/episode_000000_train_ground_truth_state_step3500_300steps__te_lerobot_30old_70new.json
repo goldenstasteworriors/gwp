@@ -1,0 +1,16 @@
+{
+  "rollout": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_futureobs_step3500_overlap_rtc_20260822/episode_000000_train_ground_truth_state_step3500_300steps__te_lerobot_30old_70new.npz",
+  "method": "lerobot_30old_70new",
+  "metrics": {
+    "steps": 300,
+    "boundaries": 299,
+    "step_l2_mean": 0.13180992007255554,
+    "step_l2_max": 0.3823142647743225,
+    "interior_step_l2_mean": 0.17059242725372314,
+    "boundary_step_l2_mean": 0.1316802054643631,
+    "boundary_step_l2_max": 0.3823142647743225,
+    "reference_rmse": 0.053269222378730774,
+    "arm_step_abs_mean": 0.025030935183167458,
+    "hand_step_abs_mean": 0.028596846386790276
+  }
+}

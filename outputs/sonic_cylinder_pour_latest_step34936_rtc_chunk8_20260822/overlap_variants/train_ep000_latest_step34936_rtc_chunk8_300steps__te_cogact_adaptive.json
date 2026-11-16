@@ -1,0 +1,16 @@
+{
+  "rollout": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_latest_step34936_rtc_chunk8_20260822/overlap_variants/train_ep000_latest_step34936_rtc_chunk8_300steps__te_cogact_adaptive.npz",
+  "method": "cogact_adaptive",
+  "metrics": {
+    "steps": 300,
+    "boundaries": 37,
+    "step_l2_mean": 0.01935487426817417,
+    "step_l2_max": 0.18928661942481995,
+    "interior_step_l2_mean": 0.013799350708723068,
+    "boundary_step_l2_mean": 0.05884412303566933,
+    "boundary_step_l2_max": 0.18928661942481995,
+    "reference_rmse": 0.13984613120555878,
+    "arm_step_abs_mean": 0.0032928308937698603,
+    "hand_step_abs_mean": 0.004360557533800602
+  }
+}

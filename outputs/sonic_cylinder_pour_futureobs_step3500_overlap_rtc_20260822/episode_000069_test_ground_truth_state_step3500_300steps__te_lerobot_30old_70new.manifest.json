@@ -1,0 +1,81 @@
+{
+  "format_version": 1,
+  "experiment": "m00_baseline",
+  "transformer": "/workspace/WM/giga-world-policy/outputs/sonic_cylinder_pour_futureobs_step3500_rollouts_20260821/checkpoint_step3500_snapshot/transformer",
+  "base_model": "/workspace/WM/giga-world-policy/weights/Wan2.2-TI2V-5B-Diffusers",
+  "norm_stats": "/workspace/WM/datasets/8_18_8_19_use_cylinder_1_left13_futureobs_armdelta_handabs_v3/norm_stats.json",
+  "prompt_embedding": "/workspace/WM/datasets/8_18_8_19_use_cylinder_1_left13_futureobs_armdelta_handabs_v3/t5_embedding/episode_000000.pt",
+  "prompt": "grab graduated cylinder and pour water into beaker",
+  "evaluation_dataset": "/workspace/WM/datasets/8_18_8_19_use_cylinder_1_left13_futureobs_armdelta_handabs_v3",
+  "evaluation_episodes": [
+    69
+  ],
+  "image_key": "observation.images.ego_view",
+  "image_frame_offsets": [
+    0,
+    12,
+    24,
+    36,
+    48
+  ],
+  "state_history_offsets": [
+    0
+  ],
+  "state_history_tokens": 1,
+  "visual_history_frames": 1,
+  "append_state_velocity_token": false,
+  "append_episode_progress_token": false,
+  "action_horizon": 48,
+  "model_image_frames": 5,
+  "physical_action_dim": 13,
+  "model_action_dim": 32,
+  "delta_mask": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "fps": 50,
+  "image_size": [
+    320,
+    384
+  ],
+  "num_inference_steps": 10,
+  "execution_steps": 1,
+  "replan_interval_seconds": 0.02,
+  "state_feedback": "ground_truth",
+  "model_dtype": "bf16",
+  "action_flow_shift": 5.0,
+  "rollout_semantics": {
+    "state_feedback": "ground_truth",
+    "reference_state_used_only_at_initialization": false,
+    "reference_state_used_at_every_replan": true,
+    "reference_images_used_at_every_replan": true,
+    "full_action_chunk_predicted_at_every_replan": true,
+    "executed_prefix_steps_per_chunk": 1,
+    "left_arm_channels_0_7": "relative_delta_integrated_to_absolute_joint_target",
+    "left_arm_integration_state": "ground_truth",
+    "left_inspire_channels_7_13": "absolute_command"
+  },
+  "postprocess": {
+    "type": "offline_temporal_ensemble",
+    "method": "lerobot_30old_70new",
+    "source_rollout": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/sonic_cylinder_pour_futureobs_step3500_rollouts_20260821/episode_000069_test_ground_truth_state_step3500_300steps.npz",
+    "counterfactual_only": true,
+    "note": "Saved chunks were inferred from the original rollout states. For predicted-state feedback this isolates action smoothing but is not a re-inferred closed-loop rollout.",
+    "act_k": 0.01,
+    "cogact_alpha": 0.1,
+    "cogact_history": 8,
+    "ramp_new_start": 0.2,
+    "ramp_new_end": 0.9
+  }
+}

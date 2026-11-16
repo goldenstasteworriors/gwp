@@ -1,0 +1,85 @@
+{
+  "rollout": "/workspace/WM/giga-world-policy/outputs/sonic_cylinder_pour_futureobs_latest_step34936_rtc_eval_20260822/train_ep000_latest_step34936_rtc_chunk8_300steps.npz",
+  "manifest": "/workspace/WM/giga-world-policy/outputs/sonic_cylinder_pour_futureobs_latest_step34936_rtc_eval_20260822/train_ep000_latest_step34936_rtc_chunk8_300steps.manifest.json",
+  "checkpoint": "/workspace/WM/giga-world-policy/outputs/sonic_cylinder_pour_m00_futureobs_20260821/m00_baseline/inference_model/transformer",
+  "experiment": "m00_baseline",
+  "dataset": "/workspace/WM/datasets/8_18_8_19_use_cylinder_1_left13_futureobs_armdelta_handabs_v3",
+  "episode": 0,
+  "start_frame": 0,
+  "end_frame_inclusive": 300,
+  "steps": 300,
+  "replans": 38,
+  "execution_steps": 8,
+  "replan_interval_seconds": 0.16,
+  "reference_fps": 50.000047683761295,
+  "state_feedback": "ground_truth",
+  "rtc": {
+    "enabled": true,
+    "execution_horizon": 8,
+    "inference_delay": 0,
+    "max_guidance_weight": 5.0,
+    "prefix_schedule": "exp"
+  },
+  "visual_input": "reference RGB at each chunk replan",
+  "left_arm": "relative delta integrated to absolute target by policy wrapper",
+  "left_inspire_hand": "predicted absolute command",
+  "mean_latency_seconds": 1.2314844526178939,
+  "arm_rmse_vs_reference": 0.01974964514374733,
+  "hand_rmse_vs_reference": 0.17455260455608368,
+  "max_abs_arm_delta": 0.07231270521879196,
+  "predicted_hand_range": [
+    0.0,
+    1.01953125
+  ],
+  "jitter_metrics": {
+    "units": "per 50-Hz step: arm channels are joint radians and hand channels are normalized DDS commands; L2 mixes all 13 output channels",
+    "chunk_internal_velocity": {
+      "l2_mean": 0.028984636838892863,
+      "l2_max": 0.31814321881080687,
+      "arm_abs_mean": 0.0042547045144441095,
+      "hand_abs_mean": 0.007080788052835185
+    },
+    "chunk_internal_acceleration": {
+      "l2_mean": 0.04410512980460879,
+      "l2_max": 0.5948196968929519,
+      "arm_abs_mean": 0.006163554082547892,
+      "hand_abs_mean": 0.011042813482764657
+    },
+    "chunk_overlap_disagreement": {
+      "l2_mean": 0.18635890615272266,
+      "l2_max": 1.3636473553233588,
+      "arm_abs_mean": 0.03419750096492378,
+      "hand_abs_mean": 0.03919704975560308
+    },
+    "chunk_boundary_plan_disagreement": {
+      "l2_mean": 0.11398920279110077,
+      "l2_max": 0.776645047475793,
+      "arm_abs_mean": 0.017851653077790665,
+      "hand_abs_mean": 0.02740642817707749
+    },
+    "executed_velocity": {
+      "l2_mean": 0.033869543471758176,
+      "l2_max": 0.7198951458993892,
+      "arm_abs_mean": 0.004997246346624923,
+      "hand_abs_mean": 0.008310176498360104
+    },
+    "executed_acceleration": {
+      "l2_mean": 0.05396167885610032,
+      "l2_max": 0.8109448130799947,
+      "arm_abs_mean": 0.007606202569243761,
+      "hand_abs_mean": 0.01344254152764179
+    },
+    "reference_velocity": {
+      "l2_mean": 0.010768152129345468,
+      "l2_max": 0.22410957662963799,
+      "arm_abs_mean": 0.0009123420537660076,
+      "hand_abs_mean": 0.0022305555866074024
+    },
+    "reference_acceleration": {
+      "l2_mean": 0.012593732854716263,
+      "l2_max": 0.22410937828015084,
+      "arm_abs_mean": 0.00040533983429410613,
+      "hand_abs_mean": 0.0032954293180806325
+    }
+  }
+}

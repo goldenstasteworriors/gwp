@@ -1,0 +1,13 @@
+{
+  "rollout": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/lingbotvla_cylinder_obs_denoise40_exact_exec8_vis_20260821/full_obs_step4000_denoise40exact_exec8_cross_day_seen_ep073_predicted_300steps.npz",
+  "video": "/home/ykj/project/WM/giga-world-policy-history-experiments/outputs/lingbotvla_cylinder_obs_denoise40_exact_exec8_vis_20260821/full_obs_step4000_denoise40exact_exec8_cross_day_seen_ep073_predicted_300steps_mujoco.mp4",
+  "model_xml": "/home/ykj/project/SONICMJ/GR00T-WholeBodyControl/decoupled_wbc/control/robot_model/model_data/g1/scene_29dof_inspire.xml",
+  "frames": 301,
+  "render_frames": 181,
+  "duration_seconds": 6.0,
+  "right_inspire_hidden": true,
+  "left_arm_action_semantics": "absolute_joint_target",
+  "state_feedback": "predicted",
+  "arm_limit_clip_events": 0,
+  "hand_range_clip_events": 287
+}

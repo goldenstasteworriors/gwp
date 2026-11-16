@@ -1,0 +1,37 @@
+{
+  "format_version": 1,
+  "audit": "training_transform_to_deployment_decoder_model_bypass",
+  "experiment": "m00_training_normalization_roundtrip",
+  "transformer": null,
+  "norm_stats": "/workspace/WM/datasets/8_18_8_19_use_cylinder_1_left13_armdelta_handabs_v2/norm_stats.json",
+  "evaluation_dataset": "/workspace/WM/datasets/8_18_8_19_use_cylinder_1_left13_armdelta_handabs_v2",
+  "evaluation_episodes": [
+    0
+  ],
+  "action_horizon": 48,
+  "physical_action_dim": 13,
+  "model_action_dim": 32,
+  "delta_mask": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "fps": 50,
+  "rollout_semantics": {
+    "model_bypassed": true,
+    "left_arm_channels_0_7": "training_delta_target_decoded_by_deployment_then_integrated",
+    "left_inspire_channels_7_13": "training_absolute_target_decoded_by_deployment",
+    "predicted_state": "deployment-decoded training target",
+    "reference_state": "raw dataset action target"
+  }
+}

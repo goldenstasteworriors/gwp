@@ -1,0 +1,246 @@
+{
+  "description": "step3500, 300 steps, 50 Hz, execution_steps=1; overlap RTC = 0.3 previous + 0.7 newest prediction",
+  "units": "per 50-Hz step: arm channels are joint radians and hand channels are normalized DDS commands; L2 mixes all 13 output channels",
+  "sets": {
+    "train": {
+      "without_rtc": {
+        "chunk_internal_velocity": {
+          "l2_mean": 0.10096431876201967,
+          "l2_max": 0.9926661289588335,
+          "arm_abs_mean": 0.019166634484180538,
+          "hand_abs_mean": 0.02059278464248078
+        },
+        "chunk_internal_acceleration": {
+          "l2_mean": 0.17396180930951885,
+          "l2_max": 1.9682380641128865,
+          "arm_abs_mean": 0.03303806061580595,
+          "hand_abs_mean": 0.03537604812439025
+        },
+        "chunk_overlap_disagreement": {
+          "l2_mean": 0.31658436829109143,
+          "l2_max": 1.761055844209832,
+          "arm_abs_mean": 0.058995895049040875,
+          "hand_abs_mean": 0.06909337356926243
+        },
+        "chunk_boundary_plan_disagreement": {
+          "l2_mean": 0.204560418804096,
+          "l2_max": 0.5836590407195388,
+          "arm_abs_mean": 0.03881411680832018,
+          "hand_abs_mean": 0.044506278474853604
+        },
+        "executed_velocity": {
+          "l2_mean": 0.20636059829089237,
+          "l2_max": 0.5371550919007537,
+          "arm_abs_mean": 0.03958796532625066,
+          "hand_abs_mean": 0.04451431951278614
+        },
+        "executed_acceleration": {
+          "l2_mean": 0.35987650891789774,
+          "l2_max": 0.8007823512237697,
+          "arm_abs_mean": 0.06950217823249212,
+          "hand_abs_mean": 0.07744261805890097
+        },
+        "reference_velocity": {
+          "l2_mean": 0.010768152121259119,
+          "l2_max": 0.22410957662963799,
+          "arm_abs_mean": 0.0009123420537937256,
+          "hand_abs_mean": 0.002230555585313899
+        },
+        "reference_acceleration": {
+          "l2_mean": 0.01259373283878972,
+          "l2_max": 0.22410937828015084,
+          "arm_abs_mean": 0.0004053398341828636,
+          "hand_abs_mean": 0.0032954293155498643
+        },
+        "reference_rmse": 0.05960011464770558
+      },
+      "overlap_rtc": {
+        "chunk_internal_velocity": {
+          "l2_mean": 0.10096431876201967,
+          "l2_max": 0.9926661289588335,
+          "arm_abs_mean": 0.019166634484180538,
+          "hand_abs_mean": 0.02059278464248078
+        },
+        "chunk_internal_acceleration": {
+          "l2_mean": 0.17396180930951885,
+          "l2_max": 1.9682380641128865,
+          "arm_abs_mean": 0.03303806061580595,
+          "hand_abs_mean": 0.03537604812439025
+        },
+        "chunk_overlap_disagreement": {
+          "l2_mean": 0.31658436829109143,
+          "l2_max": 1.761055844209832,
+          "arm_abs_mean": 0.058995895049040875,
+          "hand_abs_mean": 0.06909337356926243
+        },
+        "chunk_boundary_plan_disagreement": {
+          "l2_mean": 0.204560418804096,
+          "l2_max": 0.5836590407195388,
+          "arm_abs_mean": 0.03881411680832018,
+          "hand_abs_mean": 0.044506278474853604
+        },
+        "executed_velocity": {
+          "l2_mean": 0.13180991724749164,
+          "l2_max": 0.3823142401275766,
+          "arm_abs_mean": 0.025030935523930004,
+          "hand_abs_mean": 0.028596846332204426
+        },
+        "executed_acceleration": {
+          "l2_mean": 0.2112704894596269,
+          "l2_max": 0.563747243678172,
+          "arm_abs_mean": 0.04056754598178407,
+          "hand_abs_mean": 0.044920119983087
+        },
+        "reference_velocity": {
+          "l2_mean": 0.010768152121259119,
+          "l2_max": 0.22410957662963799,
+          "arm_abs_mean": 0.0009123420537937256,
+          "hand_abs_mean": 0.002230555585313899
+        },
+        "reference_acceleration": {
+          "l2_mean": 0.01259373283878972,
+          "l2_max": 0.22410937828015084,
+          "arm_abs_mean": 0.0004053398341828636,
+          "hand_abs_mean": 0.0032954293155498643
+        },
+        "reference_rmse": 0.05326922579900902
+      },
+      "rtc_reduction_percent": {
+        "executed_velocity": {
+          "l2_mean": 36.126412532644316,
+          "l2_max": 28.826097733759536,
+          "arm_abs_mean": 36.77135129919884,
+          "hand_abs_mean": 35.758096169502565
+        },
+        "executed_acceleration": {
+          "l2_mean": 41.293614830573404,
+          "l2_max": 29.60044101663286,
+          "arm_abs_mean": 41.631259604438085,
+          "hand_abs_mean": 41.99560770411732
+        },
+        "reference_rmse_percent": 10.622276292786086
+      },
+      "raw_chunk_note": "identical because overlap RTC postprocess preserves source action_chunks and only changes executed trajectory"
+    },
+    "test": {
+      "without_rtc": {
+        "chunk_internal_velocity": {
+          "l2_mean": 0.09983702598734437,
+          "l2_max": 0.9929515562883695,
+          "arm_abs_mean": 0.01871265857619174,
+          "hand_abs_mean": 0.020624206278277185
+        },
+        "chunk_internal_acceleration": {
+          "l2_mean": 0.16875127877858837,
+          "l2_max": 1.977430047862328,
+          "arm_abs_mean": 0.03216171291852505,
+          "hand_abs_mean": 0.03426123673652787
+        },
+        "chunk_overlap_disagreement": {
+          "l2_mean": 0.29705463113957825,
+          "l2_max": 1.548407357698057,
+          "arm_abs_mean": 0.059453079366221254,
+          "hand_abs_mean": 0.05915632872437075
+        },
+        "chunk_boundary_plan_disagreement": {
+          "l2_mean": 0.21576556698296998,
+          "l2_max": 0.7073197511721332,
+          "arm_abs_mean": 0.039091654294969164,
+          "hand_abs_mean": 0.0484127661216134
+        },
+        "executed_velocity": {
+          "l2_mean": 0.21883039471016033,
+          "l2_max": 0.7265801178069495,
+          "arm_abs_mean": 0.0404514254594133,
+          "hand_abs_mean": 0.04811945411092084
+        },
+        "executed_acceleration": {
+          "l2_mean": 0.38346883710571317,
+          "l2_max": 1.3408838404843004,
+          "arm_abs_mean": 0.07111720767493346,
+          "hand_abs_mean": 0.08504599300882838
+        },
+        "reference_velocity": {
+          "l2_mean": 0.01604639541577262,
+          "l2_max": 0.20927910996004934,
+          "arm_abs_mean": 0.0024328774923369997,
+          "hand_abs_mean": 0.0022383333769135385
+        },
+        "reference_acceleration": {
+          "l2_mean": 0.016979632206360163,
+          "l2_max": 0.2092778654294428,
+          "arm_abs_mean": 0.0013008126541811972,
+          "hand_abs_mean": 0.0036365663938519185
+        },
+        "reference_rmse": 0.07828668948685207
+      },
+      "overlap_rtc": {
+        "chunk_internal_velocity": {
+          "l2_mean": 0.09983702598734437,
+          "l2_max": 0.9929515562883695,
+          "arm_abs_mean": 0.01871265857619174,
+          "hand_abs_mean": 0.020624206278277185
+        },
+        "chunk_internal_acceleration": {
+          "l2_mean": 0.16875127877858837,
+          "l2_max": 1.977430047862328,
+          "arm_abs_mean": 0.03216171291852505,
+          "hand_abs_mean": 0.03426123673652787
+        },
+        "chunk_overlap_disagreement": {
+          "l2_mean": 0.29705463113957825,
+          "l2_max": 1.548407357698057,
+          "arm_abs_mean": 0.059453079366221254,
+          "hand_abs_mean": 0.05915632872437075
+        },
+        "chunk_boundary_plan_disagreement": {
+          "l2_mean": 0.21576556698296998,
+          "l2_max": 0.7073197511721332,
+          "arm_abs_mean": 0.039091654294969164,
+          "hand_abs_mean": 0.0484127661216134
+        },
+        "executed_velocity": {
+          "l2_mean": 0.14111915857836904,
+          "l2_max": 0.47332281867737863,
+          "arm_abs_mean": 0.0261740782779331,
+          "hand_abs_mean": 0.031059550726268856
+        },
+        "executed_acceleration": {
+          "l2_mean": 0.22876964694529675,
+          "l2_max": 0.6876177023563179,
+          "arm_abs_mean": 0.04274199678256887,
+          "hand_abs_mean": 0.05004250404706335
+        },
+        "reference_velocity": {
+          "l2_mean": 0.01604639541577262,
+          "l2_max": 0.20927910996004934,
+          "arm_abs_mean": 0.0024328774923369997,
+          "hand_abs_mean": 0.0022383333769135385
+        },
+        "reference_acceleration": {
+          "l2_mean": 0.016979632206360163,
+          "l2_max": 0.2092778654294428,
+          "arm_abs_mean": 0.0013008126541811972,
+          "hand_abs_mean": 0.0036365663938519185
+        },
+        "reference_rmse": 0.07123022240469398
+      },
+      "rtc_reduction_percent": {
+        "executed_velocity": {
+          "l2_mean": 35.512085162904086,
+          "l2_max": 34.8560733940783,
+          "arm_abs_mean": 35.29504095178374,
+          "hand_abs_mean": 35.45323549458179
+        },
+        "executed_acceleration": {
+          "l2_mean": 40.342050041935885,
+          "l2_max": 48.71907009424738,
+          "arm_abs_mean": 39.89921964043302,
+          "hand_abs_mean": 41.1583047282797
+        },
+        "reference_rmse_percent": 9.013623041683463
+      },
+      "raw_chunk_note": "identical because overlap RTC postprocess preserves source action_chunks and only changes executed trajectory"
+    }
+  }
+}
